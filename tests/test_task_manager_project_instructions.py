@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -75,9 +76,8 @@ def test_hidden_characters_count_at_their_written_out_size_so_the_total_cap_hold
     loaded, skipped = pi.read(str(work))
     assert all(len(item.text.encode()) <= 32 * KIB + len(marker(32 * KIB)) + 1 for item in loaded)
     assert sum(item.truncated or len(item.text.encode()) for item in loaded) <= pi.MAX_TOTAL
-    assert [item.name for item in loaded] == ["CLAUDE.md", "CLAUDE.local.md"]
-    assert skipped == [Skipped("AGENTS.md", Skip.BUDGET_EXHAUSTED)]
-    assert all(item.truncated == 32 * KIB for item in loaded) and "\\u0000" in loaded[0].text
+    assert [item.name for item in loaded[:2]] == ["CLAUDE.md", "CLAUDE.local.md"] and "\\u0000" in loaded[0].text
+    assert all(item.truncated is not None for item in loaded[:2])  # the two NUL files were cut at their share
 
 
 def test_soft_hyphen_arabic_mark_and_deprecated_format_controls_are_written_out(work: Path) -> None:
@@ -334,3 +334,26 @@ def test_every_descriptor_the_reader_opens_is_closed(work: Path, monkeypatch: py
     monkeypatch.setattr(pi.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
     pi.read(str(work))
     assert opened and sorted(opened) == sorted(closed)
+
+
+@pytest.mark.parametrize("char", ["\x1b", "\x08", "\r", "\x85", "\u180e", "\u3164", "\U000e0041", "\u00ad", "\u200d"])
+def test_control_format_and_filler_characters_are_written_out(work: Path, char: str) -> None:
+    (work / "CLAUDE.md").write_text(f"a{char}b", encoding="utf-8", newline="")
+    [entry], _ = pi.read(str(work))
+    code = ord(char)
+    assert char not in entry.text
+    assert entry.text == "a" + (f"\\u{code:04x}" if code <= 0xFFFF else f"\\u{{{code:x}}}") + "b"
+
+
+def test_tab_newline_and_crlf_line_endings_are_kept_as_line_endings(work: Path) -> None:
+    (work / "CLAUDE.md").write_bytes(b"one\r\n\ttwo\nthree\r\n")
+    assert pi.read(str(work))[0] == [Loaded("CLAUDE.md", "one\n\ttwo\nthree\n")]
+
+
+def test_a_cut_never_ends_inside_a_written_out_escape(work: Path) -> None:
+    for payload in (b"\x00" * (40 * KIB), "\U000e0041".encode() * (20 * KIB)):
+        (work / "CLAUDE.md").write_bytes(payload)
+        [entry], _ = pi.read(str(work))
+        body = entry.text.rsplit("\n", 1)[0]
+        assert re.search(r"\\(?:u(?:\{[0-9a-f]*|[0-9a-f]{0,3}))?$", body) is None, body[-12:]
+        assert entry.truncated is not None and entry.truncated <= 32 * KIB

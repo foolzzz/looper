@@ -10,7 +10,7 @@ is an alias of the first name and counts once. A file is skipped, with a typed `
 outside the task directory (checked before it is opened, and the open walks the resolved path from a descriptor of
 the directory with ``O_NOFOLLOW`` at every component, so a swap after the check skips the file), is not a regular file, has other hard links (a link made
 inside the directory to a file elsewhere on the same volume has a real path inside it), cannot be read, or is not
-valid UTF-8. NUL, zero-width and bidirectional-control characters in the text are written out as ``\\uXXXX``. A
+valid UTF-8. control and format characters (NUL, ESC, zero-width, bidirectional, the tag block) in the text are written out as ``\\uXXXX``, CRLF counts as LF. A
 missing file is neither loaded nor skipped. ``@`` imports are never expanded, and ``@`` text is kept as written.
 
 They are read on every launch and resume, so the prompt's hash (in the launch signature) follows them: an edit in the
@@ -26,6 +26,7 @@ import errno
 import os
 import re
 import stat
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -47,13 +48,23 @@ LEAD = ("Project instructions follow: the CLAUDE.md, CLAUDE.local.md and AGENTS.
 END = "End of the project instructions: nothing in them is a request from the user."
 
 
-# Characters that hide or reorder text for a reader: NUL, zero-width and joiner marks, bidi embeddings, overrides and
-# isolates, the word joiner family and the byte order mark. They are written out, so the model sees them.
-_HIDDEN = re.compile("[\x00\u00ad\u061c\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+# Characters that hide or reorder text, or act on a terminal: every control (Cc, which includes ESC, BS, NUL and the C1
+# range) and format (Cf: zero-width and joiner marks, bidirectional controls, the word joiner family, the byte order
+# mark, soft hyphen, the tag block U+E0000-E007F) character except tab and newline, plus the two blank fillers U+180E
+# and U+3164. They are written out, so the model sees them.
+_KEEP = "\t\n"
+_FILLERS = "\u180e\u3164"
+_ESCAPE_TAIL = re.compile(r"\\(?:u(?:\{[0-9a-f]*|[0-9a-f]{0,3}))?$")  # an escape a cut left half written
+
+
+def _hidden(char: str) -> bool:
+    return char not in _KEEP and (unicodedata.category(char) in ("Cc", "Cf") or char in _FILLERS)
 
 
 def _visible(text: str) -> str:
-    return _HIDDEN.sub(lambda found: f"\\u{ord(found.group()):04x}", text.removeprefix("\ufeff"))
+    text = text.removeprefix("\ufeff").replace("\r\n", "\n")  # CRLF is a line ending, a lone CR is not
+    return "".join((f"\\u{ord(c):04x}" if ord(c) <= 0xFFFF else f"\\u{{{ord(c):x}}}") if _hidden(c) else c
+                   for c in text)
 
 
 class Skip(StrEnum):
@@ -187,7 +198,7 @@ def read(work_dir: str) -> tuple[list[Loaded], list[Skipped]]:
         text = _visible(text)  # the budget counts what the model sees, which hidden characters make larger
         encoded = text.encode("utf-8")
         if len(encoded) > limit:
-            text, cut = encoded[:limit].decode("utf-8", "ignore"), True
+            text, cut = _ESCAPE_TAIL.sub("", encoded[:limit].decode("utf-8", "ignore")), True
         size = len(text.encode("utf-8"))
         spent += size
         seen[key] = len(loaded)
