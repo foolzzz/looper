@@ -183,9 +183,39 @@ def test_agent_runtime_logins_are_denied_by_default_and_where_a_variable_points(
     assert {real(elsewhere / "c"), real(elsewhere / "g"), real(elsewhere / "t")} <= set(found)  # the homes, not auth files
 
 
-def test_every_non_anthropic_provider_credential_is_dropped_from_a_direct_session():
+def test_every_runtime_variable_is_classified_and_the_dropped_ones_never_reach_a_direct_session():
     from looper import child_env
 
-    expected = {"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "GROK_AUTH"}
-    assert expected <= set(sandbox.DIRECT_DROPPED_ENV) and set(sandbox.PROVIDER_CREDENTIAL_ENV) <= set(child_env.RUNTIMES)
-    assert not any(name.startswith(("ANTHROPIC", "CLAUDE")) for name in sandbox.PROVIDER_CREDENTIAL_ENV)
+    # Adding a name to child_env.RUNTIMES without deciding keep or drop fails here.
+    assert set(sandbox.RUNTIME_ENV_CLASS) == set(child_env.RUNTIMES)
+    assert set(sandbox.RUNTIME_ENV_CLASS.values()) <= {"keep", "drop"}
+    for name in ("CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "XAI_API_KEY", "GROK_CODE_XAI_API_KEY", "GROK_AUTH", "CODEX_HOME",
+                 "GROK_HOME", "TRAE_HOME", "COPILOT_HOME", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"):
+        assert sandbox.RUNTIME_ENV_CLASS[name] == "drop" and name in sandbox.DIRECT_DROPPED_ENV
+    # The Claude CLI's own variables stay: it cannot authenticate or route without them.
+    assert all(name in sandbox.RUNTIME_ENV_CLASS and sandbox.RUNTIME_ENV_CLASS[name] == "keep"
+               for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"))
+    assert not set(sandbox.DIRECT_DROPPED_ENV) & {"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"}
+
+
+def test_profile_env_names_the_cli_does_not_need_are_dropped():
+    dropped = sandbox.profile_env_dropped(
+        ["GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "ANTHROPIC_MODEL", "CLAUDE_CODE_USE_BEDROCK", "ENABLE_TOOL_SEARCH", "PATH",
+         "CUSTOM_BINDING_VAR"], binding_names=["CUSTOM_BINDING_VAR"])
+    assert dropped == ("AWS_SECRET_ACCESS_KEY", "GH_TOKEN")  # PATH is inherited by allowlist; the binding's own stays
+
+
+def test_copilot_login_home_is_denied_by_default_and_where_its_variable_points(tmp_path):
+    home, elsewhere = tmp_path / "home", tmp_path / "elsewhere"
+    real = os.path.realpath
+    assert real(home / ".copilot") in sandbox.read_deny_paths({"HOME": str(home)}, tmp_path / "runtime")
+    found = sandbox.read_deny_paths({"HOME": str(home), "COPILOT_HOME": str(elsewhere)}, tmp_path / "runtime")
+    assert real(elsewhere) in found
+
+
+def test_credential_warning_names_the_variables_and_never_the_values():
+    secret = "sk-ant-very-secret-value"
+    warning = sandbox.credential_warning({"ANTHROPIC_API_KEY": secret, "ANTHROPIC_AUTH_TOKEN": "tok-secret", "PATH": "/bin"})
+    assert "ANTHROPIC_API_KEY" in warning and "ANTHROPIC_AUTH_TOKEN" in warning and "sandboxed Bash" in warning
+    assert secret not in warning and "tok-secret" not in warning
+    assert sandbox.credential_warning({"PATH": "/bin", "ANTHROPIC_MODEL": "m", "ANTHROPIC_API_KEY": ""}) is None

@@ -45,6 +45,9 @@ const SWITCH_REASONS = ["busy", "invalid_profile", "runtime_unsupported"] as con
 const FRESH_REASONS = ["context_bound", "read_only_open", "resume_failed"] as const;
 const STOP_METHODS = ["control", "cancel", "kill"] as const;
 const SUMMARY_MODES = ["direct", "orchestrated"] as const;
+const SANDBOX_CATEGORIES = ["network", "write", "other"] as const;
+const SANDBOX_CASES = ["not_allowed", "unsupported_client", "unknown", "not_allowable"] as const;
+const SANDBOX_CLIENTS = ["go_tls"] as const;
 const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward"] as const;
 const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"] as const;
@@ -61,6 +64,7 @@ type TaskEvent =
   | { kind: "session_fresh"; reason: (typeof FRESH_REASONS)[number]; detail: string }
   | { kind: "stopped"; method: (typeof STOP_METHODS)[number] }
   | { kind: "turn_summary"; files: string[]; commit: string | null; mode: (typeof SUMMARY_MODES)[number]; uncommitted?: string[]; unverified?: string[] }
+  | { kind: "sandbox_denial"; tool_use_id: string; category: (typeof SANDBOX_CATEGORIES)[number]; case: (typeof SANDBOX_CASES)[number]; target: string | null; client: (typeof SANDBOX_CLIENTS)[number] | null; command_name: string }
   | { kind: "ref_report"; message_id: string | null; report_id: number | null; changes: RefChange[]; info: RefChange[];
       head: { before: string | null; after: string | null } | null; own_commits: number; needs_you: boolean }
   | { kind: "sandbox_notice"; notice: (typeof SANDBOX_NOTICES)[number]; detail: string; message_id?: string | null }
@@ -173,6 +177,13 @@ function asEvent(value: unknown): TaskEvent | null {
       return { kind: "turn_summary", files: value.files, commit: value.commit, mode: value.mode,
         ...("uncommitted" in value ? { uncommitted: value.uncommitted as string[] } : {}),
         ...("unverified" in value ? { unverified: value.unverified as string[] } : {}) };
+    case "sandbox_denial":
+      return exactKeys(value, ["kind", "tool_use_id", "category", "case", "target", "client", "command_name"])
+        && isString(value.tool_use_id) && oneOf(value.category, SANDBOX_CATEGORIES) && oneOf(value.case, SANDBOX_CASES)
+        && (value.target === null || isString(value.target)) && (value.client === null || oneOf(value.client, SANDBOX_CLIENTS))
+        && isString(value.command_name)
+        ? { kind: "sandbox_denial", tool_use_id: value.tool_use_id, category: value.category, case: value.case,
+          target: value.target, client: value.client, command_name: value.command_name } : null;
     case "ref_report": {
       if (!exactKeys(value, ["kind", "message_id", "report_id", "changes", "info", "head", "own_commits", "needs_you"])
         || !isNullableString(value.message_id)) return null;
@@ -259,6 +270,19 @@ function taskEventText(event: TaskEvent): string {
       const kept = event.uncommitted?.length ? ` · 以下文件在本轮开始前就有未提交改动，未自动提交：${event.uncommitted.join("、")}` : "";
       const unsure = event.unverified?.length ? ` · 以下文件无法确认是否为本轮前已有的改动（文件过大或数量过多），未自动提交：${event.unverified.join("、")}` : "";
       return `${event.mode}${files}${commit}${kept}${unsure}`;
+    }
+    case "sandbox_denial": {
+      const command = event.command_name ? `命令 ${event.command_name}` : "命令";
+      const target = event.target ? `\`${event.target}\`` : "";
+      if (event.case === "unsupported_client") {
+        // A known client (e.g. gh) is unsupported whether or not the host is on the allowlist, so never claim it is listed.
+        const kind = event.command_name ? `${event.command_name} 这类命令` : "这类命令";
+        return `${kind}在 v1 的管家会话里不受支持，放行域名不会让它可用`;
+      }
+      if (event.case === "unknown") return `被沙箱拒绝（${event.category}）`;
+      if (event.case === "not_allowable") return `${command} 访问 ${target || "该目的地"} 被拒绝：v1 不能放行这类目的地（本机、内网地址或不合规的主机名）`;
+      if (event.category === "write") return `${command} 写 ${target || "工作目录之外"} 被拒绝：管家会话只能写任务目录`;
+      return `${command} 访问 ${target || "网络"} 被拒绝；该域名不在本项目的白名单里，操作者可在项目的任务管家沙箱设置里放行`;
     }
     case "ref_report":
       return refReportText(event);
