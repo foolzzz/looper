@@ -10,9 +10,20 @@ session may write. Its name is ``<device>-<inode>.lock``. The descriptor is
 close-on-exec: if this process dies while the Claude process is still alive,
 the kernel releases the lock at this process's exit. That early release is
 accepted for v1.
+
+Limits of the lock, stated so they are not read as more than they are. It is per runtime root and per exact
+directory: two Looper processes with different runtime roots do not see each other's lock files, and a parent
+and a child directory have different inodes, so across processes they are not serialized either (inside one
+process the overlap check covers them). The runtime root must be on a local filesystem, because ``flock``
+semantics over a network mount are not guaranteed. A machine-wide lock is not built here.
+
+Between the first check and the start of the session the directory can be renamed or replaced. So after the
+lock is taken, ``admit`` compares the locked directory's device and inode with the checked one, by the same
+path resolution, and runs the whole check again. Any difference is a typed refusal.
 """
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import os
 import stat
@@ -38,6 +49,7 @@ class Reason(StrEnum):
     WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
     WORKSPACE_NOT_REPO_ROOT = "workspace_not_repo_root"
     WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKSPACE_UNAVAILABLE = "workspace_unavailable"
 
 
 class Kind(StrEnum):
@@ -46,6 +58,9 @@ class Kind(StrEnum):
     NOT_GIT = "not_git"
     LINKED_WORKTREE = "linked_worktree"
     WORKSPACE_MODE = "workspace_mode"
+    CHANGED_AFTER_CHECK = "changed_after_check"
+    NOT_A_DIRECTORY = "not_a_directory"
+    IO_ERROR = "io_error"
 
 
 @dataclass(frozen=True)
@@ -332,13 +347,83 @@ def overlap(work_dir: str, live: Iterable[tuple[str, str]]) -> Problem | None:
     return None
 
 
-async def before_directory_lock() -> None:
-    """Return once the early check has passed and before admission takes its lock.
+def _unavailable(kind: Kind, place: str, detail: str) -> Problem:
+    return Problem(Reason.WORKSPACE_UNAVAILABLE, kind, f"{place}: {detail}")
 
-    The body does not wait. A test replaces this to hold two prepares in the window
-    where both have passed the early check and neither resident has started.
+
+def _os_problem(place: str, exc: OSError) -> Problem:
+    if isinstance(exc, NotADirectoryError):
+        return _unavailable(Kind.NOT_A_DIRECTORY, place,
+                            "the directory is gone or is no longer a directory. Open the task on an existing repository root.")
+    return _unavailable(Kind.IO_ERROR, place,
+                        f"the directory could not be checked or locked ({type(exc).__name__}). "
+                        "Check that the directory and the runtime root are readable and writable, then retry.")
+
+
+def inspect(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, str], runtime_root: Path,
+            live: Iterable[tuple[str, str]]) -> tuple[Problem | None, tuple[int, int] | None]:
+    """``check`` plus the directory identity it covered. An OS error is a typed refusal, never an exception."""
+    live = tuple(live)
+    try:
+        before = _directory_identity(_realpath(work_dir))
+        problem = check(task, work_dir, environment=environment, runtime_root=runtime_root, live=live)
+        after = _directory_identity(_realpath(work_dir))
+    except OSError as exc:
+        return _os_problem(work_dir, exc), None
+    if problem is not None:
+        return problem, None
+    if before is None:
+        return _unavailable(Kind.NOT_A_DIRECTORY, work_dir, "the directory is gone or is not a directory."), None
+    if before != after:
+        return _unavailable(Kind.CHANGED_AFTER_CHECK, work_dir,
+                            "the directory was replaced while it was being checked. Retry."), None
+    return None, before
+
+
+def admit(task: Mapping[str, Any], work_dir: str, task_id: str, *, environment: Mapping[str, str],
+          runtime_root: Path, live: Iterable[tuple[str, str]],
+          expected: tuple[int, int]) -> tuple[DirectoryLock | None, Problem | None]:
+    """Take the lock, then prove the locked directory is the one that was checked, or refuse.
+
+    The lock is released before a refusal is returned. Blocking calls: run this in a thread.
     """
-    return None
+    live = tuple(live)
+    try:
+        lock = DirectoryLock.acquire(runtime_root, work_dir, task_id)
+    except LockHeld as held:
+        return None, Problem(
+            Reason.WORKSPACE_OVERLAPS_SESSION, None,
+            f"another task Manager session (task {held.holder}) holds {work_dir}. Wait until that session stops.")
+    except OSError as exc:
+        return None, _os_problem(work_dir, exc)
+    try:
+        if _directory_identity(_realpath(work_dir)) != expected:
+            problem = _unavailable(Kind.CHANGED_AFTER_CHECK, work_dir,
+                                   "the directory was renamed or replaced after it was checked. Retry.")
+        else:
+            problem = check(task, work_dir, environment=environment, runtime_root=runtime_root, live=live)
+    except OSError as exc:
+        problem = _os_problem(work_dir, exc)
+    except BaseException:
+        lock.release()
+        raise
+    if problem is not None:
+        lock.release()
+        return None, problem
+    return lock, None
+
+
+async def admit_off_loop(*args: Any, **kwargs: Any) -> tuple[DirectoryLock | None, Problem | None]:
+    """``admit`` in a worker thread. A lock taken after the caller was cancelled is released, not leaked."""
+    future = asyncio.ensure_future(asyncio.to_thread(admit, *args, **kwargs))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        def release(done: asyncio.Future) -> None:
+            if not done.cancelled() and done.exception() is None and (lock := done.result()[0]) is not None:
+                lock.release()
+        future.add_done_callback(release)
+        raise
 
 
 class DirectoryLock:
