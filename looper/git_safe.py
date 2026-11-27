@@ -36,9 +36,13 @@ import asyncio
 import contextlib
 import contextvars
 import functools
+import inspect
+import logging
 import os
 import re
 import subprocess
+import threading
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +59,7 @@ OVERRIDES = (
     "gc.auto=0", "maintenance.auto=false",
 )
 PREFLIGHT_TIMEOUT_SEC = 10
+logger = logging.getLogger(__name__)
 
 # What reaches git. Where programs and the user's files are (PATH, HOME, USER, LOGNAME), temporary files (TMPDIR),
 # the locale (LANG, LANGUAGE, LC_*), where git looks for the operator's own configuration (XDG_CONFIG_HOME, and
@@ -140,30 +145,111 @@ def _run_probe(command: list[str]) -> str:
                           env=_probe_environment(), stdin=subprocess.DEVNULL).stdout
 
 
-def _drivers(checkout: str | Path, depth: int = 0) -> str:
+def _drivers(checkout: str | Path, depth: int = 0) -> tuple[str, list[Path]]:
     """The driver-definition answers (``git config --show-scope`` output) for the checkout and the submodules
-    under it, nested ones too, and a refusal when one of their ``info/attributes`` assigns a driver: git runs a
-    submodule's own filters and drivers when a command in the superproject recurses into it. Cached per checkout
-    inside ``cached()``, so a submodule seen from its superproject and on its own is asked about once."""
+    under it, nested ones too, with every gitlink path seen; and a refusal when a submodule's ``info/attributes``
+    assigns a driver: git runs a submodule's own filters and drivers when a command in the superproject recurses
+    into it. Cached per checkout inside ``cached()``, so a submodule seen from its superproject and on its own is
+    asked about once."""
     store = _cache.get()
     key = ("drivers", _real(checkout))
     if store is not None and key in store:
         return store[key]
-    answer = _run_probe(_config_probe(checkout))
+    answer, links = _run_probe(_config_probe(checkout)), []
     if depth < MAX_SUBMODULE_DEPTH:
         for entry in _run_probe(argv("ls-files", "--stage", "-z", directory=checkout)).split("\0"):
             mode, _, rest = entry.partition(" ")
             module = Path(checkout, rest.partition("\t")[2])
-            if mode == "160000" and module.joinpath(".git").exists():
-                answer += _drivers(module, depth + 1)
+            if mode != "160000":
+                continue
+            links.append(module)
+            if module.joinpath(".git").exists():
+                text, nested = _drivers(module, depth + 1)
+                answer, links = answer + text, links + nested
                 try:
                     attributes = (_git_dir_of(module) / "info" / "attributes").read_text(errors="replace")
                 except OSError:
                     continue
                 _refuse_attributes(checkout, attributes)
     if store is not None:
-        store[key] = answer
-    return answer
+        store[key] = (answer, links)
+    return answer, links
+
+
+# --- Remembering a check while the files it read are unchanged ---
+
+MEMO_SECONDS = 120
+MEMO_LIMIT = 256
+_memo: dict[tuple[str, bool], tuple[float, tuple, Inspection, tuple]] = {}
+_memo_lock = threading.Lock()
+_INCLUDE = re.compile(rb"^\s*\[\s*include", re.IGNORECASE | re.MULTILINE)
+
+
+def _stat(path: Path) -> tuple[int, int, int] | None:
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return info.st_mtime_ns, info.st_size, info.st_ino
+
+
+def _repository_files(git_dir: Path, common: Path) -> list[Path]:
+    return [git_dir / "config", common / "config", git_dir / "config.worktree", common / "info" / "attributes",
+            git_dir / "info" / "attributes", git_dir / "index", git_dir / "gitdir", git_dir / "commondir"]
+
+
+def _files_state(sources: Sequence[tuple[Path, Path]]) -> list[Any] | None:
+    parts: list[Any] = []
+    for repository, shared in sources:
+        for path in _repository_files(repository, shared):
+            parts.append(_stat(path))
+            if path.name in ("config", "config.worktree"):
+                try:
+                    if _INCLUDE.search(path.read_bytes()):
+                        return None  # an included file is not tracked
+                except OSError:
+                    pass
+    return parts
+
+
+def _signature(directory: str | Path, top: str | None, git_dir: str, common: str,
+               links: Sequence[Path] | None) -> tuple | None:
+    """What a check depends on, as the state of the files it read: every ancestor's ``.git`` from the directory
+    to the top and the repository's configuration, attributes, index and link files; with ``links``, the same for
+    each gitlink (checked out or not). None when a configuration includes other files, which are not tracked."""
+    parts: list[Any] = []
+    here = Path(_real(directory))
+    for ancestor in (here, *here.parents):
+        parts.append(_stat(ancestor / ".git"))
+        if top is None or str(ancestor) == top:
+            break
+    sources = [(Path(git_dir), Path(common))]
+    for module in links or ():
+        parts.append(_stat(module / ".git"))
+        if module.joinpath(".git").exists():
+            dir_of = _git_dir_of(module)
+            sources.append((dir_of, dir_of))
+    state = _files_state(sources)
+    return None if state is None else tuple(parts + state)
+
+
+_MISS = object()
+
+
+def _remembered(key: tuple[str, bool], directory: str | Path) -> Any:
+    with _memo_lock:
+        entry = _memo.get(key)
+    if entry is None or time.monotonic() - entry[0] > MEMO_SECONDS:
+        return _MISS
+    _, signature, inspection, args = entry
+    return inspection if _signature(directory, *args) == signature else _MISS
+
+
+def _remember(key: tuple[str, bool], signature: tuple, inspection: Inspection, args: tuple) -> None:
+    with _memo_lock:
+        _memo[key] = (time.monotonic(), signature, inspection, args)
+        while len(_memo) > MEMO_LIMIT:
+            _memo.pop(next(iter(_memo)))
 
 
 def _git_dir_of(checkout: Path) -> Path:
@@ -234,7 +320,7 @@ def _gitdir_link(dot_git: Path) -> str | None:
     return _real(dot_git.parent / target) if target else None
 
 
-def _judge(directory: str | Path, stdout: str, layout: bool = True) -> tuple[str | None, bool]:
+def _judge(directory: str | Path, stdout: str, layout: bool = True) -> tuple[str | None, bool, str, str]:
     """Check what the probe printed: the work tree's top (None without one) and whether ``directory`` is in a
     repository at all.
 
@@ -242,7 +328,7 @@ def _judge(directory: str | Path, stdout: str, layout: bool = True) -> tuple[str
     caller owns); ``info/attributes`` is still checked. Raises ``RepositoryRefused``."""
     lines = stdout.splitlines()
     if len(lines) < 2:
-        return None, False  # no repository: the command itself will say so
+        return None, False, "", ""  # no repository: the command itself will say so
     git_dir, common = _real(lines[0]), _real(lines[1])
     top = _real(lines[2]) if len(lines) > 2 else None
     if top is not None and layout:
@@ -277,7 +363,7 @@ def _judge(directory: str | Path, stdout: str, layout: bool = True) -> tuple[str
             if not line.lstrip().startswith("#") and _DRIVER.search(line):
                 raise RepositoryRefused("attributes_driver", directory,
                                         "info/attributes assigns a filter, diff or merge driver")
-    return top, True
+    return top, True, git_dir, common
 
 
 _cache: contextvars.ContextVar[dict | None] = contextvars.ContextVar("git_safe_cache", default=None)
@@ -312,16 +398,30 @@ def _cache_key(directory: str | Path, layout: bool) -> tuple[str, bool]:
 
 def check_repository(directory: str | Path, *, layout: bool = True) -> Inspection | None:
     """What git_safe found in the repository ``directory`` is in, or None outside one.
-    Raises ``RepositoryRefused``. Blocking: from async code use ``check_repository_async``."""
+    Raises ``RepositoryRefused``. Blocking: from async code use ``check_repository_async``.
+
+    An answer is remembered (up to ``MEMO_SECONDS``) while the files it read are unchanged (``_signature``): a
+    configuration that includes other files is never remembered, and any change to a ``.git``, a configuration,
+    ``info/attributes``, the index or a submodule's, gives a fresh check."""
     store = _cache.get()
     key = _cache_key(directory, layout)
     if store is not None and key in store:
         return store[key]
-    top, inside = _judge(directory, _run_probe(_probe(directory)), layout)
-    found = None
-    if inside:
-        config = _drivers(top if top is not None else directory)
-        found = Inspection(_overrides(config))
+    found = _remembered(key, directory)
+    if found is _MISS:
+        found = None
+        output = _run_probe(_probe(directory))
+        top, inside, git_dir, common = _judge(directory, output, layout)
+        if inside:
+            before = _signature(directory, top, git_dir, common, None)
+            text, links = _drivers(top if top is not None else directory)
+            found = Inspection(_overrides(text))
+            args = (top, git_dir, common, tuple(links))
+            # Only what was read unchanged since before the probes is remembered.
+            if before is not None and _signature(directory, top, git_dir, common, None) == before:
+                signature = _signature(directory, *args)
+                if signature is not None:
+                    _remember(key, signature, found, args)
     if store is not None:
         store[key] = found
     return found
@@ -330,6 +430,75 @@ def check_repository(directory: str | Path, *, layout: bool = True) -> Inspectio
 async def check_repository_async(directory: str | Path, *, layout: bool = True) -> Inspection | None:
     return await asyncio.wait_for(asyncio.to_thread(check_repository, directory, layout=layout),
                                   PREFLIGHT_TIMEOUT_SEC * 4)
+
+
+_attribution: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar("git_safe_attribution",
+                                                                              default=("unknown", "unknown"))
+
+
+@contextlib.contextmanager
+def running_for(task_id: object = None, step_id: object = None) -> Iterator[None]:
+    """Name the task and step the git commands inside the block are run for (``"unknown"`` where not given), for
+    the warning ``recheck`` logs."""
+    token = _attribution.set((str(task_id) if task_id else "unknown", str(step_id) if step_id else "unknown"))
+    try:
+        yield
+    finally:
+        _attribution.reset(token)
+
+
+def attributed(function):
+    """``function`` (sync or async) runs inside ``running_for`` with the ids found in its arguments: ``task_id``,
+    ``step_id`` or ``step_key``, a mapping ``task`` with an ``id``, or an object (a workspace) with ``task_id``
+    and ``step_id``."""
+    signature = inspect.signature(function)
+
+    def ids(args, kwargs) -> tuple[object, object]:
+        bound = signature.bind_partial(*args, **kwargs).arguments
+        task = bound.get("task_id") or (bound["task"].get("id") if isinstance(bound.get("task"), Mapping) else None)
+        step = bound.get("step_id") or bound.get("step_key")
+        for value in bound.values():
+            task = task or getattr(value, "task_id", None)
+            step = step or getattr(value, "step_id", None)
+        return task, step
+
+    if inspect.iscoroutinefunction(function):
+        @functools.wraps(function)
+        async def awrapper(*args, **kwargs):
+            with running_for(*ids(args, kwargs)):
+                return await function(*args, **kwargs)
+        return awrapper
+
+    @functools.wraps(function)
+    def wrapper(*args, **kwargs):
+        with running_for(*ids(args, kwargs)):
+            return function(*args, **kwargs)
+    return wrapper
+
+
+def recheck(directory: str | Path, before: Inspection | None) -> None:
+    """After a command: ask for the driver definitions again (the repository's own configuration only, one git
+    process) and log one WARNING when a repository-defined driver appeared that ``before`` did not find: someone
+    wrote it while the command ran, which the check before the command cannot stop. Skipped inside ``cached()``,
+    whose blocks run where no agent writes. Never raises."""
+    if before is None or _cache.get() is not None:
+        return
+    try:
+        appeared = sorted({entry.partition("=")[0] for entry in _overrides(_run_probe(_config_probe(directory)))}
+                          - {entry.partition("=")[0] for entry in before.overrides})
+    except (OSError, subprocess.SubprocessError):
+        return
+    if appeared:
+        task_id, step_id = _attribution.get()
+        logger.warning("git_safe: a repository-defined driver appeared while git ran in %s (task %s, step %s): %s",
+                       directory, task_id, step_id, ", ".join(appeared))
+
+
+async def recheck_async(process: asyncio.subprocess.Process) -> None:
+    """``recheck`` for a process ``spawn`` started, once it has finished."""
+    target = getattr(process, "git_safe", None)
+    if target is not None:
+        await asyncio.to_thread(recheck, *target)
 
 
 def run(directory: str | Path | None, *args: str, extra_env: Mapping[str, str] | None = None,
@@ -342,8 +511,11 @@ def run(directory: str | Path | None, *args: str, extra_env: Mapping[str, str] |
     if {"env", "cwd", "shell"} & kwargs.keys():
         raise ValueError("git_safe.run: env, cwd and shell are not accepted")
     inspection = check_repository(directory) if directory is not None else None
-    return subprocess.run(argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()),
+    done = subprocess.run(argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()),
                           env=environment(extra_env), **kwargs)
+    if directory is not None:
+        recheck(directory, inspection)
+    return done
 
 
 async def spawn(directory: str | Path, *args: str, extra_env: Mapping[str, str] | None = None,
@@ -353,5 +525,8 @@ async def spawn(directory: str | Path, *args: str, extra_env: Mapping[str, str] 
     if {"env", "cwd", "shell"} & kwargs.keys():
         raise ValueError("git_safe.spawn: env, cwd and shell are not accepted")
     inspection = await check_repository_async(directory, layout=layout)
-    return await asyncio.create_subprocess_exec(
-        *argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()), env=environment(extra_env), **kwargs)
+    process = await asyncio.create_subprocess_exec(
+        *argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()),
+        env=environment(extra_env), **kwargs)
+    process.git_safe = (directory, inspection)  # for recheck_async, once the caller has the command's result
+    return process

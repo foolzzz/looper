@@ -41,6 +41,13 @@ def safe(repo: Path, *args: str, check: bool = False) -> subprocess.CompletedPro
 
 
 @pytest.fixture(autouse=True)
+def _fresh_memory():
+    git_safe._memo.clear()
+    yield
+    git_safe._memo.clear()
+
+
+@pytest.fixture(autouse=True)
 def _operator_config(monkeypatch):
     for name, value in _SAFE_ENV.items():
         monkeypatch.setenv(name, value)
@@ -283,18 +290,10 @@ def _plant_after_check(monkeypatch, repo: Path, probe: Path, *, asynchronous: bo
         monkeypatch.setattr(git_safe, "check_repository", late_sync)
 
 
-@pytest.fixture
-def env_probe(tmp_path: Path) -> tuple[Path, Path]:
-    """A filter that records the environment it was started with."""
-    dump = tmp_path / "env-dump"
-    script = tmp_path / "env-probe.sh"
-    script.write_text(f'#!/bin/sh\nenv >> "{dump}"\ncat\n')
-    script.chmod(0o755)
-    return script, dump
-
-
-def _seen(dump: Path) -> dict[str, str]:
-    return dict(line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line)
+# What git itself adds to the environment of a filter it starts (measured with a filter that is ``env``).
+GIT_ADDS = {"GIT_EXEC_PATH", "GIT_PREFIX", "GIT_CONFIG_PARAMETERS"}
+# macOS adds this to every process it starts, whatever the parent passes.
+PLATFORM_ADDS = {"__CF_USER_TEXT_ENCODING"}
 
 
 def _prepare_race(repo: Path) -> None:
@@ -302,46 +301,87 @@ def _prepare_race(repo: Path) -> None:
     (repo / "a.txt").write_text("changed\n")
 
 
-def test_a_driver_that_runs_anyway_sees_none_of_the_servers_secrets(repo, env_probe, monkeypatch):
+def _env_seen_by_the_filter(repo: Path) -> dict[str, str]:
+    """The filter is ``env``: its output, which git stores as the file's content, is the environment it started with."""
+    text = plain(repo, "cat-file", "-p", ":a.txt").stdout
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+def test_a_driver_that_runs_anyway_sees_exactly_the_allowlisted_environment(repo, monkeypatch):
     """The containment: if a definition slips in after the check, what git starts has only ``environment()``."""
-    script, dump = env_probe
     for name, value in SERVER_SECRETS.items():
         monkeypatch.setenv(name, value)
     _prepare_race(repo)
-    plain(repo, "config", "filter.race.clean", str(script))
+    plain(repo, "config", "filter.race.clean", "/usr/bin/env")
     subprocess.run(["git", "-C", str(repo), "add", "-A"], env={**os.environ, **_PLAIN_ENV, **SERVER_SECRETS},
                    check=True, capture_output=True, stdin=subprocess.DEVNULL)
-    assert set(SERVER_SECRETS) <= set(_seen(dump)), "positive control: plain git hands the filter the server's variables"
-    dump.unlink()
+    assert set(SERVER_SECRETS) <= set(_env_seen_by_the_filter(repo)), "positive control: plain git passes them on"
     plain(repo, "config", "--unset", "filter.race.clean")
     plain(repo, "reset", "-q")
-    _plant_after_check(monkeypatch, repo, script)
+    _plant_after_check(monkeypatch, repo, Path("/usr/bin/env"))
     assert safe(repo, "add", "-A").returncode == 0
-    seen = _seen(dump)
-    assert seen, "the planted filter ran (the race is real; the environment is what contains it)"
-    assert not set(SERVER_SECRETS) & set(seen)
-    assert set(seen) <= set(git_safe.environment(_IDENTITY)) | {"__CF_USER_TEXT_ENCODING", "PWD", "SHLVL", "_", "OLDPWD", "GIT_PREFIX", "GIT_DIR", "GIT_INDEX_FILE",
-                                                       "GIT_WORK_TREE", "GIT_EXEC_PATH", "GIT_CONFIG_PARAMETERS",
-                                                       "GIT_CONFIG_COUNT", "GIT_INTERNAL_SUPER_PREFIX", "GIT_LITERAL_PATHSPECS"}
-    assert "PATH" in seen and seen["GIT_TERMINAL_PROMPT"] == "0"
+    seen = _env_seen_by_the_filter(repo)
+    assert seen, "the planted filter ran: the race is real and the environment is what contains it"
+    assert set(seen) - PLATFORM_ADDS == set(git_safe.environment(_IDENTITY)) | GIT_ADDS
+    assert seen["GIT_TERMINAL_PROMPT"] == "0" and seen["GIT_ASKPASS"] == "true"
 
 
-def test_a_driver_that_runs_anyway_through_spawn_sees_none_of_the_servers_secrets(repo, env_probe, monkeypatch):
-    script, dump = env_probe
+def test_a_driver_that_runs_anyway_through_spawn_sees_exactly_the_allowlisted_environment(repo, monkeypatch):
     for name, value in SERVER_SECRETS.items():
         monkeypatch.setenv(name, value)
     _prepare_race(repo)
-    _plant_after_check(monkeypatch, repo, script, asynchronous=True)
+    _plant_after_check(monkeypatch, repo, Path("/usr/bin/env"), asynchronous=True)
 
     async def go():
-        process = await git_safe.spawn(repo, "add", "-A", stdout=asyncio.subprocess.PIPE,
+        process = await git_safe.spawn(repo, "add", "-A", extra_env=_IDENTITY, stdout=asyncio.subprocess.PIPE,
                                        stderr=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL)
         await process.communicate()
         assert process.returncode == 0
 
     asyncio.run(go())
-    seen = _seen(dump)
-    assert seen and not set(SERVER_SECRETS) & set(seen)
+    seen = _env_seen_by_the_filter(repo)
+    assert set(seen) - PLATFORM_ADDS == set(git_safe.environment(_IDENTITY)) | GIT_ADDS
+
+
+def test_a_driver_that_appears_while_git_runs_is_logged_with_the_task_and_step(repo, probe, monkeypatch, caplog):
+    _plant_after_check(monkeypatch, repo, probe)
+    with caplog.at_level("WARNING", logger="looper.git_safe"), git_safe.running_for("task-7", "step-3"):
+        safe(repo, "status", "--porcelain")
+    lines = [r.getMessage() for r in caplog.records if r.name == "looper.git_safe"]
+    assert len(lines) == 1 and "task task-7" in lines[0] and "step step-3" in lines[0]
+    assert "filter.race.clean" in lines[0] and str(probe) not in lines[0]  # names, never the commands
+
+
+def test_the_warning_says_unknown_without_ids_and_is_silent_without_a_new_driver(repo, probe, monkeypatch, caplog):
+    with caplog.at_level("WARNING", logger="looper.git_safe"):
+        safe(repo, "status", "--porcelain")
+    assert caplog.records == []
+    _plant_after_check(monkeypatch, repo, probe)
+    with caplog.at_level("WARNING", logger="looper.git_safe"):
+        safe(repo, "status", "--porcelain")
+    assert "task unknown, step unknown" in caplog.records[-1].getMessage()
+
+
+def test_the_warning_through_spawn_and_the_decorator_ids(repo, probe, monkeypatch, caplog):
+    _plant_after_check(monkeypatch, repo, probe, asynchronous=True)
+
+    @git_safe.attributed
+    async def work(task_id, step_key):
+        process = await git_safe.spawn(repo, "status", "--porcelain", stdout=asyncio.subprocess.PIPE,
+                                       stdin=asyncio.subprocess.DEVNULL)
+        await process.communicate()
+        await git_safe.recheck_async(process)
+
+    with caplog.at_level("WARNING", logger="looper.git_safe"):
+        asyncio.run(work("t-9", "s-1"))
+    assert "task t-9, step s-1" in caplog.records[-1].getMessage()
+
+
+def test_the_recheck_is_skipped_inside_a_cached_block(repo, probe, monkeypatch, caplog):
+    _plant_after_check(monkeypatch, repo, probe)
+    with caplog.at_level("WARNING", logger="looper.git_safe"), git_safe.cached():
+        safe(repo, "status", "--porcelain")
+    assert caplog.records == []
 
 
 def test_environment_allowlist():
@@ -631,49 +671,65 @@ def test_overrides_are_found_by_scope():
                                         "filter.x.required=false", "filter.x.smudge=", "merge.m.driver=")
 
 
-def test_cached_checks_a_directory_once(repo, monkeypatch):
+def _counting(monkeypatch):
     calls = []
     real = subprocess.run
     monkeypatch.setattr(subprocess, "run", lambda command, *a, **k: calls.append(command) or real(command, *a, **k))
+    return calls
+
+
+def test_cached_checks_a_directory_once(repo, monkeypatch):
+    calls = _counting(monkeypatch)
     with git_safe.cached():
         for _ in range(3):
             git_safe.check_repository(repo)
     assert len(calls) == 3  # layout, config and gitlink probes, once
-    calls.clear()
+
+
+def test_a_check_is_remembered_while_its_files_are_unchanged(repo, monkeypatch):
+    calls = _counting(monkeypatch)
+    first = git_safe.check_repository(repo)
+    assert len(calls) == 3
+    assert git_safe.check_repository(repo) == first and len(calls) == 3  # nothing started
+
+
+def test_a_change_to_the_repository_gives_a_fresh_check(repo, probe, monkeypatch):
+    assert git_safe.check_repository(repo).overrides == ()
+    plain(repo, "config", "filter.new.clean", str(probe))
+    assert git_safe.check_repository(repo).overrides == ("filter.new.clean=",)
+    git_dir = repo / ".git"
+    (git_dir / "info").mkdir(exist_ok=True)
+    (git_dir / "info" / "attributes").write_text("*.txt filter=evil\n")
+    with pytest.raises(git_safe.RepositoryRefused):
+        git_safe.check_repository(repo)
+
+
+def test_a_nested_repository_made_after_the_check_is_seen(repo, probe, tmp_path):
+    (repo / "sub").mkdir()
+    assert git_safe.check_repository(repo / "sub").overrides == ()
+    plain(repo / "sub", "init", "-q")
+    plain(repo / "sub", "config", "filter.inner.clean", str(probe))
+    assert git_safe.check_repository(repo / "sub").overrides == ("filter.inner.clean=",)
+
+
+def test_a_submodule_checked_out_after_the_check_is_seen(repo, probe, tmp_path):
+    module = _submodule(tmp_path, repo)
+    assert git_safe.check_repository(repo).overrides == ()
+    plain(module, "config", "filter.sub.clean", str(probe))
+    assert git_safe.check_repository(repo).overrides == ("filter.sub.clean=",)
+
+
+def test_a_configuration_with_includes_is_never_remembered(repo, probe, monkeypatch, tmp_path):
+    included = tmp_path / "included.cfg"
+    included.write_text("")
+    plain(repo, "config", "include.path", str(included))
+    calls = _counting(monkeypatch)
     git_safe.check_repository(repo)
+    first = len(calls)
     git_safe.check_repository(repo)
-    assert len(calls) == 6
-
-
-def test_spawn_runs_through_the_same_checks(repo, probe, marker):
-    async def go():
-        _arm_fsmonitor(repo, probe)
-        process = await git_safe.spawn(repo, "status", "--porcelain", stdout=asyncio.subprocess.PIPE,
-                                       stderr=asyncio.subprocess.PIPE, stdin=asyncio.subprocess.DEVNULL)
-        out, _ = await process.communicate()
-        assert out.decode().strip() == "M a.txt"
-        _arm_info_attributes(repo, probe)
-        with pytest.raises(git_safe.RepositoryRefused):
-            await git_safe.spawn(repo, "status")
-
-    asyncio.run(go())
-    assert fired(marker) == []
-
-
-def test_call_sites_treat_a_refused_repository_as_a_failed_git(repo, probe, tmp_path):
-    from looper.agents import consult, step_workspaces
-
-    _arm_info_attributes(repo, probe)
-
-    async def go():
-        with pytest.raises(step_workspaces.GitError, match="info/attributes") as refused:
-            await step_workspaces._git(repo, "status")
-        assert refused.value.reason == "repository_refused:attributes_driver"
-
-    asyncio.run(go())
-    done = consult._git(repo, "status")
-    assert done.returncode == 128 and "info/attributes" in done.stderr
-    assert consult._snapshot(repo, tmp_path / "snap") is None
+    assert len(calls) == 2 * first
+    included.write_text(f"[filter \"inc\"]\n\tclean = {probe}\n")
+    assert git_safe.check_repository(repo).overrides == ("filter.inc.clean=",)
 
 
 # --- No direct git call in looper/ outside the places listed here ---

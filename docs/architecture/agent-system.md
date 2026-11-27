@@ -4281,9 +4281,13 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   repository*: `.gitattributes` stays in effect (`eol=`, `text`, a user's LFS
   filter), and the definitions found in the repository's own config (and in
   its checked-out submodules') are overridden, by the user-level or system
-  definition of the same name when there is one, else by nothing. The
-  definitions are read just before the command, so one an agent writes in
-  between is not stopped. The command's
+  definition of the same name when there is one, else by nothing. **Known
+  limitation:** the definitions are read just before the command, so one
+  written after that read is not stopped. It runs as the same system user as
+  the agent, with the allowlisted environment below and none of the
+  service's credentials; after each command the helper reads the definitions
+  again and logs one warning (task and step id, driver names) when one
+  appeared. The command's
   environment is an allowlist (`PATH`, `HOME`, the locale, the operator's own
   `GIT_CONFIG_*`, and the few `GIT_*` variables a call names), so the
   database URL, tokens and provider keys never reach git or anything it

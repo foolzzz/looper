@@ -2249,7 +2249,7 @@ class WorkerPool:
                         "summary": error, "verification": {"restored": restored}}
             try:
                 # Before the agent starts nothing writes these directories: each is checked once.
-                with git_safe.cached():
+                with git_safe.cached(), git_safe.running_for(parent_task_id, payload.get("task_id")):
                     source = await asyncio.to_thread(_verification_snapshot, work_dir)
                     if source.get("error"):
                         raise OSError(source["error"])

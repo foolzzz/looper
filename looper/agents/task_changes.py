@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from itertools import chain
 from pathlib import Path, PurePosixPath
 
+from .. import git_safe
 from ..db import tasks, task_worktrees
 from . import step_workspaces as git
 from .projects import HTTP_404, RequestError
@@ -67,6 +68,7 @@ def _entries(data: bytes, subdir: str, *, porcelain: bool = False,
             yield {"path": path, "status": status, "old_path": old_path}
 
 
+@git_safe.attributed
 async def read(task_id: str, *, limit: int = 100) -> dict:
     """Read at most limit files (hard maximum 200); never prepare or reopen a workspace.
 

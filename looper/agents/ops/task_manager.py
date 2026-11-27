@@ -215,6 +215,7 @@ class TaskManagerOps:
         return answer
 
 
+@git_safe.attributed
 async def _workspace(task: dict[str, Any]) -> dict[str, Any]:
     directory = str(task.get("work_dir") or task.get("workspace_dir") or "")
     empty = {"dir": directory, "mode": task.get("workspace_mode") or "in_place",
@@ -233,6 +234,7 @@ async def _workspace(task: dict[str, Any]) -> dict[str, Any]:
             process.kill()
             await process.wait()
             raise
+        await git_safe.recheck_async(process)
         if process.returncode:
             raise ValueError("not a git checkout")
         return stdout.decode("utf-8", errors="replace")

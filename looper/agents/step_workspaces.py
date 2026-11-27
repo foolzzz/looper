@@ -255,6 +255,7 @@ async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool 
         process.kill()
         await process.wait()
         raise GitError(f"git {args[0]} timed out after {GIT_TIMEOUT_SEC}s") from None
+    await git_safe.recheck_async(process)
     run = _Run(process.returncode or 0, stdout, stderr)
     if check and run.returncode != 0:
         output = (stderr or stdout).decode("utf-8", "replace").strip()
@@ -469,6 +470,7 @@ def _trailers(task_id: str, step_key: str = "") -> str:
     return f"\n\nLooper-Task: {task_id}" + (f"\nLooper-Step: {step_key}" if step_key else "")
 
 
+@git_safe.attributed
 async def checkpoint(repo: Repo, *, task_id: str) -> tuple[str, int]:
     """The commit a round of steps starts from: the branch's tip, or, when the task directory has pending changes,
     a checkpoint commit of all of them on the branch (the user's own included). Returns it and how many files the
@@ -502,6 +504,7 @@ def new_workspace(repo: Repo, *, runtime_root: Path, workspace_id: int, task_id:
     )
 
 
+@git_safe.attributed
 async def ensure_worktree(workspace: StepWorkspace) -> None:
     """Make the workspace's worktree exist: from its start the first time, from its branch after it was lost."""
     path = Path(workspace.path)
@@ -590,6 +593,7 @@ def _files_detail(files: Sequence[str], limit: int = 20) -> str:
     return shown + (f" (+{len(files) - limit} more)" if len(files) > limit else "")
 
 
+@git_safe.attributed
 async def freeze_review(workspace: StepWorkspace, *, step_key: str) -> StepWorkspace:
     """Commit pending output before reviews start, retaining the active workspace and its reviewed HEAD."""
     still = tuple(p for p in workspace.links if (Path(workspace.work_dir) / p).is_symlink())
@@ -600,6 +604,7 @@ async def freeze_review(workspace: StepWorkspace, *, step_key: str) -> StepWorks
     return frozen
 
 
+@git_safe.attributed
 async def snapshot_review(repo: Repo, *, task_id: str, step_key: str) -> str:
     """Freeze shared output without changing the workers' HEAD, index or working tree."""
     with tempfile.TemporaryDirectory(prefix="looper-review-index-") as directory:
@@ -640,6 +645,7 @@ async def snapshot_review(repo: Repo, *, task_id: str, step_key: str) -> str:
                        identity=True)).text
 
 
+@git_safe.attributed
 async def merge(workspace: StepWorkspace, *, step_key: str, title: str,
                 save: Callable[[StepWorkspace], Awaitable[None]]) -> MergeResult:
     """Merge an accepted step's branch into the task directory's branch, with a merge commit of its own.
@@ -819,6 +825,7 @@ async def _merge_into_target(workspace: StepWorkspace, step_key: str, title: str
 # --- Removing workspaces ---
 
 
+@git_safe.attributed
 async def remove(workspace: StepWorkspace, *, keep_branch: bool = False) -> StepWorkspace:
     """Delete the workspace's worktree and, unless ``keep_branch``, its branch; removed when both are gone.
 
@@ -835,6 +842,7 @@ async def remove(workspace: StepWorkspace, *, keep_branch: bool = False) -> Step
     return workspace if keep_branch else replace(workspace, removed_at=now())
 
 
+@git_safe.attributed
 async def discard(workspace: StepWorkspace) -> StepWorkspace:
     """The user drops a workspace a task that is not running keeps: discarded, its directory and branch deleted.
     Raises ``IllegalTransition`` for one that is being or was merged, or is gone."""

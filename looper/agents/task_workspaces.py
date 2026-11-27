@@ -38,6 +38,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .. import git_safe
 from ..db.tasks import TaskFilter
 from . import step_workspaces as ws
 from .operator_notes import notes_key, notes_view
@@ -268,6 +269,7 @@ def overwrites(mode: TaskWorkspaces | str, shared: Sequence[Mapping[str, Any]]) 
         task.get("mode") == TaskWorkspaces.IN_PLACE.value for task in shared)
 
 
+@git_safe.attributed
 async def check(workspace: str, *, mode: TaskWorkspaces, base: str = "", besides: str | None = None,
                 asked: bool = True, visible_to: str | None = None, task_filter: TaskFilter | None = None,
                 pool: Any = None) -> dict[str, Any]:
@@ -341,6 +343,7 @@ def _link(worktree: TaskWorktree, relative: str) -> str:
                         missing="the workspace has none")
 
 
+@git_safe.attributed
 async def prepare(task: Mapping[str, Any], *, runtime_root: Path, links: Sequence[str], note: Note,
                   create_branch: bool = True) -> str:
     """Where the task runs from now on (its ``work_dir``): for a worktree task its worktree, made now the first time
@@ -435,6 +438,7 @@ async def _restore(worktree: TaskWorktree) -> None:
         _link(worktree, relative)
 
 
+@git_safe.attributed
 async def finish(task_id: str, *, completed: bool = False, deleted: bool = False,
                  pool: Any = None) -> TaskWorktree | None:
     """At the task's end: when it completed or is deleted, commit what it left uncommitted on its branch and remove
@@ -545,6 +549,7 @@ async def _refused_checkout(repo: str, branch: str) -> str | None:
     return None
 
 
+@git_safe.attributed
 async def reopen(task: Mapping[str, Any], *, runtime_root: Path, links: Sequence[str], note: Note) -> Reopened:
     """The directory the task Manager works in. Never changes ``tasks.status``.
 
