@@ -42,10 +42,17 @@ TOOL_SEARCH_ENV = ("env", "ENABLE_TOOL_SEARCH")
 
 # The environment a launch must not carry (card 2 asserts it on the effective ``env``).
 FORBIDDEN_ENV = ("CLAUDE_CODE_SAFE_MODE", "CLAUDE_CODE_SIMPLE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")
+# Removed from the direct session's process environment (``task_manager_safety.environment``): the forbidden names in
+# both cases (a proxy Looper does not control would weaken the sandbox's allowlist), and the ssh agent socket (git over
+# SSH is not available in v1, so nothing needs it; denyRead cannot cover a Unix socket). Card 2 asserts the same
+# names on the process environment and on the effective settings ``env`` at readback.
+DIRECT_DROPPED_ENV = (*FORBIDDEN_ENV, *(name.lower() for name in FORBIDDEN_ENV), "SSH_AUTH_SOCK")
 
 # F10: subdirectories of ~/.config (or $XDG_CONFIG_HOME) that hold credentials. Not the whole directory: git reads
 # ~/.config/git/config and other tools keep their settings there.
-CONFIG_CREDENTIAL_DIRS = ("gh", "gcloud", "glab-cli", "op")
+CONFIG_CREDENTIAL_DIRS = ("gh", "hub", "gcloud", "glab-cli", "op")
+# Credential files under ~/.config (git keeps its credential store beside its configuration).
+CONFIG_CREDENTIAL_FILES = ("git/credentials",)
 # Plain files in HOME that hold credentials.
 HOME_CREDENTIAL_FILES = (".netrc", ".git-credentials")
 
@@ -125,9 +132,11 @@ KNOWN_SANDBOX_KEYS: frozenset[tuple[str, ...]] = frozenset(
     pin.key for pin in pins(Path("/"), allowed_domains=(), read_deny=()) if pin.key[0] == "sandbox")
 
 
-def read_deny_paths(environment: Mapping[str, str], runtime_root: Path) -> tuple[str, ...]:
+def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
+                    config_file: Path | None = None) -> tuple[str, ...]:
     """F10: the operator's credentials and trust roots, as real paths without duplicates; ``environment`` is the CLI's
-    (``launch.runtime.environment(launch)``). A blacklist: it cannot say "read only the task directory"."""
+    (``launch.runtime.environment(launch)``); ``config_file`` is Looper's ops file when it lives outside
+    ``runtime_root``. A blacklist: it cannot say "read only the task directory"."""
     home = Path(environment.get("HOME") or Path.home())
     config_home = Path(environment["XDG_CONFIG_HOME"]) if environment.get("XDG_CONFIG_HOME") else home / ".config"
     claude_dir = Path(environment["CLAUDE_CONFIG_DIR"]).expanduser() if environment.get("CLAUDE_CONFIG_DIR") \
@@ -139,10 +148,11 @@ def read_deny_paths(environment: Mapping[str, str], runtime_root: Path) -> tuple
         home / ".aws",  # cloud credentials
         home / ".gnupg",  # GPG keys
         *(home / name for name in HOME_CREDENTIAL_FILES),  # plain-text credential files
-        *(config_home / name for name in CONFIG_CREDENTIAL_DIRS),  # credential stores of common CLIs
+        *(config_home / name for name in (*CONFIG_CREDENTIAL_DIRS, *CONFIG_CREDENTIAL_FILES)),  # CLI credential stores
         claude_dir / ".credentials.json",  # Claude Code's login
         claude_json_dir / ".claude.json",  # MCP server definitions with their secrets
         runtime_root,  # Looper's ops file, tokens, generated MCP configs and launch settings
+        *([config_file] if config_file is not None else []),  # the ops file, when it lives elsewhere
     )
     return tuple(dict.fromkeys(os.path.realpath(entry) for entry in entries))
 

@@ -174,8 +174,11 @@ def test_direct_session_loads_only_looper_and_allowed_mcp_servers(monkeypatch, t
             await agent.prepare()
             first = Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1])
             assert first.is_file() and servers(agent.resident.command) == ["alpha", "looper"]
+            leftover = pool.runtime_root / "task-managers" / task_id / "mcp-cwd" / "left-by-a-server"
+            leftover.write_text("x")
             monkeypatch.setattr(settings, "_manager_mcp", ("alpha", "beta"))
-            await agent.prepare()  # a changed allowlist restarts the resident with the new servers
+            await agent.prepare()
+            assert not leftover.exists()  # a restart starts the servers in an empty directory  # a changed allowlist restarts the resident with the new servers
             assert servers(agent.resident.command) == ["alpha", "beta", "looper"]
             written = json.loads(Path(agent.resident.command[agent.resident.command.index("--mcp-config") + 1]).read_text())
             # Every stdio server, Looper's own included, starts through the wrapper in a private directory; the

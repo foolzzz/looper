@@ -104,7 +104,8 @@ def test_read_deny_paths_cover_credentials_and_trust_roots_as_real_paths(tmp_pat
     found = sandbox.read_deny_paths(env, runtime)
     real = os.path.realpath
     for expected in (home / ".ssh", home / ".aws", home / ".gnupg", home / ".netrc", home / ".git-credentials",
-                     home / ".config/gh", home / ".config/gcloud", config / ".credentials.json",
+                     home / ".config/gh", home / ".config/hub", home / ".config/gcloud",
+                     home / ".config/git/credentials", config / ".credentials.json",
                      config / ".claude.json", runtime):
         assert real(expected) in found, expected
     assert len(found) == len(set(found)) and all(os.path.isabs(path) for path in found)
@@ -125,3 +126,16 @@ def test_platform_problem(monkeypatch):
     assert sandbox.platform_problem() is None
     monkeypatch.setattr("sys.platform", "linux")
     assert "macOS" in sandbox.platform_problem()
+
+
+def test_an_ops_file_outside_the_runtime_root_is_denied_too(tmp_path):
+    ops = tmp_path / "elsewhere" / "ops.json"
+    found = sandbox.read_deny_paths({"HOME": str(tmp_path / "home")}, tmp_path / "runtime", ops)
+    assert os.path.realpath(ops) in found
+    assert os.path.realpath(ops) not in sandbox.read_deny_paths({"HOME": str(tmp_path / "home")}, tmp_path / "runtime")
+
+
+def test_dropped_environment_covers_proxies_in_both_cases_and_the_ssh_agent():
+    for name in sandbox.FORBIDDEN_ENV:
+        assert name in sandbox.DIRECT_DROPPED_ENV and name.lower() in sandbox.DIRECT_DROPPED_ENV
+    assert "SSH_AUTH_SOCK" in sandbox.DIRECT_DROPPED_ENV
