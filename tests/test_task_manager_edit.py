@@ -68,3 +68,15 @@ def test_environment_puts_the_edit_dir_first_only_when_given(monkeypatch, tmp_pa
     assert edited["PATH"] == f"{tmp_path / 'edit-bin'}{os.pathsep}{plain['PATH']}"
     assert {key: value for key, value in edited.items() if key != "PATH"} == {
         key: value for key, value in plain.items() if key != "PATH"}
+
+
+def test_a_console_script_inside_a_forbidden_root_is_refused_before_anything_is_created(tmp_path, interpreter):
+    environment = {"HOME": str(tmp_path / "home"), "XDG_CACHE_HOME": str(tmp_path / "cache")}
+    with pytest.raises(RuntimeError, match="console script .* is under"):  # the interpreter's own tree
+        task_manager_edit.edit_bin(environment, forbidden=[str(tmp_path / "venv")])
+    link = tmp_path / "linked-venv"
+    link.symlink_to(tmp_path / "venv")  # a forbidden root reached through a symlink is the same place
+    with pytest.raises(RuntimeError, match="console script"):
+        task_manager_edit.edit_bin(environment, forbidden=[str(link)])
+    assert not (tmp_path / "cache").exists()
+    task_manager_edit.edit_bin(environment, forbidden=[str(tmp_path / "task")])  # a root elsewhere is fine

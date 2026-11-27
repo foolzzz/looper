@@ -59,16 +59,31 @@ def test_total_budget_cuts_third_file(work: Path) -> None:
     ]
 
 
-def test_total_budget_used_up_cuts_at_zero(work: Path) -> None:
+def test_total_budget_used_up_skips_the_next_file_with_a_typed_reason(work: Path) -> None:
     (work / "CLAUDE.md").write_text("a" * (32 * KIB))
     (work / "CLAUDE.local.md").write_text("b" * (32 * KIB))
     (work / "AGENTS.md").write_text("c")
-    loaded, _ = pi.read(str(work))
-    assert loaded == [
-        Loaded("CLAUDE.md", "a" * (32 * KIB)),
-        Loaded("CLAUDE.local.md", "b" * (32 * KIB)),
-        Loaded("AGENTS.md", "\n" + marker(0), truncated=0),
-    ]
+    loaded, skipped = pi.read(str(work))
+    assert loaded == [Loaded("CLAUDE.md", "a" * (32 * KIB)), Loaded("CLAUDE.local.md", "b" * (32 * KIB))]
+    assert skipped == [Skipped("AGENTS.md", Skip.BUDGET_EXHAUSTED)]
+
+
+def test_hidden_characters_count_at_their_written_out_size_so_the_total_cap_holds(work: Path) -> None:
+    (work / "CLAUDE.md").write_bytes(b"\x00" * (32 * KIB))  # each NUL is written out as six characters
+    (work / "CLAUDE.local.md").write_bytes(b"\x00" * (32 * KIB))
+    (work / "AGENTS.md").write_text("tail")
+    loaded, skipped = pi.read(str(work))
+    assert all(len(item.text.encode()) <= 32 * KIB + len(marker(32 * KIB)) + 1 for item in loaded)
+    assert sum(item.truncated or len(item.text.encode()) for item in loaded) <= pi.MAX_TOTAL
+    assert [item.name for item in loaded] == ["CLAUDE.md", "CLAUDE.local.md"]
+    assert skipped == [Skipped("AGENTS.md", Skip.BUDGET_EXHAUSTED)]
+    assert all(item.truncated == 32 * KIB for item in loaded) and "\\u0000" in loaded[0].text
+
+
+def test_soft_hyphen_arabic_mark_and_deprecated_format_controls_are_written_out(work: Path) -> None:
+    (work / "CLAUDE.md").write_text("a\u00adb\u061cc\u206ad\u206fe", encoding="utf-8")
+    [entry], _ = pi.read(str(work))
+    assert entry.text == "a\\u00adb\\u061cc\\u206ad\\u206fe"
 
 
 def test_symlink_outside_is_skipped_and_never_opened(

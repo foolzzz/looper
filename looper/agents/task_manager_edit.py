@@ -34,6 +34,10 @@ def edit_bin(environment: Mapping[str, str], *, forbidden: Sequence[str]) -> Pat
     script = Path(sys.executable).parent / "looper-edit"
     if not os.access(script, os.X_OK):
         raise RuntimeError(f"looper-edit is not installed next to {sys.executable}; reinstall Looper")
+    for root in forbidden:  # the link's target too: a script the sandbox can rewrite would run outside the sandbox
+        if root and _inside(str(script), root):
+            raise RuntimeError(f"the looper-edit console script {script} is under {root}, which a direct session can "
+                               "write or cannot read; run Looper from an installation outside it")
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
     link = directory / "looper-edit"

@@ -205,7 +205,7 @@ const CHANGE_TEXT: Record<RefChange["change"], string> = {
 const shortId = (id: string | null) => (id ? id.slice(0, 8) : "无");
 const NON_FAST_FORWARD_WARNING = "执行 reset --hard、rebase 或 commit --amend 之后恢复这个引用，工作区会留下一份撤销那些提交的差异；不要不看就提交它。";
 const SKIP_REASONS: Record<string, string> = {
-  outside_workdir: "解析到任务目录之外", not_regular: "不是普通文件", hard_linked: "有其他硬链接",
+  outside_workdir: "解析到任务目录之外", not_regular: "不是普通文件", hard_linked: "有其他硬链接", budget_exhausted: "前面的文件已用完总大小上限",
   unreadable: "无法读取", not_utf8: "不是 UTF-8",
 };
 // The server's detail is "<file>: <reason>" per file, joined by "; ": show each reason in Chinese, an unknown one as sent.
