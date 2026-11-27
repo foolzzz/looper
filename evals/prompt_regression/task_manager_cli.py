@@ -131,7 +131,7 @@ class Scripted:
 
     def tool(self, name: str, arguments: dict[str, Any]) -> bool:
         """Emit the call, run it, emit its result; True when the user's interrupt ended the turn on the way."""
-        if self.sandboxed and name in ("Read", "Write", "Edit") and self.config["behavior"] != "bad":
+        if self.sandboxed and name in ("Read", "Write", "Edit") and self.config["behavior"] == "ok":
             name, arguments = "Bash", {"command": self.shell_for(name, arguments)}  # the only file tool a sandbox has
         self.calls += 1
         ident = f"toolu_{self.calls:04d}"

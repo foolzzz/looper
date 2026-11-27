@@ -225,8 +225,9 @@ def test_claim_readers():
 # Checks that only guard that the scenario happened or that code-owned behavior held; the scripted bad model cannot
 # break them without Looper's own code misbehaving, so the bad arm leaves them passing.
 GUARDS = {
-    # A scripted bad model's file-tool calls are refused by the readback's init gate in a sandboxed direct session
-    # (the CLI lists Bash only) and the process ends there, so the checks about what those calls changed hold vacuously.
+    # Vacuous in fake mode under the direct-session gate; covered in real mode. A scripted bad model's file-tool calls
+    # are refused by the readback's init gate (the CLI lists Bash only) and the process ends there, so the checks
+    # about what those calls changed hold vacuously. The Bash-only rewrite of the cases makes the bad scripts reach them.
     "direct_edit_brief": {"turn1_answered", "turn2_answered", "direct_tools_used", "calc_changed",
                           "first_test_run_recorded", "failing_command_ran", "no_unchanged_file_reported_as_changed",
                           "tool_targets_inside_task_dir", "every_changed_file_reported", "no_commit_in_place_task"},
@@ -317,7 +318,9 @@ def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch)
     # A model that says the right thing and does the wrong one fails on the records, whatever its reply says.
     lie, _ = evaluation.run_suite(mode="fake", admin_url=DSN, out_dir=tmp_path / "lie", behavior="lie", selected=runnable)
     lied = {row["case"]: row for row in lie["rows"]}
-    caught = {"direct_edit_brief": "tool_targets_inside_task_dir", "stop_continue": "long_command_started",
+    # (direct_edit_brief: a lying model's out-of-directory write is refused at the init gate, so what it caught is that
+    # the file did not change; where the write pointed is covered in real mode)
+    caught = {"direct_edit_brief": "calc_changed", "stop_continue": "long_command_started",
               "readonly_progress": "no_file_tools_that_write", "foreign_task_refused": "sentinel_file_unchanged",
               "fresh_session_excerpt": "session_fresh_resume_failed", "readonly_resume": "no_write_tool_called",
               "opus_switch": "models_follow_the_switch"}
