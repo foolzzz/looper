@@ -100,7 +100,7 @@ class Live:
             private_dir=private,
             pins=sandbox.pins(self.cwd, allowed_domains=(), read_deny=self.probe.read_deny),
             fs_allow_write=frozenset(),
-            writes_allowed=rb.writes_allowed(self.probe.env["HOME"], os.getuid()),
+            writes_allowed=rb.writes_allowed(self.probe.env["HOME"], os.getuid(), None, self.probe.read_deny),
             mcp=rb.expected_mcp(library_mcp_servers(self.library), private),
             known_tools=rb.KNOWN_BUILTIN_TOOLS[VERIFIED_CLI_VERSION])
 

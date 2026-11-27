@@ -140,6 +140,8 @@ for line in sys.stdin:
         for name in text[5:].split(','):
             Path(name).write_text('changed by the turn\\n')
     if mode != 'bare':
+        if partial_tool(override_file):
+            emit({{'type':'stream_event','event':{{'type':'content_block_start','content_block':{{'type':'tool_use','id':'p','name':partial_tool(override_file)}}}}}})
         emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})
         emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'two'}}}}}})
         emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':'tool-call','name':tool_name(override_file),'input':{{'command':'cat sample'}}}}]}}}})

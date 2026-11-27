@@ -175,9 +175,9 @@ class _Request:
 class _InitMismatch(Exception):
     """A turn's ``system/init`` lists other tools or another permission mode than the verified launch has."""
 
-    def __init__(self, mismatches: list[task_manager_readback.Mismatch]) -> None:
+    def __init__(self, mismatches: list[task_manager_readback.Mismatch], *, alert: bool = True) -> None:
         super().__init__("init mismatch")
-        self.mismatches = mismatches
+        self.mismatches, self.alert = mismatches, alert
 
 
 class _ResumeFailed(Exception):
@@ -452,7 +452,7 @@ class TaskManagerAgent:
             pins=task_manager_sandbox.pins(work_dir, allowed_domains=self.allowed_domains, read_deny=self.read_deny),
             fs_allow_write=frozenset(),
             writes_allowed=task_manager_readback.writes_allowed(
-                env.get("HOME") or str(Path.home()), os.getuid(), env.get("CLAUDE_CODE_TMPDIR")),
+                env.get("HOME") or str(Path.home()), os.getuid(), env.get("CLAUDE_CODE_TMPDIR"), self.read_deny),
             mcp=task_manager_readback.expected_mcp(library_mcp_servers(launch.library), private_dir),
             known_tools=task_manager_readback.KNOWN_BUILTIN_TOOLS[task_manager_safety.VERIFIED_CLI_VERSION])
         self.init_tools = None
@@ -469,12 +469,13 @@ class TaskManagerAgent:
             return
         await self._refuse(mismatches, phase)
 
-    async def _refuse(self, mismatches: Sequence[task_manager_readback.Mismatch], phase: str) -> None:
+    async def _refuse(self, mismatches: Sequence[task_manager_readback.Mismatch], phase: str, *,
+                      alert: bool = True) -> None:
         """End the process, count and alert, and refuse with the first mismatch's reason."""
         reason = mismatches[0].reason
         task_manager_safety.record_refusal(reason, phase, task_manager_safety.VERIFIED_CLI_VERSION)
         await self.resident.stop(kill=True)
-        if reason is not task_manager_safety.Reason.SANDBOX_UNAVAILABLE:
+        if alert and reason is not task_manager_safety.Reason.SANDBOX_UNAVAILABLE:
             await task_manager_alerts.invariant_violation(self.task_id, reason.value, mismatches[0].item)
         raise Refused(RefuseReason(reason.value),
                       task_manager_readback.notice(mismatches, task_manager_safety.VERIFIED_CLI_VERSION))
@@ -527,6 +528,12 @@ class TaskManagerAgent:
                         listed = frozenset(name for name in event.get("tools") or () if isinstance(name, str))
                     elif gated and listed is None and event.get("type") in ("assistant", "stream_event", "result"):
                         raise _InitMismatch(task_manager_readback.init_missing())  # nothing before a passing init
+                    block = ((event.get("event") or {}).get("content_block") or {}
+                             if event.get("type") == "stream_event"
+                             and (event.get("event") or {}).get("type") == "content_block_start" else {})
+                    if gated and listed is not None and isinstance(block, dict) and block.get("type") == "tool_use" and (
+                            bad := task_manager_readback.unlisted_tool(str(block.get("name") or ""), listed)):
+                        raise _InitMismatch(bad)  # a tool call that starts as a partial message of the stream
                     if gated and listed is not None and event.get("type") == "assistant":
                         for block in (event.get("message") or {}).get("content") or ():
                             if isinstance(block, dict) and block.get("type") == "tool_use" and (
@@ -576,11 +583,14 @@ class TaskManagerAgent:
                         result = await self.resident.run_turn(message, on_event, tag=request,
                                                               stop=recorder.cap_stop, cancel=request.cancel)
                         written |= result.prompt_sent
+                        if (self.mode == "direct" and self.init_tools is not None and listed is None
+                                and result.prompt_sent and request.cancel.requested):
+                            raise _InitMismatch(task_manager_readback.init_missing(), alert=False)  # stopped before init
                         if resuming and not initialized and not request.cancel.requested:
                             retry_detail = result.stderr or await self.resident.stderr_tail()
                             raise _ResumeFailed(retry_detail or "Claude Code exited before init")
                     except _InitMismatch as exc:
-                        await self._refuse(exc.mismatches, "turn")
+                        await self._refuse(exc.mismatches, "turn", alert=exc.alert)
                     except _ResumeFailed as exc:
                         if attempt or request.cancel.requested:
                             raise

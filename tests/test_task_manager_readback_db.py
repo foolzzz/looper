@@ -1,6 +1,7 @@
 """The readback in the task Manager's turn: before the user message, again before every turn, never when orchestrated."""
 from __future__ import annotations
 
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -9,7 +10,7 @@ import pytest
 from looper.agents import chat_scope_alerts, operator_identity, task_manager_safety as safety
 from looper.agents.tiers import task_manager as tm
 from looper.db import agent_sessions
-from tests.db_support import DSN, run_db
+from tests.db_support import DSN, run_db, until
 from tests.task_manager_support import NativeTaskManager, Sink, submit_and_wait
 
 pytestmark = pytest.mark.skipif(not DSN, reason="LOOPER_TEST_DATABASE_URL is not set")
@@ -270,6 +271,48 @@ def test_a_tool_the_turns_init_did_not_list_is_refused_before_it_is_delivered(mo
             assert sink.finals[-1][1] == "refused" and "mcp__looper__registered_later" in sink.finals[-1][0]
             assert sink.tools == [] and safety.refusal_counts[("launch_setting_mismatch", "turn", VERSION)] == 1
             assert not pool.agent(task_id).resident.started and len(alerts) == 1
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=40)
+
+
+def test_a_partial_tool_start_the_init_did_not_list_is_refused_before_anything_is_delivered(monkeypatch, tmp_path, native, alerts):
+    """A tool that starts as a ``content_block_start`` of the stream, with no assistant message after it."""
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        override(native, {"partial_tool": "Write"})
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            sink = Sink()
+            await pool.submit(task_id, "two", message_id="two", sink=sink)
+            await sink.done()
+            assert sink.finals[-1][1] == "refused" and "Write" in sink.finals[-1][0]
+            assert sink.deltas == [] and sink.tools == []
+            assert not pool.agent(task_id).resident.started and len(alerts) == 1
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=40)
+
+
+@pytest.mark.parametrize("init_mode", ["skip", "normal"])
+def test_a_stop_before_the_init_does_not_deliver_the_cli_result(monkeypatch, tmp_path, native, alerts, init_mode):
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        override(native, {"init_mode": init_mode})
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            sink = Sink()
+            assert (await pool.submit(task_id, "wait", message_id="one", sink=sink)).state == "started"
+            await until(lambda: len(native.records("input")) == 1)
+            result = pool.stop_turn(task_id, "one")
+            assert (await result if inspect.isawaitable(result) else result) is True
+            await sink.done()
+            if init_mode == "skip":  # the turn never showed an init: the CLI's own result text is not delivered
+                assert sink.finals[-1][1] == "refused" and sink.finals[-1][0] != "stopped"
+                assert not pool.agent(task_id).resident.started and not alerts  # a user stop is not an alarm
+                assert safety.refusal_counts[("launch_setting_mismatch", "turn", VERSION)] == 1
+            else:  # after a passing init the stop keeps its protocol
+                assert sink.finals[-1][1] == "stopped"
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=40)
