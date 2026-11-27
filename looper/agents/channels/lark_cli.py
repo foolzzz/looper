@@ -301,11 +301,8 @@ async def run(argv: list[str], *, timeout: float = CALL_TIMEOUT_SECONDS, cwd: Pa
     except OSError as exc:
         raise LarkCliError(f"lark-cli could not start: {exc}", not_sent=True) from None
     try:
-        # Not asyncio.wait_for: in Python 3.11 it returns the result when a cancellation (the channel's stop())
-        # arrives as the call finishes, and the cancelled loop goes on to wait for its next message.
-        async with asyncio.timeout(timeout):
-            stdout, stderr = await process.communicate()
-    except TimeoutError:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
         process.kill()
         await process.wait()
         raise LarkCliError(f"lark-cli did not answer within {timeout:g} s", error_type=TIMEOUT) from None
