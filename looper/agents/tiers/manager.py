@@ -1950,6 +1950,8 @@ class ManagerAgent:
                         require_match=self._claude.shares_bridge)
             token.check()
             token.ops_turn = turn
+            # Before ``begin_turn``: its notes and the authorization checks read the speaker.
+            await token.step("classify_speaker", manager_turn_context.identify(envelope, turn))
             session = self._session_now()
             if session.scope is not None and turn.origin is TurnOrigin.USER:
                 try:
