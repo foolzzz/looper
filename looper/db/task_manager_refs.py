@@ -1,0 +1,39 @@
+"""The task branch of a direct session and the reports of refs a turn changed (``agents.task_manager_refs``)."""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import asyncpg
+
+from .connection import get_pool
+
+
+async def get_branch(task_id: str, *, pool: asyncpg.Pool | None = None) -> str | None:
+    return await (pool or get_pool()).fetchval(
+        "SELECT branch FROM task_manager_branches WHERE task_id = $1", task_id)
+
+
+async def record_first_branch(task_id: str, branch: str, *, pool: asyncpg.Pool | None = None) -> bool:
+    """Record ``branch`` unless one is already recorded; True when this call recorded it."""
+    return await (pool or get_pool()).fetchval(
+        "INSERT INTO task_manager_branches (task_id, branch, recorded_by) VALUES ($1, $2, 'first_enable') "
+        "ON CONFLICT (task_id) DO NOTHING RETURNING true", task_id, branch) is True
+
+
+async def set_branch(task_id: str, branch: str, *, pool: asyncpg.Pool | None = None) -> str | None:
+    """Record ``branch`` as the operator's choice; returns the previous branch, if any."""
+    async with (pool or get_pool()).acquire() as conn, conn.transaction():
+        previous = await conn.fetchval("SELECT branch FROM task_manager_branches WHERE task_id = $1 FOR UPDATE", task_id)
+        await conn.execute(
+            "INSERT INTO task_manager_branches (task_id, branch, recorded_by) VALUES ($1, $2, 'operator') "
+            "ON CONFLICT (task_id) DO UPDATE SET branch = EXCLUDED.branch, recorded_by = 'operator', "
+            "recorded_at = now()", task_id, branch)
+    return previous
+
+
+async def insert_report(task_id: str, message_id: str | None, changes: dict[str, Any], needs_you: bool, *,
+                        pool: asyncpg.Pool | None = None) -> int:
+    return await (pool or get_pool()).fetchval(
+        "INSERT INTO task_manager_ref_reports (task_id, message_id, changes, needs_you) "
+        "VALUES ($1, $2, $3::jsonb, $4) RETURNING id", task_id, message_id, json.dumps(changes), needs_you)
