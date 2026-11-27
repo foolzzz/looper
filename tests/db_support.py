@@ -307,3 +307,12 @@ async def v1_api(tmp_path, pool):
             yield call
     finally:
         await server.stop()
+
+
+def complete_records(text: str) -> list[Any]:
+    """Parse the JSON records of a log another process is still appending to.
+
+    Only newline-terminated records count: the last piece is either empty or a record still being written.
+    """
+    import json
+    return [json.loads(line) for line in text.split("\n")[:-1] if line]
