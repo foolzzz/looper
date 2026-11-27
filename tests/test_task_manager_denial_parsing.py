@@ -24,6 +24,14 @@ def test_a_network_denial_is_parsed_with_host_and_port():
     assert parse(HTTP_ONLY) == [Violation(Category.NETWORK, "blocked.example:80", "network-outbound")]
 
 
+def test_a_host_written_with_a_trailing_dot_is_parsed_and_shown_without_it():
+    line = "deny network-outbound Blocked.example.:443 (host is not on the allow list)"
+    [violation] = parse(f"x\n<sandbox_violations>\n{line}\n</sandbox_violations>")
+    assert violation == Violation(Category.NETWORK, "Blocked.example:443", "network-outbound")
+    assert denials.classify([violation], command="curl x", output="", allowed=["blocked.example"])[0].case \
+        is Case.UNKNOWN  # on the list: matched although the sandbox wrote the trailing dot
+
+
 def test_text_blocks_of_a_list_content_are_read_and_other_blocks_ignored():
     content = [{"type": "text", "text": NETWORK}, {"type": "image", "source": {}}]
     assert parse(content) == [Violation(Category.NETWORK, "blocked.example:443", "network-outbound")]

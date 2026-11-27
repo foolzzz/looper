@@ -223,7 +223,7 @@ describe("task conversation", () => {
       { kind: "queued", reason: "cap", position: 1, active: 6, type: "queued" },
       { kind: "sandbox_denial", tool_use_id: "tu-a", category: "network", case: "not_allowed", target: "blocked.example:443", client: null, command_name: "curl" },
       { kind: "sandbox_denial", tool_use_id: "tu-b", category: "network", case: "unsupported_client", target: "api.example:443", client: "go_tls", command_name: "gh" },
-      { kind: "sandbox_denial", tool_use_id: "tu-c", category: "network", case: "unsupported_client", target: null, client: "node_no_proxy", command_name: "node" },
+      { kind: "sandbox_denial", tool_use_id: "tu-c", category: "network", case: "unsupported_client", target: null, client: "go_tls", command_name: "terraform" },
       { kind: "sandbox_denial", tool_use_id: "tu-d", category: "other", case: "unknown", target: null, client: null, command_name: "ls" },
       { kind: "sandbox_denial", tool_use_id: "tu-e", category: "write", case: "not_allowed", target: "/var/data/x", client: null, command_name: "touch" },
       { kind: "sandbox_denial", tool_use_id: "tu-g", category: "network", case: "not_allowable", target: "10.0.0.1:443", client: null, command_name: "curl" },
@@ -264,7 +264,7 @@ describe("task conversation", () => {
     }
     expect(text).toContain("命令 curl 访问 `blocked.example:443` 被拒绝；该域名不在本项目的白名单里，操作者可在项目的任务管家沙箱设置里放行");
     expect(text).toContain("gh 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
-    expect(text).toContain("node 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
+    expect(text).toContain("terraform 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
     // A known client is unsupported whether or not the host is on the allowlist, so the row never claims it is listed.
     const unsupportedClient = [...container.querySelectorAll('[data-feed-key^="task-event:"]')]
       .filter((item) => item.textContent?.includes("这类命令在 v1 的管家会话里不受支持"));

@@ -58,7 +58,6 @@ class Case(StrEnum):
 
 class Client(StrEnum):
     GO_TLS = "go_tls"
-    NODE_NO_PROXY = "node_no_proxy"
 
 
 @dataclass(frozen=True)
@@ -77,11 +76,12 @@ class KnownClient:
     signature: str
 
 
-# Only public tool names. The Go row's signature is the macOS trustd failure; the Node row matches by the
-# DNS failure signature alone because Node command-line tools do not use the proxy by default.
+# Only public tool names. The Go row's signature is the macOS trustd failure. A client is recognized by the basename
+# of the command's first word (after VAR=value assignments), so `sudo gh` or a script named `gh` in the task directory
+# is read as that name: a documented limit that only changes the wording shown to the operator. Node command-line
+# tools do not use the proxy either, but no executable name identifies them, so they have no row.
 KNOWN_CLIENTS = (
     KnownClient(Client.GO_TLS, frozenset({"gh", "gcloud", "terraform"}), "x509: OSStatus -26276"),
-    KnownClient(Client.NODE_NO_PROXY, frozenset(), "getaddrinfo ENOTFOUND"),
 )
 
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
@@ -117,8 +117,11 @@ def _known_client(command: str) -> Client | None:
     return next((known.client for known in KNOWN_CLIENTS if name in known.executables), None)
 
 
+_PORT = re.compile(r":[0-9]{1,5}$")
+
+
 def _allowable(target: str) -> bool:
-    host = target.rsplit(":", 1)[0] if target.count(":") == 1 else target
+    host = _PORT.sub("", target)
     try:
         validate_domains([host])
     except PolicyInvalid:
@@ -182,9 +185,7 @@ class TurnThrottle:
         self._seen: set[tuple[Category, str | None]] = set()
 
     def first(self, denial: Denial) -> bool:
-        target = denial.target
-        if target is not None and target.count(":") == 1:
-            target = target.rsplit(":", 1)[0]
+        target = None if denial.target is None else _PORT.sub("", denial.target)
         key = (denial.category, target.lower() if target is not None else None)
         if key in self._seen:
             return False
@@ -198,7 +199,7 @@ denials_total: Counter[tuple[str, str]] = Counter()
 _OPEN, _CLOSE = "<sandbox_violations>", "</sandbox_violations>"
 _MAX_LINES = 50
 _HOST = r"(?:[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]{2,45}\])"
-_NETWORK_LINE = re.compile(rf"deny network-outbound (?P<target>{_HOST}:(?P<port>[0-9]{{1,5}})) \([^()\n]*\)")
+_NETWORK_LINE = re.compile(rf"deny network-outbound (?P<host>{_HOST}\.?):(?P<port>[0-9]{{1,5}}) \([^()\n]*\)")
 _CLASS = re.compile(r"deny(?:\([0-9]+\))? [a-z][a-z0-9*-]*")
 
 
@@ -222,7 +223,8 @@ def parse(result_content: Any) -> list[Violation]:
         if not line:
             continue
         if (match := _NETWORK_LINE.fullmatch(line)) and int(match["port"]) <= 65535:
-            found.append(Violation(Category.NETWORK, match["target"], "network-outbound"))
+            # A trailing dot is the same host (``matches`` ignores it too); show and match without it.
+            found.append(Violation(Category.NETWORK, f'{match["host"].rstrip(".")}:{match["port"]}', "network-outbound"))
         else:
             head = _CLASS.match(line)
             found.append(Violation(Category.OTHER, None, head[0] if head else "unrecognized"))

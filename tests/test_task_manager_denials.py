@@ -29,10 +29,9 @@ def test_enum_and_known_client_values():
     assert Case.UNKNOWN.value == "unknown"
     assert Case.NOT_ALLOWABLE.value == "not_allowable"
     assert Client.GO_TLS.value == "go_tls"
-    assert Client.NODE_NO_PROXY.value == "node_no_proxy"
+    assert [item.value for item in Client] == ["go_tls"]
     assert KNOWN_CLIENTS == (
         KnownClient(Client.GO_TLS, frozenset({"gh", "gcloud", "terraform"}), "x509: OSStatus -26276"),
-        KnownClient(Client.NODE_NO_PROXY, frozenset(), "getaddrinfo ENOTFOUND"),
     )
 
 
@@ -198,6 +197,9 @@ def test_turn_throttle_keys_on_the_host_not_the_port():
     first = Denial(Category.NETWORK, Case.NOT_ALLOWED, "a.example:80", None, "curl")
     other_port = Denial(Category.NETWORK, Case.NOT_ALLOWED, "A.example:443", None, "curl")
     other_target = Denial(Category.NETWORK, Case.NOT_ALLOWED, "b.example:80", None, "curl")
+    v6 = Denial(Category.NETWORK, Case.NOT_ALLOWABLE, "[::1]:443", None, "curl")
+    v6_other_port = Denial(Category.NETWORK, Case.NOT_ALLOWABLE, "[::1]:80", None, "curl")
+    assert throttle.first(v6) is True and throttle.first(v6_other_port) is False
     other_category = Denial(Category.WRITE, Case.NOT_ALLOWED, "a.example", None, "touch")
     no_target = Denial(Category.OTHER, Case.UNKNOWN, None, None, "ls")
     assert throttle.first(first) is True
