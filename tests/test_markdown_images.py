@@ -286,7 +286,7 @@ def test_ampersand_in_a_plain_url_attribute_is_kept_but_entities_are_not() -> No
 def test_paragraph_with_a_stray_backtick_has_no_code_spans() -> None:
     source = f"`code` and `![x]({U})`\nstray ` here"
     out = neutralize_images(source)
-    assert f"image: [x (example.invalid)]({U})" in out and "`code`" in out
+    assert out == f"`code` and `&#33;[x]({U})`\nstray ` here"  # every ![ is neutralized, no link rewrite
     assert neutralize_images(f"`![x]({U})`\n\nstray ` here").startswith(f"`![x]({U})`")  # a blank line ends the paragraph
 
 
@@ -319,6 +319,7 @@ REVIEW_CORPUS = [
     "<pre>\n```\n</pre>\n![a](https://e.example/y)", "<!--\n```\n-->\n![a](https://e.example/y)",
     "``'/\\``![a](https://e.example/y)]/\n`<svg><!--a<at id=1>\\`![a](https://e.example/y)",
     "<at id=1>\n`<img src=https://e.example/y>`",
+    "![x `a]\n`](http://e.example/y)", "![a ![r] z `]\n`](http://e.example/y)", "![![r]\\``]>\n`](http://e.example/y)",
     "<at id=1>\n```\n<img src=https://e.example/y>\n```",  # a Lark tag line opens an HTML block: no fence in it
     "<br>\n~~~\n<!--\n<img src=https://e.example/y>",
 ]
@@ -328,6 +329,19 @@ REVIEW_CORPUS = [
 def test_review_corpus_leaves_nothing_for_a_renderer_to_load(source: str) -> None:
     assert _oracle_leaks(source), "the corpus input must leak before the change"
     assert _oracle_leaks(neutralize_images(source)) == []
+
+
+def test_alt_text_crossing_a_line_leaves_nothing_for_a_renderer_to_load() -> None:
+    """An image whose label is on one line and ``](url)`` on the next, with backticks and brackets in between."""
+    labels = ["x", "a ![r] z", "![r]\\`", "x `a", "`", "``", "a\\", "![k](img_v3_0a)", "[b]", "a [b", "![", "<at id=1>"]
+    joints = ["]", "]>", "]\n", "`]", "]`", "] "]
+    seconds = ["`](http://e.example/y)", "](http://e.example/y)", "`\n](http://e.example/y)", "``](http://e.example/y)", "\\`](http://e.example/y)",
+               "](<http://e.example/y>)", "][r]\n\n[r]: http://e.example/y", "](\nhttp://e.example/y)"]
+    rng = random.Random(18)
+    for _ in range(4000):
+        text = "![" + rng.choice(labels) + rng.choice(joints) + "\n" + rng.choice(seconds)
+        out = neutralize_images(text)
+        assert _oracle_leaks(out) == [], (text, out)
 
 
 def test_seeded_random_inputs_leave_nothing_for_a_renderer_to_load() -> None:

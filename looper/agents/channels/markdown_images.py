@@ -216,14 +216,14 @@ def _spans(line: str) -> tuple[list[tuple[int, int]], bool]:
     return spans, clean
 
 
-def _line(line: str, definitions: frozenset[str], spans: list[tuple[int, int]]) -> str:
+def _prose(text: str, definitions: frozenset[str], spans: list[tuple[int, int]]) -> str:
     out: list[str] = []
     position = 0
     for start, end in spans:
-        out.append(_images(line[position:start], definitions))
-        out.append(line[start:end])
+        out.append(_images(text[position:start], definitions))
+        out.append(text[start:end])
         position = end
-    out.append(_images(line[position:], definitions))
+    out.append(_images(text[position:], definitions))
     return "".join(out)
 
 
@@ -240,12 +240,23 @@ def neutralize_images(markdown: str) -> str:
     def flush() -> None:
         # Trust the code spans of a run of lines only when every backtick run pairs within its own line. A
         # stray backtick may pair with one on another line (or not at all) depending on the block structure,
-        # so such a run of lines is treated as having no code spans: everything in it is neutralized. The same
-        # holds when a line starts with a Lark tag: a renderer with raw HTML on reads it as an HTML block, which
-        # ends only at a blank line and makes the backticks after it literal.
+        # so such a run of lines is treated as having no code spans and every ``![`` in it is neutralized, with no
+        # attempt to tell an image from text. The same holds when a line starts with a Lark tag: a renderer with
+        # raw HTML on reads it as an HTML block, which ends only at a blank line and makes the backticks after it
+        # literal. The images of a trusted run are scanned across its lines, since an image may span lines.
+        if not paragraph:
+            return
         found = [_spans(line) for line in paragraph]
-        trusted = all(clean for _, clean in found) and not any(_starts_html_block(line) for line in paragraph)
-        out.extend(_line(line, definitions, spans if trusted else []) for line, (spans, _) in zip(paragraph, found))
+        text = "".join(paragraph)
+        if all(clean for _, clean in found) and not any(_starts_html_block(line) for line in paragraph):
+            spans: list[tuple[int, int]] = []
+            offset = 0
+            for line, (line_spans, _) in zip(paragraph, found):
+                spans.extend((offset + start, offset + end) for start, end in line_spans)
+                offset += len(line)
+            out.append(_prose(text, definitions, spans))
+        else:
+            out.append(_escape_tags(text.replace("![", _NEUTRAL)))
         paragraph.clear()
 
     for line in lines:
