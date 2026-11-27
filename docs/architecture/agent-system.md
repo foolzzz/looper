@@ -139,7 +139,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   (`looper/agents/tiers/manager_session.py`). Every Manager has `main`; by
   default it is the only one, and a group chat's turns run in the operator's
   session. [Session routing](#manager-session-routing) gives the default
-  Manager more; a scenario Manager can independently opt into one session per group.
+  Manager more, and each API client has [a session of its own](#manager-client-sessions) whatever the switch
+  says; a scenario Manager can independently opt into one session per group.
   `session_routing.group_isolation` tells a feature that must
   not reach a group through the operator's context how far a group's turns
   are kept apart: `shared`, or `isolated` while routing is on. `ManagerFleet` (`looper/agents/managers.py`) runs the enabled ones, at most
@@ -147,12 +148,50 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   [task templates](#task-templates), and can have its own Telegram or Lark bots
   ([Channels](#channels)). What follows holds for each Manager unless it says
   otherwise
+- <a id="manager-client-sessions"></a>**API client sessions** (always on; no setting): the default Manager runs
+  every turn of an API client (a `chat/send` message from a client's token) in a session of that client's own,
+  `client:api:<client id>` (`session_routing.client_key`), with session routing on or off. Another client's, and
+  the operator's, turns never run in it. A scenario Manager has no client sessions: its clients keep its main.
+  - Tools: an explicit list, `session_visibility.CLIENT_TOOLS`, run through the Manager's own tool path (the same
+    checks as in main: risk, a user turn for a write, the outbound review): `looper_tasks` (read tasks),
+    `looper_task_create`, `looper_task_control`, `looper_task_instruct` and `looper_task_update`. `looper_confirm` is not listed: a pending confirmation is keyed by chat only, so a client turn could confirm another session's item; a client's high-risk request (cancelling or restarting a task) is shown to the operator as waiting for confirmation, and only the operator confirms, in their own conversation. Any other name
+    is refused as `forbidden` before its arguments are read, whether or not the Manager has the tool, and the
+    refusal is recorded by tool name only. A new Manager tool is not on the list until someone adds it there.
+  - Inputs (`CLIENT_ALLOWLIST`): the client's own contract (`CLIENT_CONTRACT`, instead of the role prompt, the
+    harness and the Agent Profile's custom prompt), the persona's name only, the project, task template and
+    workflow lists, the client's message with its channel line, quotes and attachments, and its own earlier
+    handoff. Never the operator profile, goals, ready tasks, open gates, memory, vault, leads, reminders, the
+    operator's turn context or another chat's text. The session runs like a routed one: platform tools only (no
+    shell or file tools, no installed library), its own working, home and Claude configuration directories, and
+    Settings' Agent Profile (not the operator's `/profile` choice). A runtime without the platform-tools-only mode
+    refuses the turn with the usual message, like a routed group.
+  - The resume brief of a new client session lists the recent text of that client's own conversations only;
+    main's brief leaves every client's conversation out (`db.chat.recent_conversations` with and without
+    `client_id`). A task's completion notice for a client's thread is not told in any Manager session
+    (`completion_events` skips it; the client reads its thread with `chat/messages`). What an operator sees: a
+    client's conversation stays its own dashboard thread under loopercli, as before, and is not in `main`'s input;
+    the Sessions list (`manager_sessions.list`) does not list client sessions, and `/new` and `reset` work on
+    the operator's sessions only. The operator's `looper_session_search` already left client threads out.
+  - Residents: a client session is admitted under `manager.sessions.max_resident` with the main process and the
+    routed sessions (main never waits), whether routing is on or off. At the cap the longest idle other session is
+    stopped, whatever its runtime (the Messages API session closes its loop when idle and resumes from its saved
+    history). When none can be stopped the start waits with 「排队中：其他会话正忙」 for at most
+    `RESIDENT_WAIT_SECONDS` (60 s) and is then refused with a busy reply (`TurnFailed`, error `resident_busy`); it
+    never waits for ever and never starts over the cap. This holds for routed group sessions too. With routing on a client session stays
+    resident until another session needs the slot; with routing off its process stops when its turn queue is
+    empty. Its session id is kept in `manager_sessions` (kind `client`, migration `manager_session_client_kind`,
+    no downgrade: delete the `kind='client'` rows before rolling back to an older release) and resumes on its next message.
+  - Limits to know: the isolation is of chat text. `looper_tasks` and the task tools still reach every task (also the
+    operator's titles and requirements, as in `main` before), so task content can reach a client session through
+    tool results. A client with no per-client task scope is a follow-up.
+  - The API stays as it was: the same endpoints and response shapes. Only the session that answers changed, so
+    a client no longer sees what the operator said in `main`, and its tools are the list above.
 - <a id="manager-session-routing"></a>**Session routing**
   (`manager.session_routing.enabled`, off by default; Settings → Chat;
   operator-only, like `manager.sessions.max_resident`): the default Manager
   runs each conversation in the session its key names
-  (`session_routing.session_key_for`). The dashboard chat (with or without an
-  API client) and the operator's own direct chats are `main`. A Lark or
+  (`session_routing.session_key_for`). The dashboard chat and the operator's own
+  direct chats are `main`; an API client's chats are [its own session](#manager-client-sessions). A Lark or
   Telegram group (its topics included) is `group:<channel id>:<chat>`, and
   another allowed sender's direct chat is `dm:<channel id>:<chat>`. A bot
   with no operator id cannot tell its operator apart, so its direct chats stay
@@ -483,8 +522,8 @@ Manager has no tool for it. The dashboard shows the task page's 指标 card and 
   prepends the default Manager's first `_sections()` entry: `Persona (set by the operator: your name and tone; Looper's rules still apply):`,
   then nonempty indented `Name`, `Tone` and `Notes` lines, and a blank line. The stored `address` remains
   compatible with the settings API but is not injected; there is no working-hours field. Routed group and
-  other-sender DM sessions receive only `Name`, with a name-only heading. Groups and non-operator direct
-  messages sharing main receive no persona, based on the message's source; the dashboard, API clients and the
+  other-sender DM sessions, and API client sessions, receive only `Name`, with a name-only heading. Groups and non-operator direct
+  messages sharing main receive no persona, based on the message's source; the dashboard and the
   operator's own direct chats keep `Name`, `Tone` and `Notes`. An unknown or unreadable operator identity grants
   no private fields. With `manager.stable_context` on, shared group/other-sender turns get a persona-free whole
   block without diffing or overwriting main's last shown state. Other edits follow its whole/changes/unchanged
@@ -4269,9 +4308,38 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   A worktree that cannot be created fails the attempt the same way.
 - **Looper's commits** (checkpoint, leftovers, merge) are by
   `Looper <looper@localhost>`, with `Looper-Task` and `Looper-Step` trailers,
-  and unsigned. No git command Looper runs runs a hook
-  (`-c core.hooksPath=/dev/null`), and each has a 120 s limit. The Worker's own
+  and unsigned. Each git command Looper runs has a 120 s limit. The Worker's own
   commits keep the repository's identity, signing and hooks.
+- **Git in agent-writable directories** (`looper/agents/git_safe.py`). An agent can
+  write `.git/config`, `.git/hooks` and `.git/info/attributes`, so every git
+  command the service runs in a task, step or worktree directory, a consult
+  or verification checkout or an explorer snapshot goes through one helper.
+  It runs no hook, `core.fsmonitor`, signing program, `core.sshCommand`,
+  pager, editor, askpass or credential helper of the repository (fixed `-c`
+  overrides), and no filter, merge or diff driver (textconv) *defined by the
+  repository*: `.gitattributes` stays in effect (`eol=`, `text`, a user's LFS
+  filter), and the definitions found in the repository's own config (and in
+  its checked-out submodules') are overridden, by the user-level or system
+  definition of the same name when there is one, else by nothing. **Known
+  limitation:** the definitions are read just before the command, so one
+  written after that read is not stopped. It runs as the same system user as
+  the agent, with the allowlisted environment below and none of the
+  service's credentials; after each command the helper reads the definitions
+  again and logs one warning (task and step id, driver names) when one
+  appeared; the worker's verification snapshot, baseline, restore and
+  checkout run in `cached()` blocks, where no agent writes, and skip that
+  re-check, so they log no warning. The command's
+  environment is an allowlist (`PATH`, `HOME`, the locale, the operator's own
+  `GIT_CONFIG_*`, and the few `GIT_*` variables a call names), so the
+  database URL, tokens and provider keys never reach git or anything it
+  runs. Before each command the helper checks the repository and refuses
+  (`RepositoryRefused`; the step workspace code reports it as `GitError`) when
+  `info/attributes` assigns a filter, diff or merge driver, or when the
+  directory's `.git` is not the repository git would use for it (a `gitdir:`
+  link that is not a linked worktree's or a submodule's, a `core.worktree`
+  elsewhere). `tests/test_git_safe.py` fails on a direct `git` call elsewhere
+  in `looper/`, except for Looper's own checkout, a fresh clone, and the
+  knowledge vault, each listed there with its reason.
 - **Kept and removed.** A step that a replan drops, from a decision or a change
   to the task, loses its worktree and branch at once. A completed task's
   worktrees and branches are removed.
@@ -8970,7 +9038,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `source_collection_settings`, `source_parity_sessions`, `source_parity_members`, `source_parity_coverage`, `source_stream_alerts` | Opt-in collector settings/fire slots, frozen reference windows and independent identity/coverage evidence, and durable alert episodes with separate open/recovery delivery claims |
 | `step_workspaces` | A step's git worktree ([Step workspaces](#step-workspaces)): `task_id`, `step_id` (both going with the task or step), `repo_dir` and `subdir` (the task directory in it), `target_branch`, `path`, `branch`, `base_commit`, `checkpoint`, `result_commit`, `merge_commit`, `state` (`active`, `merging`, `merged`, `unmerged`, `discarded`), `merge_error` (required when `unmerged`) with `merge_files`, `detail`, `links` (the paths linked back to the task directory's), `removed_at` (its directory and branch are gone); one in use (`active` or `merging`) per step |
 | `agent_sessions` | The session each resident agent resumes: `manager` or `planner-<task_id>`, its `session_id`, `session_totals`, the `runtime_type` and `provider_id` it belongs to and the `profile_id` that ran it last (`NULL` runtime: before Agent Profiles, Claude Code; `NULL` provider: before providers were recorded, Claude Code's own login), and `clean_start` (the user dropped the session with `/new`: the next one starts without a resume brief) |
-| `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions, and scenario Managers' group sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)`: `session_key` is `kind:channel_id:chat`, or `kind:channel_id:chat~<fingerprint>` when `scope_fingerprint` is set. Stores the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), `last_active_at`, and nullable scope metadata: `scope_id`, `scope_version`, `audience` (`operator` or `shared`), `scope_fingerprint`, `retired_at`, `retired_reason` and `activity_cursor` (the last group-activity `chat_messages.id` read); scope and audience are both NULL or both set, and only `full` has an operator audience. `main` stays in `agent_sessions` |
+| `manager_sessions` | The default Manager's group (`group:`) and other-sender direct-chat (`dm:`) sessions, its API clients' sessions (`client:api:<client id>`, kind `client`), and scenario Managers' group sessions with [session routing](#manager-session-routing) on, keyed by `(manager_id, session_key)`: `session_key` is `kind:channel_id:chat`, or `kind:channel_id:chat~<fingerprint>` when `scope_fingerprint` is set. Stores the same session fields as `agent_sessions`, `context_tokens` and `last_turn_cost_usd` (for session budgets), `last_active_at`, and nullable scope metadata: `scope_id`, `scope_version`, `audience` (`operator` or `shared`), `scope_fingerprint`, `retired_at`, `retired_reason` and `activity_cursor` (the last group-activity `chat_messages.id` read); scope and audience are both NULL or both set, and only `full` has an operator audience. `main` stays in `agent_sessions` |
 | `task_journal` | A task's journal, written by code as things happen: `step_accepted`, `step_failed`, `step_retry`, `decision`, `supplement`, `session_switch`, `handoff`, `progress`, `profile_choice`, `concurrency_change`, `role_defined`, `gate_opened`, `gate_updated`, `gate_cancelled` and `gate_closed` entries, each with its `step_id` (`''` for the whole task), `summary` and `learnings`, and for a supplement its `via`, `delivered_at` and `from_operator` (whether the operator gave it in their own turn; NULL: not known, or Looper's own note); `GET /api/tasks/<id>` returns it as `journal` (and the progress notes, parsed and newest first, as `progress`); the task page lists the entries as Findings, each with its kind, and the progress notes in its Progress section |
 | `task_requirement_versions` | Every version of an edited task requirement: `task_id`, `version` (1 is the text the task was created with, written at its first edit), `text`, `via` (`created`, `task_page`, or the Manager's), `created_at` and `delivered_at` (when the Planner had it in a turn; `tasks.requirement` is the newest) |
 | `managers` | The default Manager (`manager`) and the operator's scenario Managers (`manager-<key>`): `name`, `description`, `system_prompt` (null for the default), `profile_id`, `tools`, `task_scope`, `scope_project_ids`, `task_policy` (`free` / `templates_only`), `session_routing` (`off`, `per_chat` or `scoped`; operator operations do not yet accept `scoped`), `enabled`, `revision` (bumped by every change to what it may do), `deleted_at` (a soft delete: the row and its id stay) |

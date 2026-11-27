@@ -165,6 +165,7 @@ _APPLY_RESULT_MIGRATIONS = (
     "completion_session_allowlist",
     "network_pauses",
     "chat_message_entry_kind",
+    "manager_session_client_kind",
 )
 
 
@@ -271,6 +272,7 @@ _CONVERTED_MIGRATIONS = (
     "manager_events",
     "manager_scope_projects",
     "manager_session_bounds",
+    "manager_session_client_kind",
     "manager_session_context_policy",
     "manager_sessions",
     "mcp_tool_levels",
