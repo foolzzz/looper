@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -283,6 +284,10 @@ def test_a_direct_session_drops_proxy_variables_and_the_ssh_agent_an_orchestrate
         seen.append(dict(kwargs["env"]))
 
     monkeypatch.setattr(tm.ResidentClaude, "start", start)
+    # A secret an Agent Profile adds through its own env (GH_TOKEN) must not reach the sandboxed Bash either.
+    profile = AgentSettings(profile=builtin_resolved_profile())
+    monkeypatch.setattr(task_manager_settings, "load_task_manager_settings", AsyncMock(
+        return_value=replace(profile, env=(("GH_TOKEN", "gh-secret"), ("ANTHROPIC_MODEL", "x")))))
 
     async def check(db):
         executable, create = setup_manager
@@ -297,5 +302,6 @@ def test_a_direct_session_drops_proxy_variables_and_the_ssh_agent_an_orchestrate
     run_db(check, monkeypatch)
     direct, orchestrated = seen
     assert not set(task_manager_sandbox.DIRECT_DROPPED_ENV) & set(direct)
+    assert "GH_TOKEN" not in direct and direct.get("ANTHROPIC_MODEL") == "x"  # the CLI's own profile variables stay
     # The positive control: the same variables reach an orchestrated session, so the drop is the direct one's own.
-    assert {"HTTPS_PROXY", "https_proxy", "SSH_AUTH_SOCK"} <= set(orchestrated)
+    assert {"HTTPS_PROXY", "https_proxy", "SSH_AUTH_SOCK", "GH_TOKEN"} <= set(orchestrated)
