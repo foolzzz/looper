@@ -27,7 +27,7 @@ import asyncpg
 
 from .. import child_env
 from ..db import lead_admin
-from . import leads, leads_model
+from . import git_safe, leads, leads_model
 
 logger = logging.getLogger(__name__)
 OK, EMPTY, USAGE, DISABLED, REFUSED, NOT_FOUND, NO_DATABASE = 0, 1, 2, 3, 4, 5, 6
@@ -107,13 +107,12 @@ def committable(path: Path) -> str | None:
     target = resolved(path)
     where = next((parent for parent in target.parents if parent.is_dir()), Path("/"))
     try:
-        inside = subprocess.run(["git", "-C", str(where), "rev-parse", "--is-inside-work-tree"], capture_output=True,
-                                text=True, timeout=30)
+        inside = git_safe.run(where, "rev-parse", "--is-inside-work-tree", capture_output=True, text=True, timeout=30)
         if inside.returncode != 0 or inside.stdout.strip() != "true":
             return None
-        ignored = subprocess.run(["git", "-C", str(where), "check-ignore", "-q", "--", str(target)],
-                                 capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as error:
+        ignored = git_safe.run(where, "check-ignore", "-q", "--", str(target), capture_output=True, text=True,
+                               timeout=30)
+    except (OSError, subprocess.SubprocessError) as error:  # SubprocessError: timeout, or git_safe refusing
         return f"cannot ask git whether {target} could be committed ({type(error).__name__})"
     if ignored.returncode == 0:
         return None

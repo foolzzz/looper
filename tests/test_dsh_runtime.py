@@ -500,7 +500,7 @@ def test_dsh_mcp_translation_keeps_stdio_and_secrets_in_child_environment(tmp_pa
     own, catalog = translated.servers
     assert own["serverName"] == "looper" and own["transport"] == "stdio"
     assert own["command"] == server_config("", "")["command"]
-    assert own["args"] == ["-m", "looper.cli", "mcp-server"]
+    assert own["args"] == ["-I", "-m", "looper.cli", "mcp-server"]
     assert catalog["transport"] == "streamable-http"
     executable = tmp_path / "dsh"
     executable.touch()

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import stat
 from pathlib import Path
 
 import pytest
 
 from evals.prompt_regression import task_manager_cases as cases
+from looper.agents import task_manager_sandbox
 from evals.prompt_regression import task_manager_eval as evaluation
 from evals.prompt_regression.runner import EvalError
 from tests.db_support import DSN
@@ -245,16 +247,36 @@ def checks(row):
     return {check["name"]: check["ok"] for check in row["checks"]}
 
 
+@pytest.fixture(autouse=True)
+def direct_cases_run_on_any_platform(monkeypatch):
+    """Tests that stub ``run_case`` or the model stand-in do not need the macOS sandbox a direct session runs in; the
+    test that asserts the platform's own set restores the real one."""
+    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)
+
+
 @pytest.mark.skipif(not DSN, reason="requires a disposable LOOPER_TEST_DATABASE_URL")
 def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", "darwin")  # the platform the sandbox supports
     monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)  # an operator's own variable never reaches a child
     for name, value in PLANTED.items():
         monkeypatch.setenv(name, value)
     good, good_path = evaluation.run_suite(mode="fake", admin_url=DSN, out_dir=tmp_path / "ok",
                                            dump_dir=tmp_path / "dump-a")
     assert os.environ["ANTHROPIC_API_KEY"] == SECRET  # restored
-    assert good["outcome"] == "incomplete"  # two cases cannot run on this checkout: never a pass
+    assert good["outcome"] == "incomplete"  # cases that cannot run here: never a pass
     rows = {row["case"]: row for row in good["rows"]}
+    if sys.platform != "darwin":
+        # A direct session needs Claude Code's Bash sandbox (macOS): those cases are typed blockers, never a pass or a
+        # fail; the read-only cases still run. The full direct-session flow below is asserted on macOS.
+        direct = {case.id for case in cases.CASES if case.direct and case.requires is None}
+        assert {c for c, r in rows.items() if r["outcome"] == "not_runnable"} == (
+            direct | {"verbatim_handoff", "answer_gate"})
+        assert {rows[c]["blocker"] for c in direct} == {"sandbox_macos_only"} and direct
+        assert all(rows[c]["cost_usd"] == 0.0 for c in direct)
+        for case in cases.CASES:
+            if case.requires is None and not case.direct:
+                assert rows[case.id]["outcome"] == "pass", case.id
+        return
     assert {c for c, r in rows.items() if r["outcome"] == "not_runnable"} == {"verbatim_handoff", "answer_gate"}
     assert rows["verbatim_handoff"]["blocker"] == "step_3_not_merged"
     runnable = [case for case in cases.CASES if case.requires is None]
@@ -350,3 +372,14 @@ def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch)
         (tmp_path / "dump-b" / "readonly_progress.json").read_text().replace("Looper's task brief", "A changed brief"))
     same, text = evaluation.compare_inputs(tmp_path / "dump-a", tmp_path / "dump-b")
     assert not same and "A changed brief" in text
+
+
+def test_a_direct_case_is_a_typed_blocker_off_macos_and_a_read_only_case_is_not(monkeypatch):
+    direct, read_only = cases.BY_ID["direct_edit_brief"], cases.BY_ID["readonly_resume"]
+    names = evaluation.tool_names()
+    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", "no-such-platform")
+    blocker, reason = cases.blocker(direct, names)
+    assert blocker is cases.Blocker.SANDBOX_MACOS_ONLY and "macOS" in reason
+    assert cases.blocker(read_only, names) is None
+    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)
+    assert cases.blocker(direct, names) is None

@@ -59,7 +59,7 @@ describe("TaskDetailRoute manager attribution", () => {
     await show({ manager_id: "manager-review", manager_name: "Code review", template: TEMPLATE });
     expect(container.textContent).toContain("Created by Code review · template PR review");
     const link = container.querySelector('a[href="https://github.com/o/r/pull/7"]');
-    expect(link?.getAttribute("rel")).toBe("noreferrer");
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
     expect(container.textContent).toContain("Read the diff.");
   });
 

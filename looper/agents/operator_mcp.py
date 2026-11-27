@@ -59,7 +59,12 @@ UNSAFE_LAUNCHERS: tuple[tuple[str, str | None, str], ...] = (
     ("uvx", None, "uvx"),
     ("bunx", None, "bunx"),
     ("uv", "run", "uv run"),  # runs the project of the working directory
+    ("npx-cli.js", None, "npx"),  # npx's own script, run by node
+    ("npm", "exec", "npm exec"),
+    ("npm", "x", "npm x"),
     ("pnpm", "dlx", "pnpm dlx"),
+    ("pnpm", "exec", "pnpm exec"),
+    ("yarn", "exec", "yarn exec"),
     ("yarn", "dlx", "yarn dlx"),
     ("deno", "run", "deno run"),  # reads deno.json of the working directory
     ("bundle", "exec", "bundle exec"),  # reads the Gemfile of the working directory
@@ -112,11 +117,15 @@ def launcher_problem(definition: Mapping[str, Any]) -> str | None:
         return "relative_command"
     args = [str(arg) for arg in definition.get("args") or []]
     names = _names(command)
+    if names & set(_INTERPRETERS) and (script := next((arg for arg in args if not arg.startswith("-")), None)):
+        names |= _names(script)  # `node .../npx-cli.js` is npx
     for name, argument, reason in UNSAFE_LAUNCHERS:  # named first: "npx" is more telling than "relative_command"
         if name in names and (argument is None or argument in args):
             return reason
-    if names & set(_INDIRECT):
-        return f"{sorted(names & set(_INDIRECT))[0]} (starts another program)"
+    if indirect := names & set(_INDIRECT):
+        # Named as the operator configured it (``sh``), not as a platform resolves it (``dash`` on Linux).
+        written = posixpath.basename(command).casefold()
+        return f"{written if written in indirect else sorted(indirect)[0]} (starts another program)"
     python = any(name.startswith("python") for name in names)
     if python and (at := _module_flag(args)) is not None:
         before = [*args[:at], args[at].split("m", 1)[0]]  # the options up to the module flag, its own cluster included

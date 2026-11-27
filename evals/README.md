@@ -913,9 +913,9 @@ turn of the run JSON also keeps the inputs a later comparison needs: the user te
 `prompt_layers`, `looper_state` (view, rev, reason), `state_block` (the block text that turn sent) and
 `turn_context` (the `[Turn context]` block, or null when that setting is off). The dialog row sets
 `inputs_captured` to false, and does not open the database for those fields, when the run has no database URL
-or the per-turn capture is off; a null field on a captured turn was read and empty. `stable_whole_after_client`
-requires the operator turn after the API client to resend the whole block because another audience's block came
-after the last shown state, in the same resident; a whole block resent for a new process does not pass. Run the
+or the per-turn capture is off; a null field on a captured turn was read and empty. `stable_client_session_apart`
+requires an API client's turn to start its own whole block in its own session, without the operator profile, and
+the operator's next turn to find its block unchanged (the client's turn is not in the operator's session). Run the
 Manager PR commands above with `--stable-context`, and compare them with the same dialogs without it.
 
 #### Task Manager tools (scripted fake case)

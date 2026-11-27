@@ -36,7 +36,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import child_env
+from . import git_safe
 from .reported_files import prompt_name
 
 logger = logging.getLogger(__name__)
@@ -129,13 +129,10 @@ def notes_key(work_dir: str) -> str:
     """The directory Claude Code keys ``work_dir``'s auto memory by: the top level of its repository's main checkout,
     else ``work_dir`` itself; symbolic links resolved."""
     directory = os.path.realpath(work_dir)
-    env = {name: value for name, value in child_env.inherited().items()
-           if name not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
     try:
-        run = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=directory,
-                             env=env, capture_output=True, text=True, timeout=_GIT_TIMEOUT_SEC,
-                             stdin=subprocess.DEVNULL)
-    except (OSError, subprocess.TimeoutExpired):
+        run = git_safe.run(directory, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                           capture_output=True, text=True, timeout=_GIT_TIMEOUT_SEC, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):  # including a repository git_safe refuses
         return directory
     common = Path(run.stdout.strip())
     if run.returncode != 0 or common.name != ".git":

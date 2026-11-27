@@ -259,13 +259,14 @@ async def recent_conversations(
     sessions: int,
     messages: int,
     manager_id: str = "manager",
+    client_id: str | None = None,
     pool: asyncpg.Pool | None = None,
 ) -> list[dict[str, Any]]:
     """Manager ``manager_id``'s (default: the default Manager's; a thread without a ``chat_threads`` row is the
     default's) most recently active chat sessions, newest first, each with its last ``messages``
     messages, oldest first: ``[{"session_id", "messages": [{"role", "content", "created_at", "delivery_failure"}]}]``
     (``delivery_failure`` set for an answer its channel could not send). Planner threads and task conversations
-    are left out."""
+    are left out, and so are the threads of API clients, unless ``client_id`` names one: then only that client's."""
     pool = pool or get_pool()
     rows = await pool.fetch(
         """
@@ -275,6 +276,7 @@ async def recent_conversations(
             LEFT JOIN chat_threads t ON t.session_id = c.session_id
             WHERE NOT starts_with(c.session_id, $3) AND NOT starts_with(c.session_id, $5)
               AND coalesce(t.manager_id, 'manager') = $4
+              AND t.client_id IS NOT DISTINCT FROM $6::text
             GROUP BY c.session_id ORDER BY max(c.id) DESC LIMIT $1
         ) r
         CROSS JOIN LATERAL (
@@ -283,7 +285,7 @@ async def recent_conversations(
         ) m
         ORDER BY r.last_id DESC, m.id ASC
         """,
-        sessions, messages, PLANNER_THREAD_PREFIX, manager_id, TASK_THREAD_PREFIX,
+        sessions, messages, PLANNER_THREAD_PREFIX, manager_id, TASK_THREAD_PREFIX, client_id,
     )
     conversations: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
