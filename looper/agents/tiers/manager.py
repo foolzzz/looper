@@ -3890,7 +3890,10 @@ class ManagerAgent:
         fence = True if scope is not None else await untrusted_text.enabled()
         # The shared turn context includes operator timezone/language settings.
         # A routed chat receives only the provenance of its current message.
-        context = await manager_turn_context.prepare(envelope, turn) if policy is None else None
+        # The speaker is set for every user turn (authorization); only the rendering depends on the switch/policy.
+        context = await manager_turn_context.identify(envelope, turn)
+        if policy is not None or not chat_settings.turn_context_enabled():
+            context = None
         if context is not None:
             parts += render_turn_context(context)
         elif channel and allowed(SessionInput.PROVENANCE):

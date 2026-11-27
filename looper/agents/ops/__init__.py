@@ -171,7 +171,8 @@ class Turn:
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
     # Why the turn runs; by default a user's when it answers a message, else Claude's own.
     origin: TurnOrigin | None = None
-    # Set only with per-turn context enabled; None preserves the existing authorization behavior.
+    # Who sent a user turn, set for every user turn (``manager_turn_context.identify``); None only for a background
+    # turn or a path that did not classify it, which a bot channel's authorization refuses.
     speaker: SpeakerKind | None = None
     principal: Principal | None = None
     operator_id_missing: bool = False
