@@ -25,6 +25,16 @@ const COMPONENTS: Components = {
 // Direction controls in agent text could visually reorder a link and the host label next to it.
 const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g;
 
+// The same controls written as character references are decoded by the parser, so they go from the parsed text too.
+type HastNode = { type: string; value?: string; children?: HastNode[] };
+function stripBidi() {
+  const walk = (node: HastNode) => {
+    if (node.type === "text" && node.value) node.value = node.value.replace(BIDI_CONTROLS, "");
+    node.children?.forEach(walk);
+  };
+  return walk;
+}
+
 /**
  * An agent's Markdown reply: GitHub-flavored (tables, task lists, strikethrough) with the typography styles, its code
  * blocks wrapping their lines and inline code without the plugin's added backticks.
@@ -32,7 +42,7 @@ const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/g;
 export function Markdown({ children }: { children: string }) {
   return (
     <div className="prose prose-invert prose-sm max-w-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_pre]:whitespace-pre-wrap prose-code:before:content-none prose-code:after:content-none">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[stripBidi]} components={COMPONENTS}>
         {children.replace(BIDI_CONTROLS, "").replace(
           /(^## Process record\n\n)((?:- (?:Roles|Reviews|Verification|Escalations): .*\n?)+)/gm,
           // These code-owned lists contain agent fragments, which are literal data.

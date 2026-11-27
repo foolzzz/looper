@@ -134,6 +134,12 @@ describe("remote content in agent Markdown", () => {
       expect(html).not.toMatch(/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/);
     });
 
+  it.each(["&#x202E;", "&#8238;", "&#x2066;", "&#x200F;", "&#x061C;"])("removes the entity-encoded bidi control %s", (entity) => {
+    const html = render(`[pay ${entity} https://bank.example/x](https://evil.example/x) ${entity} plain`);
+    expect(html).not.toMatch(/[\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c]/);
+    expect(textOf(html)).toContain("(evil.example)");
+  });
+
   it("keeps two adjacent links in order and each label next to its own link under an override", () => {
     const html = render("\u202e[https://a.example/](https://b.example/) [https://c.example/](https://d.example/)");
     const text = textOf(html);
