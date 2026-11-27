@@ -254,16 +254,30 @@ def test_label_nested_in_a_remote_image_keeps_its_own_key_image() -> None:
     assert out.startswith("&#33;[") and "![k](img_v3_0a)" in out
 
 
-ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.invalid/", "\\", "\n", "```\n", "<", "!", "![a]", "![a][", "![[]", "<at a ", "<font x=\"", "\\![a](", "<a:", "<![", "[r]:"]
+ADVERSARIAL = ["![", "<img ", "`", "[", "]", "(", ")", "![a](", "![a](https://h.invalid/", "\\", "\n", "```\n", "<", "!",
+               "![a]", "![a][", "![[]", "<at a ", "<font x=\"", "\\![a](", "<a:", "<![", "[r]:", "`\n", "![a `\n",
+               "![a]\n`](u)\n", "- > [r]: u\n![r]\n", "![[[[]]]]", "<a href=\"https://x\" ", "``\\``", "![a\n"]
+
+
+def _best_of_three(text: str) -> float:
+    best = float("inf")
+    for _ in range(3):
+        started = time.perf_counter()
+        neutralize_images(text)
+        best = min(best, time.perf_counter() - started)
+    return best
 
 
 @pytest.mark.parametrize("unit", ADVERSARIAL)
-@pytest.mark.parametrize("size", [200_000, 1_000_000])
-def test_linear_time_on_adversarial_input(unit: str, size: int) -> None:
-    text = unit * (size // len(unit))
-    started = time.perf_counter()
-    neutralize_images(text)
-    assert time.perf_counter() - started < (0.5 if size <= 200_000 else 3.0)
+def test_linear_time_on_adversarial_input(unit: str) -> None:
+    """Ten times the input takes about ten times as long (a quadratic scan takes a hundred times as long). The
+    ratio is measured in one process, so the speed of the machine does not matter; the absolute ceiling only
+    guards against a hang."""
+    small, large = 100_000, 1_000_000
+    t_small = _best_of_three(unit * (small // len(unit)))
+    t_large = _best_of_three(unit * (large // len(unit)))
+    assert t_large < 30.0
+    assert t_large / max(t_small, 0.002) < 20, (unit, t_small, t_large)  # the floor keeps timer noise out of fast cases
 
 
 def test_random_inputs_never_leave_a_live_image() -> None:
