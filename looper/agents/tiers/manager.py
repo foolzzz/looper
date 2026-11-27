@@ -414,6 +414,7 @@ QUOTE_READ_SEC = 80.0
 # case) starts a new session. Anything else, "/new foo" or "/news" too, is a message for Claude.
 NEW_SESSION_COMMAND = "/new"
 PREPARATION_STEPS: tuple[str, ...] = (
+    "classify_speaker",  # reads the bot's operator and allowlist; before ``begin_turn``, which reads the speaker
     "persist_user_message", "attention_enabled", "route_to_gate", "route_ledger", "route_memory", "route_intent", "read_quote", "resident_settlement", "status_thinking", "tools_probe", "turn_lock", "load_db_config",
     "load_session_state", "group_activity", "agent_settings", "templates", "library", "library_server", "outbound_review", "llmrec_attach",
     "build_user_message", "session_budget",
