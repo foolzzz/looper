@@ -12,7 +12,7 @@ import { useWorkConversationStore, workConversationKey } from "@/lib/use-work-co
 /** Presentation records only. The task-thread adapter owns decoding server events. */
 export type WorkFeedRecord =
   | { source: "tool"; id: string; created_at?: string; name: string; args?: unknown; result?: unknown; isError?: boolean }
-  | { source: "task-event"; id: string; created_at?: string; kind: string; text: string };
+  | { source: "task-event"; id: string; created_at?: string; kind: string; text: string; code?: string[] };
 
 export type WorkFeedRow = { key: string; time: number } & (
   | { source: "message"; id: string; message: WorkPaneMessage }
@@ -187,6 +187,9 @@ export function WorkActivityFeed({ identity, messages, task, onGateChanged, reco
               : row.source === "task-event" ? <details className="rounded border border-border text-xs text-muted-foreground">
                   <summary className="min-h-11 cursor-pointer px-3 py-2 focus-visible:ring-2 focus-visible:ring-ring">任务事件</summary>
                   <p className="px-3 pb-2 whitespace-pre-wrap [overflow-wrap:anywhere]">{row.kind} · {row.text}</p>
+                  {row.code?.map((command) => (
+                    <code key={command} className="mx-3 mb-2 block whitespace-pre-wrap rounded bg-muted px-2 py-1 font-mono [overflow-wrap:anywhere]">{command}</code>
+                  ))}
                 </details>
                 : <details className="rounded border border-border text-xs text-muted-foreground">
                   <summary className="min-h-11 cursor-pointer px-3 py-2 [overflow-wrap:anywhere] focus-visible:ring-2 focus-visible:ring-ring">

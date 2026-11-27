@@ -264,6 +264,44 @@ describe("task conversation", () => {
     expect(container.querySelector('[data-role="assistant"]')?.textContent).toContain("模型已切换：a → b");
   });
 
+  it("renders ref reports and the first-enable notice, and rejects malformed variants", async () => {
+    const old = "a".repeat(40), moved = "b".repeat(40);
+    const change = (ref: string, kind: string, from: string | null, to: string | null, restore: string) =>
+      ({ ref, change: kind, old: from, new: to, restore });
+    const good = [
+      { kind: "sandbox_notice", notice: "first_enable_in_place", detail: "server detail" },
+      { kind: "ref_report", report_id: 7, own_commits: 2, needs_you: true,
+        head: { before: "refs/heads/main", after: null }, info: [change("refs/heads/looper/t2/task", "moved", old, moved, "git update-ref refs/heads/looper/t2/task A B")],
+        changes: [change("refs/heads/other", "moved", old, moved, `git update-ref refs/heads/other ${old} ${moved}`),
+          change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`)] },
+    ];
+    const bad = [
+      { kind: "sandbox_notice", notice: "other", detail: "x" },
+      { kind: "ref_report", report_id: "7", own_commits: 0, needs_you: false, head: null, info: [], changes: [] },
+      { kind: "ref_report", report_id: null, own_commits: 0, needs_you: false, head: null, info: [],
+        changes: [change("refs/heads/x", "renamed", null, null, "x")] },
+    ];
+    const messages = [...good, ...bad].map((event, index) =>
+      row(`r${index}`, "event", JSON.stringify(event), `2026-11-25T00:00:0${index}Z`));
+    api.fetchChatHistory.mockResolvedValue(idle(messages));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    const text = container.textContent ?? "";
+    expect(text).toContain("管家在你的真实检出目录里直接改文件；v1 只报告分支和标签的变化，不会恢复，删掉的对象也找不回来，建议先把重要分支推送或备份。");
+    const report = container.querySelector('[data-feed-key="task-event:r1"]')!;
+    expect(report.textContent).toContain("refs/heads/other 被移动（aaaaaaaa → bbbbbbbb）");
+    expect(report.textContent).toContain("refs/heads/main 被改写（不是快进）");
+    expect(report.textContent).toContain("reset --hard、rebase 或 commit --amend");
+    expect(report.textContent).toContain("属于另一个 Looper 任务");
+    expect(report.textContent).toContain("已列入「需要你处理」");
+    expect(report.textContent).toContain("HEAD 从 refs/heads/main 变成 detached，不会自动切回");
+    expect(report.textContent).toContain("本轮有 2 个提交由任务管家自己做");
+    expect(Array.from(report.querySelectorAll("code"), (node) => node.textContent)).toEqual([
+      `git update-ref refs/heads/other ${old} ${moved}`, `git update-ref refs/heads/main ${moved} ${old}`,
+      "git update-ref refs/heads/looper/t2/task A B"]);
+    for (const index of [2, 3, 4]) expect(container.querySelector(`[data-feed-key="task-event:r${index}"]`)?.textContent).toContain("无法读取这条事件");
+  });
+
   it("shows a live model switch without sending, and reloads it as the same row", async () => {
     const payload = { kind: "model_switched", from_profile_id: "a", to_profile_id: "b" };
     api.fetchChatHistory.mockResolvedValue(idle([
