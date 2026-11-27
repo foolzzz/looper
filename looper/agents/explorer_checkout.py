@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import tempfile
 
-from looper import git_safe
+from looper.agents import git_safe
 
 
 class CheckoutError(RuntimeError):

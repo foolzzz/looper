@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from itertools import chain
 from pathlib import Path, PurePosixPath
 
-from .. import git_safe
+from . import git_safe
 from ..db import tasks, task_worktrees
 from . import step_workspaces as git
 from .projects import HTTP_404, RequestError

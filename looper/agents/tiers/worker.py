@@ -58,7 +58,7 @@ from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
 from .. import admission, attempts, cost_guard, cost_dispatch, failures, outbound_hook, proc_tree, reported_files, vault
-from ... import git_safe
+from .. import git_safe
 from ...db import tasks as db_tasks
 from ...db import memory_lesson_injection as db_lesson_injection
 from .. import memory_lesson_injection as lesson_injection

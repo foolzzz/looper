@@ -35,7 +35,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .. import git_safe
+from . import git_safe
 
 GIT_TIMEOUT_SEC = 10
 MAX_WORKTREES = 64

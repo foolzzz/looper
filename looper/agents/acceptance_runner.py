@@ -15,7 +15,8 @@ from typing import Any
 import uuid
 import weakref
 
-from looper import child_env, git_safe
+from looper import child_env
+from looper.agents import git_safe
 from looper.db import activity, projects, step_check_runs as runs, tasks
 from .acceptance_checks import ArtifactCheck, Check
 from . import acceptance_artifacts as artifacts, proc_tree

@@ -38,7 +38,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .. import git_safe
+from . import git_safe
 from ..db.tasks import TaskFilter
 from . import step_workspaces as ws
 from .operator_notes import notes_key, notes_view

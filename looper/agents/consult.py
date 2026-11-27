@@ -56,7 +56,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .run_usage import CostStatus, cost_status
-from .. import git_safe
+from . import git_safe
 from .llmrec import control as llmrec
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks

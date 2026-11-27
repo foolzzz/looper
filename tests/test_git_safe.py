@@ -1,4 +1,4 @@
-"""``looper.git_safe``: git run in a directory an agent writes does not run the repository's own code.
+"""``looper.agents.git_safe``: git run in a directory an agent writes does not run the repository's own code.
 
 Each mechanism is armed in a temporary repository with a probe that appends to a marker file. The marker fires with
 plain git (the positive control: the mechanism is real here) and stays empty through the helper.
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from looper import git_safe
+from looper.agents import git_safe
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -345,19 +345,19 @@ def test_a_driver_that_runs_anyway_through_spawn_sees_exactly_the_allowlisted_en
 
 def test_a_driver_that_appears_while_git_runs_is_logged_with_the_task_and_step(repo, probe, monkeypatch, caplog):
     _plant_after_check(monkeypatch, repo, probe)
-    with caplog.at_level("WARNING", logger="looper.git_safe"), git_safe.running_for("task-7", "step-3"):
+    with caplog.at_level("WARNING", logger="looper.agents.git_safe"), git_safe.running_for("task-7", "step-3"):
         safe(repo, "status", "--porcelain")
-    lines = [r.getMessage() for r in caplog.records if r.name == "looper.git_safe"]
+    lines = [r.getMessage() for r in caplog.records if r.name == "looper.agents.git_safe"]
     assert len(lines) == 1 and "task task-7" in lines[0] and "step step-3" in lines[0]
     assert "filter.race.clean" in lines[0] and str(probe) not in lines[0]  # names, never the commands
 
 
 def test_the_warning_says_unknown_without_ids_and_is_silent_without_a_new_driver(repo, probe, monkeypatch, caplog):
-    with caplog.at_level("WARNING", logger="looper.git_safe"):
+    with caplog.at_level("WARNING", logger="looper.agents.git_safe"):
         safe(repo, "status", "--porcelain")
     assert caplog.records == []
     _plant_after_check(monkeypatch, repo, probe)
-    with caplog.at_level("WARNING", logger="looper.git_safe"):
+    with caplog.at_level("WARNING", logger="looper.agents.git_safe"):
         safe(repo, "status", "--porcelain")
     assert "task unknown, step unknown" in caplog.records[-1].getMessage()
 
@@ -372,14 +372,14 @@ def test_the_warning_through_spawn_and_the_decorator_ids(repo, probe, monkeypatc
         await process.communicate()
         await git_safe.recheck_async(process)
 
-    with caplog.at_level("WARNING", logger="looper.git_safe"):
+    with caplog.at_level("WARNING", logger="looper.agents.git_safe"):
         asyncio.run(work("t-9", "s-1"))
     assert "task t-9, step s-1" in caplog.records[-1].getMessage()
 
 
 def test_the_recheck_is_skipped_inside_a_cached_block(repo, probe, monkeypatch, caplog):
     _plant_after_check(monkeypatch, repo, probe)
-    with caplog.at_level("WARNING", logger="looper.git_safe"), git_safe.cached():
+    with caplog.at_level("WARNING", logger="looper.agents.git_safe"), git_safe.cached():
         safe(repo, "status", "--porcelain")
     assert caplog.records == []
 
@@ -753,7 +753,7 @@ def test_a_configuration_with_includes_is_never_remembered(repo, probe, monkeypa
 # A file may run git directly only for a directory Looper owns the content of (its own checkout, a clone it just
 # made from a remote, the operator's knowledge vault whose hooks are meant to run) or where there is no repository.
 DIRECT_GIT_ALLOWED = {
-    "looper/git_safe.py": "the helper itself",
+    "looper/agents/git_safe.py": "the helper itself",
     "looper/components.py": "Looper's own checkout (component install and upgrade)",
     "looper/agents/service.py": "Looper's own checkout (self-upgrade)",
     "looper/agents/catalog_sources.py": "a shallow clone of a remote into a new temporary directory, already neutralised",
@@ -835,7 +835,7 @@ def test_no_direct_git_calls_outside_the_allowlist():
         lines = _direct_git_calls(path.read_text())
         if lines and relative not in DIRECT_GIT_ALLOWED:
             found[relative] = sorted(set(lines))
-    assert not found, ("run git through looper.git_safe (or list the file in DIRECT_GIT_ALLOWED with the reason it "
+    assert not found, ("run git through looper.agents.git_safe (or list the file in DIRECT_GIT_ALLOWED with the reason it "
                        f"may not): {found}")
     for relative in DIRECT_GIT_ALLOWED:
         assert (REPO_ROOT / relative).is_file(), f"{relative} is listed but does not exist"

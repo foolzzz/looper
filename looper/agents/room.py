@@ -51,7 +51,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
-from .. import git_safe
+from . import git_safe
 from ..db import projects as db_projects, room as db_room, steps as db_steps, tasks as db_tasks
 from .message import AgentAddress, MessageEnvelope, MessageType, planner_address
 from .ops import ErrorCode, OpError

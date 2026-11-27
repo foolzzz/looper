@@ -26,7 +26,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 import ipaddress
 
-from looper import git_safe
+from looper.agents import git_safe
 from .channel import RunStartError
 
 

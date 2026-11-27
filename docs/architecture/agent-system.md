@@ -4271,7 +4271,7 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   `Looper <looper@localhost>`, with `Looper-Task` and `Looper-Step` trailers,
   and unsigned. Each git command Looper runs has a 120 s limit. The Worker's own
   commits keep the repository's identity, signing and hooks.
-- **Git in agent-writable directories** (`looper/git_safe.py`). An agent can
+- **Git in agent-writable directories** (`looper/agents/git_safe.py`). An agent can
   write `.git/config`, `.git/hooks` and `.git/info/attributes`, so every git
   command the service runs in a task, step or worktree directory, a consult
   or verification checkout or an explorer snapshot goes through one helper.

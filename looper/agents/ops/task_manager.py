@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ... import git_safe
+from .. import git_safe
 from ...db import tasks
 from .. import outbound_hook, projects, task_conversations_settings
 from ..message import task_manager_address

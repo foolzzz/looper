@@ -36,7 +36,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import git_safe
+from . import git_safe
 from .reported_files import prompt_name
 
 logger = logging.getLogger(__name__)

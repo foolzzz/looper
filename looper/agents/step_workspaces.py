@@ -45,7 +45,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .. import git_safe
+from . import git_safe
 from .reported_files import prompt_name
 
 logger = logging.getLogger(__name__)
