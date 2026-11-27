@@ -18,6 +18,9 @@ _NAMES = (
     "FRESH_REASONS",
     "STOP_METHODS",
     "SUMMARY_MODES",
+    "SANDBOX_CATEGORIES",
+    "SANDBOX_CASES",
+    "SANDBOX_CLIENTS",
     "REFUSED",
 )
 _ARRAY = re.compile(
@@ -31,6 +34,9 @@ _FIELDS = {
     "FRESH_REASONS": ("session_fresh", "reason"),
     "STOP_METHODS": ("stopped", "method"),
     "SUMMARY_MODES": ("turn_summary", "mode"),
+    "SANDBOX_CATEGORIES": ("sandbox_denial", "category"),
+    "SANDBOX_CASES": ("sandbox_denial", "case"),
+    "SANDBOX_CLIENTS": ("sandbox_denial", "client"),
     "REFUSED": ("refused", "reason"),
 }
 
@@ -87,7 +93,8 @@ def _server_lists() -> dict[str, list[str]]:
         ]
         if len(matches) != 1:
             raise AssertionError(f"{kind}.{field}: expected one enum, found {len(matches)}")
-        enum = matches[0]["properties"][field]["enum"]
+        # A nullable field lists None next to its values; the dashboard keeps null apart from the list.
+        enum = [item for item in matches[0]["properties"][field]["enum"] if item is not None]
         if not enum or any(not isinstance(item, str) for item in enum):
             raise AssertionError(f"{kind}.{field}: enum is not a list of strings")
         lists[name] = list(enum)
