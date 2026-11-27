@@ -20,6 +20,12 @@ READBACK_SUBTYPES = ("initialize", "get_settings", "get_sandbox_dialog", "get_ho
                      "list_permission_rules", "get_context_usage")
 
 
+def init_delay(override_path):
+    """Seconds the stand-in waits before it sends the turn's ``system/init`` (``{"init_delay": 1.0}``)."""
+    override = json.loads(Path(override_path).read_text()) if Path(override_path).exists() else {}
+    return float(override.get("init_delay", 0))
+
+
 def partial_tool(override_path):
     """The name of a tool the turn starts as a partial message of the stream (``{"partial_tool": "<name>"}``), or None."""
     override = json.loads(Path(override_path).read_text()) if Path(override_path).exists() else {}

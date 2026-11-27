@@ -316,3 +316,23 @@ def test_a_stop_before_the_init_does_not_deliver_the_cli_result(monkeypatch, tmp
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=40)
+
+
+def test_a_stop_while_the_init_is_still_to_come_ends_the_process_without_an_alert(monkeypatch, tmp_path, native, alerts):
+    """Pins the timing the idle-reclaim test used to depend on: the input is written, the init is not yet there."""
+    async def check(db):
+        task_id, _, _ = await native.create(db)
+        override(native, {"init_delay": 1.5})
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            sink = Sink()
+            await pool.submit(task_id, "wait", message_id="one", sink=sink)
+            await until(lambda: len(native.records("input")) == 1)
+            result = pool.stop_turn(task_id, "one")
+            assert (await result if inspect.isawaitable(result) else result) is True
+            await sink.done()
+            assert sink.finals[-1][1] == "refused"
+            assert not pool.agent(task_id).resident.started and not alerts
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=40)

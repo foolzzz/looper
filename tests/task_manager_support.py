@@ -102,6 +102,8 @@ for line in sys.stdin:
     mode = init_mode(override_file)
     init_event = {{'type':'system','subtype':'init','session_id':session, **init_fields(override_file)}}
     if mode == 'normal':
+        import time as _time
+        _time.sleep(init_delay(override_file))
         emit(init_event)
     if text == 'wait':
         continue
