@@ -208,3 +208,25 @@ def test_an_init_that_lists_other_tools_or_mode_discards_the_turn(monkeypatch, t
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=40)
+
+
+def test_the_fresh_process_after_a_failed_resume_is_read_back_too(monkeypatch, tmp_path, native, alerts):
+    async def check(db):
+        task_id, _, directory = await native.create(db)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
+        try:
+            await submit_and_wait(pool, task_id, "one", message_id="one")
+            await pool.close(task_id)
+            (directory / "reject-resume").touch()  # the resumed process exits before init
+            override(native, WIDER)  # the fresh process that replaces it reports a wider setting
+            sink = Sink()
+            await pool.submit(task_id, "two", message_id="two", sink=sink)
+            await sink.done()
+            assert sink.finals[-1][1] == "refused" and "sandbox.excludedCommands" in sink.finals[-1][0]
+            assert len(native.records("launch")) == 3  # first, the resume that exited, the fresh one
+            assert [row["text"] for row in native.records("input")] == ["one"]  # nothing was sent to the fresh process
+            assert safety.refusal_counts[("launch_setting_mismatch", "launch", VERSION)] == 1
+            assert not pool.agent(task_id).resident.started and len(alerts) == 1
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=40)
