@@ -855,6 +855,7 @@ class TaskManagerPool:
                 request.admitted.set_result(Submitted("started"))
             await request.sink.final("The task Manager turn failed; inspect its run record before retrying.", "failed")
         finally:
+            task_manager_refs.close_turn(request.task_id)  # a turn that failed before its ref report
             async with self._lock:
                 agent.busy, agent.running, agent.last_used = False, None, self.clock()
                 self._active.pop(request.task_id, None)

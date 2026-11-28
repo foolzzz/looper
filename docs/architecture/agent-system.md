@@ -1064,23 +1064,79 @@ them.
 - **Ref reports.** In an in-place direct session the model's Bash writes the real `.git`, so a turn
   can move a branch, delete a tag or switch `HEAD`. `task_manager_refs` records `refs/heads`,
   `refs/tags` and `HEAD` before every turn in the running turn's memory (the sandbox cannot reach it;
-  `refs/remotes` and anything else are never read, and packed refs, `gc` and reflogs show no change
+  nothing else is listed, and packed refs, `gc` and reflogs show no change
   because values are compared, not files), compares them after, and says what changed in the task
-  conversation with one restore command per ref (`git update-ref --no-deref`, or `git symbolic-ref` for a
-  symbolic ref). Names are shown with control and format characters written as `\uXXXX`. It never restores anything and
+  conversation with one restore command per entry. A symbolic ref is recorded hop by hop: the direct target
+  of every link (`git symbolic-ref --no-recurse`), dangling links included (git does not list those, so their
+  names come from the loose ref files; a reftable repository has none, and a link newly made dangling there is
+  not seen), and every ref its chain goes through outside branches and tags (a `refs/remotes` ref is read only
+  as such a hop). A change of what any hop holds is a change, also when the commit it resolves to stays.
+  A ref no symbolic ref ties to another keeps a plain `git update-ref --no-deref` command that applies only while
+  the ref still reads the reported value. Refs that chains tie together share one command, listed under each of
+  them: one `git update-ref --stdin` transaction that puts back every hop that changed to its value before the
+  turn and checks every other hop it reads through, so it applies completely or not at all and needs running
+  once; the order of commands does not matter. Two checks a transaction cannot make are the shell's, ahead of
+  it: that a ref which was not symbolic when the turn ended still is not, and the direct target of a link the
+  command turns back into a direct ref. A ref outside branches and tags that only the chains after the turn read has
+  no recorded earlier value: it is checked, never written. When no such command can be built, the entry has no
+  command but `not_restorable`: `too_many_symrefs` (more than 200 symbolic refs), `git_too_old` (older than
+  git 2.46), `chain_outside_refs` (a chain through a name such as `HEAD`), `chain_unreadable` (git could not
+  read a hop), `ref_file_unreadable` (below), `overlapping_turn` (below) or `other_task_branch` (an `info` entry,
+  below); the conversation says why in text the dashboard writes. The command that creates a deleted ref again
+  names the zero object id as the expected value, so it refuses once the name exists again. A missing command never hides a change: where git is not asked for direct targets or cannot read
+  one, a link whose own file, or the file of a hop outside branches and tags, spells another target is still listed
+  (a reftable repository has no such files, so there a retarget that leaves the end of the chain is not seen in
+  that state). Two in-place turns of different tasks on one repository (linked worktrees included) that run at the
+  same time cannot be told apart by comparing values, so each of their reports lists its changes with no command
+  (`overlapping_turn`, unless another reason already applies), also for refs the other turn never touched; the
+  windows are kept in the server's memory. Not covered: a ref changed during a turn by anything else (a Worker, a
+  worktree session, the operator, a background process) is still reported, with a command, as part of that turn. When
+  only one of a turn's two snapshots has direct targets, an unchanged dangling link that reads through a link outside
+  branches and tags may be listed (without a command). The 2.46
+  floor is for the transaction's symbolic-ref lines; Looper runs the `git` on the server's `PATH`, and with an
+  older one each such entry reads, in the conversation,
+  `<ref> <change>（<old> → <new>） 不能给出恢复命令：本机的 git 版本低于 2.46，无法核对并改写符号引用；请自己检查这个引用。`
+  (the server logs `task Manager refs: this git cannot restore symbolic refs; their direct targets are not read`);
+  direct refs that no chain ties keep their commands.
+  Looper's own reading of ref files goes through descriptors under the git directory (`safe_read`): each directory
+  is opened one component at a time and listed through its descriptor, never through a link, and a file is read only
+  when it is a regular one with a single hard link and at most 4 KiB (the old symlink spelling of a symbolic ref
+  counts only when the link text is a ref name). git itself does follow links there, so the files are read before
+  and again after git, and a refused ref, directory or file, with every link that reads through it, is dropped from
+  what git said: its entry is `unreadable` with no new value, no command and `ref_file_unreadable`, in every report
+  while it stays so, and "needs you" like any change. git also opens a symbolic ref's target outside `refs/`
+  (`x/y`, a single word, `worktrees/<name>/y`). Looper reads none of those but `HEAD` and the other root refs
+  (upper-case names), so every other such target is refused the same way, whether or not such a file exists. A `HEAD` or `packed-refs` that is not a file of its own
+  refuses the whole snapshot, and where the chain from `HEAD` is refused, the branch named is the one `HEAD` itself
+  holds. Not covered: a link put in place after Looper's first read and removed again before its second one, while
+  git runs between them.
+  Names are shown with control and format
+  characters written as `\uXXXX`. Looper never restores anything and
   raises no alert: a ref change is not an invariant violation. The `ref_report` event carries
   `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
-  branch is the Manager's own commits (`own_commits`) and is not listed; a reset, rewrite or delete of it
-  is listed but not "needs you" by itself. A change to any other branch or tag is stored in
+  branch is the Manager's own commits (`own_commits`) and is not listed, and no command undoes it; a reset,
+  rewrite or delete of it, or a change of what it links to, is listed but not "needs you" by itself. When this
+  turn turned the task branch into a symbolic ref, its command makes it a direct ref again (on the new commit
+  after a fast-forward, else on the old one). A change to any other branch or tag is stored in
   `task_manager_ref_reports` and listed in the needs-you section `task_manager_refs` until the
   operator resolves it (`tasks.task_manager_ref_report_resolve`, which changes nothing in git); a change
-  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only. The
+  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only, with no
+  command (`other_task_branch`, unless another reason applies): it would undo that task's work. When chains tie
+  it to a change, so that one command would write both, nothing on that chain gets a command: the changes are
+  listed with `overlapping_turn` (unless another reason applies), so following the commands Looper gives never
+  writes that task's branch. The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
   (`head_moved`) until it is checked out again or the operator runs `tasks.task_manager_branch_set`.
   A fast-forward is decided from the raw commit objects (grafts and replace refs are not honoured) and
-  anything undecidable is reported as a rewrite. A ref listing Looper cannot read safely (a name with a
+  a walk that cannot decide (a commit limit, an unreadable object) is reported as
+  `fast_forward_unverified` ("could not verify that this is a fast-forward"): still listed with the same restore
+  command, but it does not claim a reset happened. An intact symbolic ref other than the task branch is
+  listed only when a ref its chain reads outside `refs/heads`/`refs/tags` changed (reported as moved, or deleted,
+  with a command that puts that ref back); a change among branches and tags is reported under the changed ref's
+  own name. The task branch is judged on its commits even when it is an intact link: a rewrite
+  or an unverified move is listed under its name too. A ref listing Looper cannot read safely (a name with a
   line-break character, a repeated name, a failed read) refuses the turn at its start; at its end it emits a
   `sandbox_notice` with notice `refs_unreadable` instead of a report. A task directory that is not a git
   repository is refused before the session starts (see Directory checks below).

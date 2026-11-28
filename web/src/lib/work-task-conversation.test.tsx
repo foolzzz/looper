@@ -319,7 +319,10 @@ describe("task conversation", () => {
       { kind: "ref_report", message_id: "turn-1", report_id: 7, own_commits: 2, needs_you: true,
         head: { before: "refs/heads/main", after: null }, info: [change("refs/heads/looper/t2/task", "moved", old, moved, "git update-ref refs/heads/looper/t2/task A B")],
         changes: [change("refs/heads/oth\\u202eer", "moved", old, moved, `git update-ref refs/heads/other ${old} ${moved}`),
-          change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`)] },
+          change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`),
+          change("refs/heads/big", "fast_forward_unverified", old, moved, `git update-ref refs/heads/big ${old} ${moved}`),
+          { ref: "refs/heads/dir", change: "unreadable", old: null, new: null, restore: null, not_restorable: "ref_file_unreadable" },
+          { ref: "refs/heads/both", change: "moved", old, new: moved, restore: null, not_restorable: "overlapping_turn" }] },
     ];
     const bad = [
       { kind: "sandbox_notice", notice: "other", detail: "x" },
@@ -341,6 +344,12 @@ describe("task conversation", () => {
     const report = container.querySelector('[data-feed-key="task-event:r4"]')!;
     expect(report.textContent).toContain("refs/heads/oth\\u202eer 被移动（aaaaaaaa → bbbbbbbb）");
     expect(report.textContent).toContain("refs/heads/main 被改写（不是快进）");
+    expect(report.textContent).toContain("refs/heads/big 无法确认是否为快进（aaaaaaaa → bbbbbbbb）");
+    expect(report.textContent).toContain("不能说它被重置过");
+    expect(report.textContent).toContain("refs/heads/dir 没有读取，是否变化未知");
+    expect(report.textContent).toContain("Looper 没有读它");
+    expect(report.textContent).toContain("可能涉及另一个任务的改动（它的管家回合和本轮时间重叠");
+    expect(report.textContent).not.toMatch(/refs\/heads\/big 被改写/);
     expect(report.textContent).toContain("reset --hard、rebase 或 commit --amend");
     expect(report.textContent).toContain("属于另一个 Looper 任务");
     expect(report.textContent).toContain("已列入「需要你处理」");
@@ -348,8 +357,48 @@ describe("task conversation", () => {
     expect(report.textContent).toContain("本轮有 2 个提交由任务管家自己做");
     expect(Array.from(report.querySelectorAll("code"), (node) => node.textContent)).toEqual([
       `git update-ref refs/heads/other ${old} ${moved}`, `git update-ref refs/heads/main ${moved} ${old}`,
-      "git update-ref refs/heads/looper/t2/task A B"]);
+      `git update-ref refs/heads/big ${old} ${moved}`, "git update-ref refs/heads/looper/t2/task A B"]);
     for (const index of [5, 6, 7]) expect(container.querySelector(`[data-feed-key="task-event:r${index}"]`)?.textContent).toContain("无法读取这条事件");
+  });
+
+  it("shows a shared restore command once and says why a change has none", async () => {
+    const shared = "printf '%s\\n' 'symref-delete refs/heads/a refs/heads/b' | git update-ref --no-deref --stdin";
+    const entry = (ref: string, restore: string | null, extra: object = {}) =>
+      ({ ref, change: "moved", old: null, new: null, restore, ...extra });
+    const report = (changes: object[]) => ({ kind: "ref_report", message_id: "turn-1", report_id: 8, own_commits: 0,
+      needs_you: true, head: null, info: [], changes });
+    const good = report([entry("refs/heads/a", shared), entry("refs/heads/b", shared),
+      entry("refs/heads/via", null, { not_restorable: "chain_outside_refs" })]);
+    const bad = [report([entry("refs/heads/x", null)]),
+      report([entry("refs/heads/x", "x", { not_restorable: "git_too_old" })]),
+      report([entry("refs/heads/x", null, { not_restorable: "other" })])];
+    api.fetchChatHistory.mockResolvedValue(idle([good, ...bad].map((event, index) =>
+      row(`s${index}`, "event", JSON.stringify(event), `2026-11-25T00:00:0${index}Z`))));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    const shown = container.querySelector('[data-feed-key="task-event:s0"]')!;
+    expect(Array.from(shown.querySelectorAll("code"), (node) => node.textContent)).toEqual([shared]);
+    expect(shown.textContent).toContain("执行一次即可");
+    expect(shown.textContent).toContain("不能给出恢复命令：引用链经过 refs/ 之外的名字");
+    expect(shown.textContent).toContain("下面的恢复命令由你自己决定是否执行");
+    for (const index of [1, 2, 3]) {
+      expect(container.querySelector(`[data-feed-key="task-event:s${index}"]`)?.textContent).toContain("无法读取这条事件");
+    }
+  });
+
+  it("promises no restore command below when a report has none", async () => {
+    const other = { ref: "refs/heads/looper/t2/task", change: "moved", old: null, new: null, restore: null,
+      not_restorable: "other_task_branch" };
+    const event = { kind: "ref_report", message_id: "turn-1", report_id: 9, own_commits: 0, needs_you: false,
+      head: null, changes: [], info: [other] };
+    api.fetchChatHistory.mockResolvedValue(idle([row("n0", "event", JSON.stringify(event), "2026-11-25T00:00:00Z")]));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    const shown = container.querySelector('[data-feed-key="task-event:n0"]')!;
+    expect(shown.textContent).toContain("这次没有可给出的恢复命令");
+    expect(shown.textContent).toContain("它是另一个仍未结束的任务的分支");
+    expect(shown.textContent).not.toContain("下面的恢复命令");
+    expect(shown.querySelectorAll("code")).toHaveLength(0);
   });
 
   it("keeps repeated identical sandbox notices of different turns apart, and folds one turn's copy", async () => {

@@ -296,3 +296,22 @@ def test_a_failed_read_is_an_io_error(base: Path, monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(os, "read", broken)
     assert read_inside(base, base / "dir" / "file", LIMIT) == Skipped(Skip.IO_ERROR, "OSError: Input/output error")
+
+
+def test_open_directory_never_goes_through_a_link_and_read_at_refuses_what_read_inside_does(tmp_path):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "file").write_text("body")
+    (tmp_path / "linked").symlink_to(tmp_path / "real")
+    (tmp_path / "real" / "link").symlink_to(tmp_path / "real" / "file")
+    for parts in (["linked"], ["real", "file"]):
+        with safe_read.open_directory(tmp_path, parts) as directory:
+            assert directory == safe_read.Skipped(safe_read.Skip.SYMLINK)
+    with safe_read.open_directory(tmp_path / "linked", []) as directory:  # the base's own last component
+        assert directory == safe_read.Skipped(safe_read.Skip.SYMLINK)
+    with safe_read.open_directory(tmp_path, ["real"]) as directory:
+        assert safe_read.read_at(directory, "file", 4) == safe_read.Content(b"body", 4)
+        assert safe_read.read_at(directory, "file", 3) == safe_read.Skipped(safe_read.Skip.TOO_LARGE)
+        assert safe_read.read_at(directory, "link", 4) == safe_read.Skipped(safe_read.Skip.SYMLINK)
+        assert safe_read.read_at(directory, "gone", 4).reason is safe_read.Skip.IO_ERROR
+    with pytest.raises(FileNotFoundError), safe_read.open_directory(tmp_path, ["gone"]):
+        pass

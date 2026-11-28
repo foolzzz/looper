@@ -14,14 +14,18 @@ from ..ops import ErrorCode, OpError
 from ..tiers.manager import is_new_session_command
 from ..task_manager_settings import ModelSwitchRejection
 from ..task_manager_project_instructions import SKIPPED_NOTICE
-from ..task_manager_refs import NOTICES, Change
+from ..task_manager_refs import NOTICES, Change, NotRestorable
 
 
 _ID = {"type": "string", "minLength": 1}
 _NULL_STR = {"type": ["string", "null"]}
 _REF_CHANGE = _object({"ref": _STR, "change": {"enum": [change.value for change in Change]},
-                       "old": _NULL_STR, "new": _NULL_STR, "restore": _STR},
+                       "old": _NULL_STR, "new": _NULL_STR, "restore": _NULL_STR,
+                       "not_restorable": {"enum": [reason.value for reason in NotRestorable]}},
                       ["ref", "change", "old", "new", "restore"], closed=True)
+# A change has a restore command or a typed reason why it has none, never both.
+_REF_CHANGE["oneOf"] = [{"properties": {"restore": _STR}, "not": {"required": ["not_restorable"]}},
+                        {"properties": {"restore": {"type": "null"}}, "required": ["not_restorable"]}]
 CHAT_TARGET = {"oneOf": [
     _object({"kind": {"const": "manager"}, "id": _STR}, ["kind"], closed=True),
     _object({"kind": {"const": "planner"}, "task_id": _ID}, closed=True),

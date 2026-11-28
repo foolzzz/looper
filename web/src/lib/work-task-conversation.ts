@@ -48,11 +48,13 @@ const SUMMARY_MODES = ["direct", "orchestrated"] as const;
 const SANDBOX_CATEGORIES = ["network", "write", "other"] as const;
 const SANDBOX_CASES = ["not_allowed", "unsupported_client", "unknown", "not_allowable"] as const;
 const SANDBOX_CLIENTS = ["go_tls"] as const;
-const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward"] as const;
+const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward", "fast_forward_unverified", "unreadable"] as const;
+const NOT_RESTORABLE = ["too_many_symrefs", "git_too_old", "chain_outside_refs", "chain_unreadable", "ref_file_unreadable", "overlapping_turn", "other_task_branch"] as const;
 const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable", "project_instructions_skipped"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
-type RefChange = { ref: string; change: (typeof REF_CHANGES)[number]; old: string | null; new: string | null; restore: string };
+type RefChange = { ref: string; change: (typeof REF_CHANGES)[number]; old: string | null; new: string | null }
+  & ({ restore: string } | { restore: null; not_restorable: (typeof NOT_RESTORABLE)[number] });
 type ToolPayload = { tool_use_id: string; name: string; args: string; result: string; is_error: boolean };
 type TaskEvent =
   | { kind: "accepted"; reason: "duplicate" }
@@ -136,10 +138,14 @@ function asRefChanges(value: unknown): RefChange[] | null {
   if (!Array.isArray(value)) return null;
   const found: RefChange[] = [];
   for (const item of value) {
-    if (!isRecord(item) || !exactKeys(item, ["ref", "change", "old", "new", "restore"]) || !isString(item.ref)
-      || !oneOf(item.change, REF_CHANGES) || !isNullableString(item.old) || !isNullableString(item.new)
-      || !isString(item.restore)) return null;
-    found.push({ ref: item.ref, change: item.change, old: item.old, new: item.new, restore: item.restore });
+    if (!isRecord(item) || !exactKeys(item, ["ref", "change", "old", "new", "restore",
+        ..."not_restorable" in item ? ["not_restorable"] : []]) || !isString(item.ref)
+      || !oneOf(item.change, REF_CHANGES) || !isNullableString(item.old) || !isNullableString(item.new)) return null;
+    const entry = { ref: item.ref, change: item.change, old: item.old, new: item.new };
+    if (isString(item.restore) && !("not_restorable" in item)) found.push({ ...entry, restore: item.restore });
+    else if (item.restore === null && oneOf(item.not_restorable, NOT_RESTORABLE)) {
+      found.push({ ...entry, restore: null, not_restorable: item.not_restorable });
+    } else return null;
   }
   return found;
 }
@@ -216,9 +222,21 @@ function asEvent(value: unknown): TaskEvent | null {
 
 const CHANGE_TEXT: Record<RefChange["change"], string> = {
   created: "新建", deleted: "被删除", moved: "被移动", non_fast_forward: "被改写（不是快进）",
+  fast_forward_unverified: "无法确认是否为快进",
+  unreadable: "没有读取，是否变化未知",
 };
 const shortId = (id: string | null) => (id ? id.slice(0, 8) : "无");
 const NON_FAST_FORWARD_WARNING = "执行 reset --hard、rebase 或 commit --amend 之后恢复这个引用，工作区会留下一份撤销那些提交的差异；不要不看就提交它。";
+const FAST_FORWARD_UNVERIFIED_WARNING = "没能确认这是不是快进（提交历史太长或对象读不了），所以不能说它被重置过；请自己检查，确认是改写后再用恢复命令。";
+const NOT_RESTORABLE_TEXT: Record<(typeof NOT_RESTORABLE)[number], string> = {
+  too_many_symrefs: "仓库里的符号引用太多，没有逐跳记录",
+  git_too_old: "本机的 git 版本低于 2.46，无法核对并改写符号引用",
+  chain_outside_refs: "引用链经过 refs/ 之外的名字（例如 HEAD），Looper 不改写它",
+  chain_unreadable: "git 读不出引用链中的某一跳",
+  ref_file_unreadable: "它要读的引用文件或目录是指向别处的链接、不是独立的普通文件、过大或读取失败，Looper 没有读它",
+  overlapping_turn: "可能涉及另一个任务的改动（它的管家回合和本轮时间重叠，或恢复命令会改到它仍在用的分支），恢复可能撤掉那个任务的改动",
+  other_task_branch: "它是另一个仍未结束的任务的分支，恢复可能撤掉那个任务的改动",
+};
 const SKIP_REASONS: Record<string, string> = {
   outside: "解析到任务目录之外", other_repository: "在任务目录内的另一个仓库里", not_an_instruction_file: "链接指向的不是说明文件",
   symlink: "打开时路径变成了链接", hard_linked: "有其他硬链接", not_regular: "不是普通文件", too_large: "文件过大", io_error: "无法读取",
@@ -239,14 +257,20 @@ const FIRST_ENABLE_TEXT = "管家在你的真实检出目录里直接改文件�
 const REFS_UNREADABLE_TEXT = "本轮结束后没能重新读取分支和标签，这一轮对它们的改动（如果有）没有被报告；请自己检查 git branch 和 git tag。";
 
 function refChangeText(change: RefChange): string {
-  const warning = change.change === "non_fast_forward" ? ` ${NON_FAST_FORWARD_WARNING}` : "";
-  return `${change.ref} ${CHANGE_TEXT[change.change]}（${shortId(change.old)} → ${shortId(change.new)}）${warning}`;
+  const warning = change.change === "non_fast_forward" ? ` ${NON_FAST_FORWARD_WARNING}`
+    : change.change === "fast_forward_unverified" ? ` ${FAST_FORWARD_UNVERIFIED_WARNING}` : "";
+  const unrestorable = change.restore === null
+    ? ` 不能给出恢复命令：${NOT_RESTORABLE_TEXT[change.not_restorable]}；请自己检查这个引用。` : "";
+  return `${change.ref} ${CHANGE_TEXT[change.change]}（${shortId(change.old)} → ${shortId(change.new)}）${warning}${unrestorable}`;
 }
 
 function refReportText(event: Extract<TaskEvent, { kind: "ref_report" }>): string {
-  const parts = ["本轮之后引用有变化，Looper 不会自动恢复，下面的恢复命令由你自己决定是否执行："];
+  const commands = [...event.changes, ...event.info].flatMap((change) => change.restore === null ? [] : [change.restore]);
+  const parts = [commands.length ? "本轮之后引用有变化，Looper 不会自动恢复，下面的恢复命令由你自己决定是否执行："
+    : "本轮之后引用有变化，Looper 不会自动恢复，这次没有可给出的恢复命令。"];
   parts.push(...event.changes.map(refChangeText).map((line) => `- ${line}`));
   parts.push(...event.info.map((change) => `- ${refChangeText(change)}（属于另一个 Looper 任务）`));
+  if (new Set(commands).size < commands.length) parts.push("命令相同的几项由一条命令一起恢复，执行一次即可。");
   if (event.needs_you) parts.push("这些变化已列入「需要你处理」。");
   if (event.head) {
     parts.push(`HEAD 从 ${event.head.before ?? "detached"} 变成 ${event.head.after ?? "detached"}，不会自动切回；`
@@ -258,7 +282,8 @@ function refReportText(event: Extract<TaskEvent, { kind: "ref_report" }>): strin
 
 /** The commands of an event, shown in code font under its text. */
 function taskEventCode(event: TaskEvent): string[] {
-  return event.kind === "ref_report" ? [...event.changes, ...event.info].map((change) => change.restore) : [];
+  if (event.kind !== "ref_report") return [];
+  return [...new Set([...event.changes, ...event.info].flatMap((change) => change.restore === null ? [] : [change.restore]))];
 }
 
 function taskEventText(event: TaskEvent): string {

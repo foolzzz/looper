@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -386,4 +387,102 @@ def test_turn_events_carry_the_turns_message_id(monkeypatch, tmp_path, native):
         with pytest.raises(tm.Refused):
             await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="turn-10")
         assert [p["message_id"] for p in events_of(sink, "sandbox_notice") if p["notice"] == "refs_unreadable"] == ["turn-10"]
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_turns_of_two_tasks_that_overlap_on_one_checkout_store_reports_without_commands(monkeypatch, tmp_path, native):
+    async def check(db):
+        one, directory = await make_task(native, db, tmp_path)
+        await native.create(db, "task-two", path=directory)
+        sink = Sink()
+        first, branch = await refs.begin_turn({"id": one}, directory, sink=sink)
+        second, _ = await refs.begin_turn({"id": "task-two"}, directory, sink=sink)
+        git(directory, "branch", "both-saw-it")
+        for task_id, before in ((one, first), ("task-two", second)):
+            report = await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="m1")
+            change, = report.changes
+            assert change.restore is None and change.not_restorable is refs.NotRestorable.OVERLAPPING_TURN
+        stored = await db.fetch("SELECT changes FROM task_manager_ref_reports")
+        assert [json.loads(row["changes"])["changes"][0]["not_restorable"] for row in stored] == ["overlapping_turn"] * 2
+        alone, _ = await refs.begin_turn({"id": one}, directory, sink=sink)  # both windows ended with their reports
+        git(directory, "branch", "alone")
+        change, = (await refs.end_turn({"id": one}, directory, alone, branch, sink=sink)).changes
+        assert change.restore is not None
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_a_refused_begin_and_an_unreadable_end_leave_no_window(monkeypatch, tmp_path, native):
+    async def check(db):
+        task_id, directory = await make_task(native, db, tmp_path)
+        sink = Sink()
+        before, branch = await refs.begin_turn({"id": task_id}, directory, sink=sink)
+        git(directory, "update-ref", "refs/heads/z refs/heads/main", git(directory, "rev-parse", "HEAD"))
+        with pytest.raises(tm.Refused):
+            await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink)
+        assert task_id not in refs._windows
+        git(directory, "update-ref", "-d", "refs/heads/z refs/heads/main")
+        git(directory, "checkout", "-q", "other")
+        with pytest.raises(tm.Refused):
+            await refs.begin_turn({"id": task_id}, directory, sink=sink)
+        assert task_id not in refs._windows
+    run_db(check, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize("failure", [None, "before_the_report", "the_report"])
+def test_however_a_pool_turn_ends_its_window_is_closed(monkeypatch, tmp_path, native, failure):
+    async def check(db):
+        task_id, _ = await make_task(native, db, tmp_path)
+        opened = []
+        real = refs.open_turn
+
+        async def watched(work_dir, task):
+            opened.append(task)
+            return await real(work_dir, task)
+
+        monkeypatch.setattr(refs, "open_turn", watched)
+        if failure == "before_the_report":
+            monkeypatch.setattr(tm, "_digests", AsyncMock(side_effect=RuntimeError("synthetic")))
+        elif failure == "the_report":
+            monkeypatch.setattr(refs, "end_turn", AsyncMock(side_effect=RuntimeError("synthetic")))
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        try:
+            sink = await submit_and_wait(pool, task_id, "reply", message_id="m1")
+            assert sink.finals[0][1] == ("failed" if failure == "before_the_report" else "success")
+        finally:
+            await pool.shutdown()
+        assert opened == [task_id] and task_id not in refs._windows
+    run_db(check, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize("link", ["symlink", "hard_link"])
+@pytest.mark.parametrize("target", ["x/secret", "secret", "worktrees/w/secret"])
+def test_head_over_a_hop_outside_refs_records_and_names_no_branch_from_outside(monkeypatch, tmp_path, native, caplog,
+                                                                              target, link):
+    async def check(db):
+        task_id, directory = await make_task(native, db, tmp_path)
+        outside = tmp_path / "outside-file"
+        outside.write_text("ref: refs/heads/outside-marker\n")
+        hop = directory / ".git" / target
+        hop.parent.mkdir(parents=True, exist_ok=True)
+        hop.symlink_to(outside) if link == "symlink" else os.link(outside, hop)
+        (directory / ".git" / "refs" / "heads" / "main").write_text(f"ref: {target}\n")
+        sink = Sink()
+        with caplog.at_level(logging.DEBUG):
+            before, branch = await refs.begin_turn({"id": task_id}, directory, sink=sink)  # the first record
+            assert (before.head, branch) == ("refs/heads/main", "main")
+            assert await db.fetchval("SELECT branch FROM task_manager_branches WHERE task_id=$1", task_id) == "main"
+            report = await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="m1")
+            await store.set_branch(task_id, "other")
+            with pytest.raises(tm.Refused) as refused:
+                await refs.begin_turn({"id": task_id}, directory, sink=sink)
+            assert refused.value.reason is tm.RefuseReason.HEAD_MOVED
+            async with v1_api(tmp_path, db) as call:
+                status, answer = await call("tasks.task_manager_branch_set", {"task_id": task_id})
+                assert status == 200, answer
+                assert answer["result"] == {"task_id": task_id, "branch": "main", "previous": "other"}
+        stored = await db.fetch("SELECT changes FROM task_manager_ref_reports")
+        for place, text in {"report": repr(report), "events": repr(sink.events), "refusal": str(refused.value),
+                            "stored": repr([row["changes"] for row in stored]), "answer": repr(answer),
+                            "log": caplog.text}.items():
+            assert "outside-marker" not in text, place
     run_db(check, monkeypatch, timeout=60)
