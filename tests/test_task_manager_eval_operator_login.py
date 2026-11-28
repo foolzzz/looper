@@ -31,12 +31,11 @@ HOSTILE = {"foreign_task_refused", "readonly_progress", "project_instructions_ho
            "branch_kept_against_convention"}
 EDIT_CASES = {f"{name}{arm}" for name in ("edit_multi_file", "edit_large_file_local", "edit_retry_after_mismatch")
               for arm in ("", "_bash")}
-RERUN = ["edit_large_file_local", "edit_retry_after_mismatch"]  # run last, outside the pre-start reservation
+RERUN = ["edit_large_file_local_bash", "edit_retry_after_mismatch_bash"]  # run last, outside the pre-start reservation
 # A full operator-login run, in order: Opus, the other non-hostile cases (direct launches first), then the hostile ones.
 OPUS_FIRST = ["opus_switch"]
 SONNET_FIRST = ["direct_edit_brief", "stop_continue", "fresh_session_excerpt", "edit_multi_file",
-                "edit_multi_file_bash", "edit_large_file_local_bash", "edit_retry_after_mismatch_bash",
-                "readonly_resume"]
+                "edit_large_file_local", "edit_retry_after_mismatch", "edit_multi_file_bash", "readonly_resume"]
 HOSTILE_ORDER = ["readonly_progress", "foreign_task_refused", "project_instructions_hostile",
                  "branch_kept_against_convention"]
 
@@ -649,14 +648,14 @@ def test_the_reservation_is_computed_from_the_cases_and_printed_before_the_run(o
 
     monkeypatch.setattr(evaluation, "run_case", run_case)
     selected = [cases.BY_ID[name] for name in
-                ("direct_edit_brief", "foreign_task_refused", "opus_switch", "edit_large_file_local")]
+                ("direct_edit_brief", "foreign_task_refused", "opus_switch", "edit_large_file_local_bash")]
     result, _ = real_suite(tmp_path, selected=selected)
     rows = result["operator_login"]["reservation"]
     assert [(r["case"], r["model"], r["reps"], r["unit_usd"], r["subtotal_usd"]) for r in rows] == [
         ("opus_switch", "opus", 1, 3, 3), ("direct_edit_brief", "sonnet", 1, 1.25, 1.25),
         ("foreign_task_refused", "sonnet", 2, 1.25, 2.5)]
     assert evaluation.reservation_table(rows) in printed[0] and "| total | | | | 6.75 |" in printed[0]
-    assert "edit_large_file_local" in printed[0] and "skipped" in printed[0]
+    assert "edit_large_file_local_bash" in printed[0] and "skipped" in printed[0]
     assert result["total_cap_usd"] == 23.5
 
 
@@ -672,6 +671,9 @@ def test_hostile_cases_run_twice_every_other_case_once_and_the_re_run_list_is_no
         assert case.repetitions == (2 if case.hostile else 1), case.id
     assert [case.id for case in cases.CASES if case.rerun_only] == RERUN
     assert not any(case.hostile for case in cases.CASES if case.rerun_only)
+    # The main list favours the shipped launch shape: all its edit arms, and one Bash-only arm as the baseline.
+    assert {case.id for case in cases.CASES if case.edits and not case.rerun_only} == {
+        "edit_multi_file", "edit_large_file_local", "edit_retry_after_mismatch", "edit_multi_file_bash"}
 
 
 def runnable():
@@ -776,6 +778,56 @@ def test_a_re_run_case_that_does_not_fit_is_skipped_not_failed(operator, monkeyp
     assert [case for case, _ in reservations(ledger) if case in RERUN] == RERUN[:fitted]
     saved = [row for row in json.loads(path.read_text())["rows"] if row["outcome"] == "skipped"]
     assert saved and all("total cap" in row["reason"] for row in saved)  # the shared report keeps why
+
+
+# --- The edit command, checked before the start ------------------------------------------------------------------
+
+
+def interpreter_dir(monkeypatch, tmp_path, script):
+    """A scratch interpreter directory as ``sys.executable``'s, holding ``looper-edit`` as ``script`` says."""
+    bin_dir = tmp_path / "interpreter" / "bin"
+    bin_dir.mkdir(parents=True)
+    if script != "missing":
+        (bin_dir / "looper-edit").write_text("#!/bin/sh\n")
+        (bin_dir / "looper-edit").chmod(0o755 if script == "executable" else 0o644)
+    monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
+
+
+@pytest.mark.parametrize("script", ["missing", "not_executable"])
+@pytest.mark.parametrize("names", [None, ["direct_edit_brief"], ["direct_edit_brief", "edit_multi_file_bash"]])
+def test_a_real_run_without_the_edit_command_is_refused_before_any_cli_starts(operator, monkeypatch, tmp_path,
+                                                                              script, names):
+    probes = probe_stub(monkeypatch)
+    started = stub(monkeypatch)
+    claude = counting_claude(tmp_path)
+    interpreter_dir(monkeypatch, tmp_path, script)
+    with pytest.raises(EvalError, match="looper-edit is not installed next to .*Nothing was started"):
+        real_suite(tmp_path, claude_bin=claude, ledger_path=tmp_path / "ledger.jsonl",
+                   selected=names and [cases.BY_ID[name] for name in names])
+    assert not (tmp_path / "cli-starts").exists() and probes == [] and started == []
+    assert not (tmp_path / "out").exists() and not (tmp_path / "ledger.jsonl").exists()
+    # The lookup a direct launch uses to put the command on the sandbox's PATH refuses the same installation.
+    with pytest.raises(RuntimeError, match="looper-edit is not installed next to"):
+        task_manager_edit.edit_bin({"HOME": str(tmp_path / "lookup-home")}, forbidden=())
+
+
+def test_a_real_run_with_the_edit_command_starts_and_leaves_no_shipped_arm_out(operator, monkeypatch, tmp_path):
+    probe_stub(monkeypatch)
+    started = stub(monkeypatch)
+    claude = counting_claude(tmp_path)
+    interpreter_dir(monkeypatch, tmp_path, "executable")
+    result, _ = real_suite(tmp_path, claude_bin=claude)
+    assert (tmp_path / "cli-starts").exists() and started == full_order()
+    assert blocked(result, "edit_command_missing") == {}
+    task_manager_edit.edit_bin({"HOME": str(tmp_path / "lookup-home")}, forbidden=())
+
+
+def test_the_fake_rehearsal_reports_the_missing_edit_command_per_case(operator, monkeypatch, tmp_path):
+    stub(monkeypatch)
+    interpreter_dir(monkeypatch, tmp_path, "missing")
+    result, _ = suite(tmp_path)
+    assert set(blocked(result, "edit_command_missing")) == {
+        "edit_multi_file", "edit_large_file_local", "edit_retry_after_mismatch"}
 
 
 # --- The launch check -------------------------------------------------------------------------------------------

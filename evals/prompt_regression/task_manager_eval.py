@@ -1079,6 +1079,10 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
                 raise EvalError("operator-login input dumps need an ignored local directory (evals/runs, or outside "
                                 "the repository); set --dump-inputs")
         check_billing(os.environ)  # before any CLI start
+        # Every direct launch needs the command, and without it the shipped edit arms would only be not_runnable.
+        if mode == "real" and not cases.edit_command_installed():
+            raise EvalError(f"looper-edit is not installed next to {sys.executable}, where a direct session finds it; "
+                            "reinstall Looper in this environment. Nothing was started.")
     out_dir.mkdir(parents=True, exist_ok=True)
     runnable = [(c, cases.blocker(c, tool_names())) for c in selected]
     if operator_login:

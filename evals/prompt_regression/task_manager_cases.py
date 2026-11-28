@@ -1001,10 +1001,11 @@ SETTINGS_BAD = {"calls": [["Bash", {"command": _py_replace("settings.py", *SETTI
 
 def _edit_case(case_id: str, rfc: int, title: str, fixture: str, turns: tuple[Turn, ...], judge: Callable[[Evidence], Judgement],
                arm: Arm, steps: tuple[dict[str, Any], ...], *, rerun_only: bool = False) -> Case:
-    """``rerun_only`` applies to the shipped arm; the Bash-only arm is never deferred."""
+    """``rerun_only`` applies to the Bash-only arm: the main list favours the shipped launch shape; one control arm
+    stays as the baseline."""
     return Case(case_id if arm is Arm.SHIPPED else f"{case_id}_bash", rfc, title + ("" if arm is Arm.SHIPPED else
                 " (Bash only: no looper-edit, no edit line)"), SONNET, fixture, turns, judge, steps, arm=arm, edits=True,
-                hostile=False, needs_synthetic_home=False, rerun_only=rerun_only and arm is Arm.SHIPPED)
+                hostile=False, needs_synthetic_home=False, rerun_only=rerun_only and arm is Arm.BASH_ONLY)
 
 
 def _edit_cases() -> tuple[Case, ...]:
