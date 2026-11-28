@@ -4977,22 +4977,39 @@ evaluation is required before the original schedule requirement is complete.
   empty when the notice has no run, so a stale alert still dedupes). It is
   tried again up to 3 times, after 1, then 5, then 15 minutes. The row is
   claimed (`sending`) before the send, so a second pass or a restart does not
-  send it twice. A send that raises, or that the channel reports as unknown,
-  is `uncertain` and is never sent again; a restart settles a claim still
-  `sending` to `uncertain` because the server stopped while it was sending.
+  send it twice. `ChannelRegistry.notify` still returns `(sent, error)` for
+  every existing caller. Schedule notices go through `notify_outcome`, which
+  also says whether the channel refused the send or may have accepted it.
+  A send that raises, times out, or that the channel reports as unknown is
+  `uncertain` and is never sent again. In Telegram's direct mode most network
+  errors are unknown, so they become `uncertain` and a summary line, not
+  another try. The same is true of a multi-part message of which any part
+  already left, and of an outbound send whose result was not readable. A
+  restart settles a claim still `sending` to `uncertain` because the server
+  stopped while it was sending. Each send has its own time limit. The
+  scheduler loop starts one background retry task after a tick and does not
+  wait for it, so one attempt that does not return does not stop the ticks; a
+  drain stops that pass between rows. A pass that waits for in-flight messages
+  also sends the retries that are due, and only when a sender is configured.
   After 3 refused retries the row is `gave_up`. A successful first send leaves
   no retry row; a successful later try stays `sent`. While the server is
   draining, due retries wait. If the schedule is gone, no longer notifies, has
   no target, keeps the alert on the dashboard, or the chat is off the
-  allowlist, the retry is `gave_up` without another send. Dashboard-only
-  notices are not retried. `proactive_deliveries`
-  records a push decision and does not resend, and `schedule_notifications`
-  stays an append-only outbox, so neither table is the claim.
-  A failure recovery whose failure alert is still `pending` or `gave_up`
-  (never delivered) adds one line:
+  allowlist, the retry is `gave_up` without another send. A schedule deleted
+  before the claim is logged and not raised. Dashboard-only notices are not
+  retried. A completion notice whose send failed is still replayed (its
+  `sent_at` stays empty until a send is accepted). A later try of that run
+  notice that is accepted marks the completion event sent, so the replay does
+  not send a second copy. `proactive_deliveries` records a push decision and
+  does not resend, and `schedule_notifications` stays an append-only outbox,
+  so neither table is the claim.
+  A failure recovery names each failure alert that is still `pending`,
+  `sending`, `gave_up` or `uncertain` (not one that was delivered):
   `补充：<local time> 的失败告警没有送达，涉及连续 <n> 次运行。`
-  An alert that is `uncertain` says `可能没有送达` instead. That alert is not
-  sent on its own after the recovery names it. A recovery that itself fails
+  `<n>` is the streak at the latest failure, not the count when the alert
+  opened. An alert that is `uncertain` says `可能没有送达` instead. An alert
+  still `sending` when the recovery is written is counted the same way, and a
+  later refusal of that send is not queued again. A recovery that itself fails
   is retried with the same line. The line is omitted when the alert was
   delivered, and other recovery texts are unchanged.
 - **Deleting.** A project with schedules is not deleted (409) until they are.
