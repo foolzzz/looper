@@ -61,6 +61,8 @@ SYMREF_LIMIT = 200  # symbolic refs asked for their direct target (one git proce
 SYMREF_GIT = (2, 46)  # the first git whose ``update-ref --stdin`` checks and writes symbolic refs
 REF_FILE_LIMIT = 4096  # bytes of a loose ref file; a larger one is not read
 _ROOTS = ("refs/heads", "refs/tags")
+_PER_WORKTREE = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")  # in the git directory, not the common one
+_ROOT_REF = re.compile(r"[A-Z0-9_-]+")  # a ref beside ``HEAD``, such as ``ORIG_HEAD``
 # What git's ref-name rules forbid, as far as a name used as a path must be checked.
 _NOT_A_REF_NAME = re.compile(r"\.\.|//|/\.|\.lock(/|$)|[\x00-\x20\x7f~^:?*\[\\]|[/.]$")
 _OID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
@@ -339,6 +341,7 @@ class _Files:
 
     links: dict[str, str] = field(default_factory=dict)  # symbolic ref -> the target its file (or link) spells
     unreadable: dict[str, str] = field(default_factory=dict)  # ref or directory -> why it was refused
+    head: str | None = None  # the ref ``HEAD`` itself points to; None when detached
 
 
 async def _git_dirs(work_dir: str | Path) -> tuple[str, str]:
@@ -352,9 +355,11 @@ async def _git_dirs(work_dir: str | Path) -> tuple[str, str]:
     return found[0], found[1]
 
 
-def _check_top_files(git_dir: str, common: str) -> None:
+def _check_top_files(git_dir: str, common: str) -> str | None:
     """``HEAD`` and ``packed-refs``, which git reads whole, must be files of their own (``HEAD`` may be the old
-    symbolic-ref link): a link to elsewhere would have git report what is there. Neither is read here."""
+    symbolic-ref link): a link to elsewhere would have git report what is there. Returns the ref ``HEAD`` itself
+    points to; nothing of ``packed-refs`` is read here."""
+    head = None
     for folder, name in ((git_dir, "HEAD"), (common, "packed-refs")):
         refused = _unreadable(f"Looper does not read the repository's {name}: it is not a regular file of its own.")
         try:
@@ -362,13 +367,20 @@ def _check_top_files(git_dir: str, common: str) -> None:
                 if isinstance(directory, safe_read.Skipped):
                     raise refused
                 found = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                if (name == "HEAD" and stat.S_ISLNK(found.st_mode)
-                        and _is_ref_name(os.readlink(name, dir_fd=directory))):
-                    continue
+                if name == "HEAD" and stat.S_ISLNK(found.st_mode):
+                    if not _is_ref_name(head := os.readlink(name, dir_fd=directory)):
+                        raise refused
+                elif not stat.S_ISREG(found.st_mode) or found.st_nlink > 1:
+                    raise refused
+                elif name == "HEAD":
+                    read = safe_read.read_at(directory, name, REF_FILE_LIMIT)
+                    if isinstance(read, safe_read.Skipped):
+                        raise refused
+                    if read.data.startswith(b"ref:"):
+                        head = _spelled(read.data)
         except FileNotFoundError:
             continue
-        if not stat.S_ISREG(found.st_mode) or found.st_nlink > 1:
-            raise refused
+    return head
 
 
 def _is_plain_file(common: str, path: str) -> bool:
@@ -381,6 +393,11 @@ def _is_plain_file(common: str, path: str) -> bool:
 
 def _is_ref_name(name: str) -> bool:
     return name.startswith("refs/") and not _NOT_A_REF_NAME.search(name)
+
+
+def _spelled(data: bytes) -> str:
+    """The target a ``ref:`` file spells, ending where git ends it, at a NUL."""
+    return os.fsdecode(data[4:].split(b"\0", 1)[0].strip())
 
 
 def _read_entry(directory: int, entry: str, name: str, files: _Files) -> None:
@@ -400,7 +417,7 @@ def _read_entry(directory: int, entry: str, name: str, files: _Files) -> None:
     if isinstance(read, safe_read.Skipped):
         files.unreadable[name] = read.reason.value
     elif read.data.startswith(b"ref:"):
-        files.links[name] = os.fsdecode(read.data[4:].strip())
+        files.links[name] = _spelled(read.data)
 
 
 def _walk(common: str, files: _Files) -> None:
@@ -432,25 +449,32 @@ def _walk(common: str, files: _Files) -> None:
             files.unreadable[folder] = type(exc).__name__
 
 
-def _probe_chains(common: str, names: Iterable[str], files: _Files) -> None:
-    """The loose files of the refs outside branches and tags among ``names``, and of what those spell as targets.
-    One that does not exist is packed or missing."""
+def _probe_chains(git_dir: str, common: str, names: Iterable[str], files: _Files) -> None:
+    """The files of the refs ``names``, and of what those spell as targets, by the spelling that reaches them (on a
+    case-insensitive disk another case of a walked name opens the same file). One that does not exist is packed or
+    missing. ``HEAD`` is checked with the top files; any other name outside ``refs/`` that
+    git would read is a file of the git directory."""
     queue, seen = deque(names), set()
     while queue:
         name = queue.popleft()
-        if name in seen or name.startswith(COMPARED) or not name.startswith("refs/"):
+        if name in seen or name == "HEAD":
             continue
         seen.add(name)
-        if not _is_ref_name(name):
+        in_refs = name.startswith("refs/")
+        if in_refs and not _is_ref_name(name):
             files.unreadable[name] = "not_a_ref_name"
             continue
+        if not in_refs and not _ROOT_REF.fullmatch(name):
+            continue  # git does not take it for a ref name, so it opens nothing for it
+        base = git_dir if not in_refs or name.startswith(_PER_WORKTREE) else common
         *parts, leaf = name.split("/")
         try:
-            with safe_read.open_directory(common, parts) as directory:
+            with safe_read.open_directory(base, parts) as directory:
                 if isinstance(directory, safe_read.Skipped):
                     files.unreadable[name] = directory.reason.value
                     continue
-                os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                if stat.S_ISDIR(os.stat(leaf, dir_fd=directory, follow_symlinks=False).st_mode):
+                    continue  # no ref: git opens nothing in it for this name
                 _read_entry(directory, leaf, name, files)
         except FileNotFoundError:
             continue
@@ -470,11 +494,11 @@ async def _ref_files(work_dir: str | Path, names: Iterable[str] = (), *, walk: b
     wanted = list(names)
 
     def read() -> _Files:
-        _check_top_files(git_dir, common)
-        files = _Files()
+        files = _Files(head=_check_top_files(git_dir, common))
         if walk:
             _walk(common, files)
-        _probe_chains(common, [*wanted, *files.links.values()], files)
+        head = [files.head] if files.head else []
+        _probe_chains(git_dir, common, [*wanted, *head, *files.links.values()], files)
         return files
 
     try:
@@ -501,7 +525,9 @@ def _without_unreadable(snap: Snapshot, *found: _Files) -> Snapshot:
 
     if snap.unreadable != refused:
         logger.warning("task Manager refs: %d ref files, directories or links through them are not read", len(refused))
-    head = None if snap.head is not None and _within(snap.head, refused) else snap.head
+    # git names HEAD after the end of its chain: where that chain is refused, only what HEAD itself holds is kept.
+    head = next((files.head if files.head.startswith(HEADS) else None for files in found
+                 if files.head and _within(files.head, refused)), snap.head)
     return replace(snap, refs=keep(snap.refs), head=head, symrefs=keep(snap.symrefs), hops=keep(snap.hops),
                    outside=keep(snap.outside), unreadable=frozenset(refused))
 

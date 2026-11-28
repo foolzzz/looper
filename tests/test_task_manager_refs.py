@@ -1093,6 +1093,71 @@ def test_a_hop_linked_only_until_the_comparison_has_read_it_shows_nothing_outsid
     assert change.restore is None and change.not_restorable.value == "ref_file_unreadable"
 
 
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("through", [None, "refs/heads/mid"])  # HEAD's branch itself, or what it reads through
+def test_a_linked_file_under_head_does_not_name_head_after_what_is_outside(repo, tmp_path, caplog, kind, through):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    if through:
+        git(repo, "update-ref", through, "HEAD")
+        git(repo, "symbolic-ref", "refs/heads/main", through)
+    name = through or "refs/heads/main"
+
+    def go():
+        (repo / ".git" / name).unlink()
+        (repo / ".git" / name).symlink_to(outside)
+
+    caplog.set_level("DEBUG")
+    report = run(repo, go)
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, "refs/heads/main")
+    assert report.head_after == "refs/heads/main"  # what HEAD itself holds
+
+
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("target, linked_worktree", [("ORIG_HEAD", False), ("refs/worktree/x", True)])
+def test_a_chain_to_a_file_of_the_git_directory_that_is_linked_shows_nothing_outside(repo, tmp_path, caplog, kind,
+                                                                                     target, linked_worktree):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    work, git_dir = repo, repo / ".git"
+    if linked_worktree:
+        work, git_dir = tmp_path / "tree", repo / ".git" / "worktrees" / "tree"
+        git(repo, "worktree", "add", "-q", str(work), "other")
+
+    def go():
+        (git_dir / target).parent.mkdir(parents=True, exist_ok=True)
+        (git_dir / target).symlink_to(outside)
+        (repo / ".git" / "refs" / "heads" / "via").write_text(f"ref: {target}\n")
+
+    caplog.set_level("DEBUG")
+    report = run(work, go, branch="other" if linked_worktree else "main")
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, "refs/heads/via")
+
+
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("spelling", ["ref: refs/heads/OTHER\n", "ref: refs/heads/other\0x\n"])
+def test_a_target_spelled_so_that_git_still_opens_a_linked_file_shows_nothing_outside(repo, tmp_path, caplog, kind,
+                                                                                     spelling):
+    """Another case of the name (a case-insensitive disk opens the same file), and bytes after a NUL (git stops
+    there)."""
+    outside, secrets = _outside(tmp_path, repo, kind)
+    heads = repo / ".git" / "refs" / "heads"
+
+    def go():
+        (heads / "other").unlink()
+        (heads / "other").symlink_to(outside)
+        (repo / ".git" / "HEAD").write_bytes(spelling.encode())
+        (heads / "via").write_bytes(spelling.encode())
+
+    caplog.set_level("DEBUG")
+    try:
+        report = run(repo, go)
+    except Exception as refused:  # git may refuse the repository outright: that shows nothing either
+        assert all(secret not in str(refused) + caplog.text for secret in secrets)
+        return
+    _leaks_nothing(report, caplog, secrets)
+
+
 def test_the_old_symlink_spelling_of_a_symbolic_ref_is_still_read(repo):
     (repo / ".git" / "refs" / "heads" / "old-style").symlink_to("refs/heads/other")
     found = asyncio.run(refs.snapshot(repo))

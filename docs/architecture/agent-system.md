@@ -1094,7 +1094,9 @@ them.
   and again after git, and a refused ref, directory or file, with every link that reads through it, is dropped from
   what git said: its entry is `unreadable` with no new value, no command and `ref_file_unreadable`, in every report
   while it stays so, and "needs you" like any change. A `HEAD` or `packed-refs` that is not a file of its own
-  refuses the whole snapshot. Not covered: a link put in place and removed again while one git command runs.
+  refuses the whole snapshot, and where the chain from `HEAD` is refused, the branch named is the one `HEAD` itself
+  holds. Not covered: a link put in place after Looper's first read and removed again before its second one, while
+  git runs between them.
   Names are shown with control and format
   characters written as `\uXXXX`. Looper never restores anything and
   raises no alert: a ref change is not an invariant violation. The `ref_report` event carries
