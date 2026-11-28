@@ -9,6 +9,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -263,7 +264,8 @@ def test_the_report_holds_hashes_and_no_free_text(operator, monkeypatch, tmp_pat
     assert "-marker" not in text and str(operator) not in text and str(tmp_path) not in text
     saved = json.loads(text)
     assert saved["rows"][0]["checks"] == [{"name": "named", "ok": False}]
-    assert saved["rows"][0]["reason"] == "RuntimeError" and saved["rows"][0]["evidence"] == "~/somewhere"
+    # (this synthetic home sits in the temporary directory, so that root is what gets replaced)
+    assert saved["rows"][0]["reason"] == "RuntimeError" and saved["rows"][0]["evidence"].startswith("<eval-root>/")
     section = saved["operator_login"]
     assert section["config"]["user_claude_md_sha256"] == sha(MEMORY.encode())
     assert section["config"]["cli_version"].startswith("fake ") and section["changed_during_run"] is True
@@ -286,6 +288,14 @@ def test_real_mode_hands_no_credential_to_a_case_and_records_the_verified_versio
 
 
 # --- The launch check -------------------------------------------------------------------------------------------
+
+
+def test_a_refused_turn_is_a_launch_refusal(operator, tmp_path):
+    run = SimpleNamespace(turns=[{"final": {"outcome": "refused", "text": "mismatch"}}], capture=tmp_path)
+    with pytest.raises(evaluation.LaunchRefused, match="refused"):
+        evaluation.Run.verify_launches(run)
+    run.turns[0]["final"]["outcome"] = "answered"
+    assert evaluation.Run.verify_launches(run) == 0
 
 
 def test_a_bypass_launch_must_carry_the_sandbox_and_the_deny_list(operator, tmp_path):
