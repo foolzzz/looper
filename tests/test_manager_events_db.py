@@ -430,6 +430,34 @@ def test_a_failed_send_leaves_sent_at_empty_and_a_replay_sends_again(monkeypatch
     run_scheduled(test, monkeypatch, tmp_path)
 
 
+def test_a_raised_send_leaves_sent_at_empty_and_a_replay_sends_again(monkeypatch, tmp_path):
+    async def test(env: ScheduleEnv):
+        sender = with_sender(env)
+        await allow_telegram(env)
+        schedule = await env.schedule(notify="always",
+                                      notify_target={"channel": "telegram", "chat": TELEGRAM_CHAT})
+        run_id = await env.scheduler.run_now(schedule["schedule_id"])
+        task_id = (await db_schedules.get_run(run_id))["task_id"]
+        calls = {"n": 0}
+
+        async def boom(channel: str, chat: str, text: str, **_kwargs: Any) -> tuple[bool, str | None]:
+            calls["n"] += 1
+            raise TimeoutError("the answer was lost")
+
+        env.scheduler._notifier._sender = boom
+        await env.end_task(task_id, "completed", summary="done")
+        await env.scheduler.idle()
+        (row,) = await events(env.pool)
+        assert calls["n"] == 1 and row["sent_at"] is None
+        assert await env.pool.fetchval(
+            "SELECT count(*) FROM schedule_notice_retries WHERE kind = 'run'") == 0
+        env.scheduler._notifier._sender = sender
+        await env.scheduler._notifier.run_ended(run_id)
+        assert len(sender.sent) == 1 and (await events(env.pool))[0]["sent_at"] is not None
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
 @pytest.mark.parametrize("hang", ["record", "mark_sent"])
 def test_a_hanging_database_call_does_not_hold_back_the_notice(monkeypatch, tmp_path, hang):
     async def check(pool):

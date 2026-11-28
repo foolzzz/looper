@@ -90,9 +90,25 @@ async def _pass(env: ScheduleEnv, sid: str, minutes: float) -> None:
     await env.scheduler.idle()
 
 
+def _family_role(kind: str) -> tuple[str, str] | None:
+    if kind == "run":
+        return None
+    if kind.endswith("_recovered"):
+        return kind[: -len("_recovered")], "recovery"
+    if kind.endswith("_alert"):
+        return kind[: -len("_alert")], "alert"
+    return None
+
+
 async def _retries(env: ScheduleEnv, kind: str = "failures_alert") -> list[dict[str, Any]]:
+    mapped = _family_role(kind)
+    if mapped is None:
+        return [dict(row) for row in await env.pool.fetch(
+            "SELECT * FROM schedule_notice_retries WHERE kind = $1 ORDER BY id", kind)]
+    family, role = mapped
     return [dict(row) for row in await env.pool.fetch(
-        "SELECT * FROM schedule_notice_retries WHERE kind = $1 ORDER BY id", kind)]
+        "SELECT * FROM schedule_notice_retries WHERE kind = $1 AND role = $2 ORDER BY episode, id",
+        family, role)]
 
 
 async def _outbox(env: ScheduleEnv, sid: str, kind: str) -> list[str]:
@@ -147,9 +163,10 @@ def test_three_failed_retries_give_up_and_the_recovery_says_what_the_chat_did_no
         [recovery] = channel.got
         assert recovery.startswith("恢复")
         [line] = [line for line in recovery.splitlines() if line.startswith("补充")]
-        assert "没有送达" in line and "涉及连续 1 次运行" in line and "2026-01-15 12:" in line
+        assert "没有送达" in line and "可能没有送达" not in line and "涉及连续 1 次运行" in line
+        assert "2026-01-15 12:" in line
         [row] = await _retries(env)
-        assert row["state"] == "gave_up" and row["reported_at"] is not None
+        assert row["state"] == "gave_up"
 
         # Told once: the next streak's recovery does not repeat it.
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "exit 3"}})
@@ -167,9 +184,10 @@ def test_a_pending_alert_is_not_sent_after_its_recovery_which_carries_it(monkeyp
         channel.script = ["rejected"]
         await _fire(env, sid)
         await _recover(env, sid)
-        assert [text.startswith("恢复") and "没有送达" in text for text in channel.got] == [True]
+        assert [text.startswith("恢复") and "没有送达" in text and "可能没有送达" not in text
+                for text in channel.got] == [True]
         [row] = await _retries(env)
-        assert row["state"] == "gave_up"
+        assert row["state"] == "superseded"
         await _pass(env, sid, 120)
         assert len(channel.alerts()) == 1
 
@@ -184,17 +202,18 @@ def test_a_recovery_that_fails_is_retried_with_the_undelivered_alert(monkeypatch
         await _fire(env, sid)
         await _recover(env, sid)
         [alert] = await _retries(env)
-        assert alert["reported_at"] is None
+        assert alert["state"] == "superseded"
         await _pass(env, sid, 2)
-        assert [text.startswith("恢复") and "没有送达" in text for text in channel.got] == [True]
+        assert [text.startswith("恢复") and "没有送达" in text and "可能没有送达" not in text
+                for text in channel.got] == [True]
         assert channel.got[0].count("补充") == 1
         [alert] = await _retries(env)
-        assert alert["reported_at"] is not None
+        assert alert["state"] == "superseded"
 
     run_scheduled(test, monkeypatch, tmp_path)
 
 
-def test_a_new_alert_drops_the_pending_recovery_and_its_recovery_still_names_the_old_alert(
+def test_a_new_episode_does_not_send_the_previous_recovery_or_name_its_alert(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     async def test(env: ScheduleEnv) -> None:
@@ -205,11 +224,12 @@ def test_a_new_alert_drops_the_pending_recovery_and_its_recovery_still_names_the
         await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "exit 3"}})
         await _fire(env, sid)
         [recovery] = await _retries(env, "failures_recovered")
-        assert recovery["state"] == "gave_up"
+        assert recovery["state"] == "superseded"
         await _pass(env, sid, 120)
         assert [text[:2] for text in channel.got] == ["告警"]
         await _recover(env, sid)
-        assert "没有送达" in channel.got[-1]
+        assert "补充" not in channel.got[-1] and "没有送达" not in channel.got[-1]
+        assert [text[:2] for text in channel.got] == ["告警", "恢复"]
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -307,21 +327,23 @@ def test_two_passes_at_once_claim_a_retry_once(monkeypatch: pytest.MonkeyPatch, 
 
 def test_a_refused_run_notice_is_replayed_and_a_second_run_is_its_own(monkeypatch: pytest.MonkeyPatch,
                                                                       tmp_path: Path) -> None:
-    """A completion replay of a run whose send was refused sends again. One row stays. A second run is its own."""
+    """A completion notice is not a retry row. The next time that run ends sends it again, and so does another run."""
     async def test(env: ScheduleEnv) -> None:
         sid, channel = await _setup(env, "rejected", notify="failures", alert_failures_after=10)
-        run = await _fire(env, sid)
-        await env.scheduler._notifier.run_ended(run["run_id"])
-        [row] = await _retries(env, "run")
-        assert (row["state"], row["run_id"], len(channel.attempts)) == ("pending", run["run_id"], 2)
-        # A second failed run is a notice of its own.
         await _fire(env, sid)
-        assert len(await _retries(env, "run")) == 2
-        channel.default = "sent"
-        # due() moves the clock about five minutes, so the first notice is already retried once and waits five more.
-        await _pass(env, sid, 5)
-        assert [row["state"] for row in await _retries(env, "run")] == ["sent", "sent"]
-        assert len(channel.got) == 2
+        assert await env.pool.fetchval(
+            "SELECT count(*) FROM schedule_notice_retries WHERE kind = 'run'") == 0
+        run = (await env.runs(sid))[0]
+        before = len(channel.attempts)
+        await env.scheduler._notifier.run_ended(run["run_id"])
+        assert len(channel.attempts) == before + 1
+        for minutes in (1, 5, 15, 30):
+            await _pass(env, sid, minutes)
+        assert len(channel.attempts) == before + 1
+        await _fire(env, sid)
+        assert len(channel.attempts) == before + 2
+        assert await env.pool.fetchval(
+            "SELECT count(*) FROM schedule_notice_retries WHERE kind = 'run'") == 0
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -397,7 +419,9 @@ def test_a_delivered_notice_and_a_dashboard_one_leave_no_retry(monkeypatch: pyte
         await _fire(env, sid)
         other = (await env.enabled(gate_command="exit 3", alert_failures_after=1))["schedule_id"]
         await _fire(env, other)
-        assert await env.pool.fetchval("SELECT count(*) FROM schedule_notice_retries") == 0
+        assert await env.pool.fetchval("SELECT count(*) FROM schedule_notice_retries") == 1
+        [row] = await _retries(env)
+        assert row["state"] == "sent"
         await _recover(env, sid)
         assert "补充" not in channel.got[-1]
 
@@ -408,14 +432,18 @@ def test_old_settled_retries_are_pruned_with_the_outbox(monkeypatch: pytest.Monk
     from looper.db import schedules as db_schedules
 
     async def test(env: ScheduleEnv) -> None:
-        sid, channel = await _setup(env, "rejected", notify="failures", alert_failures_after=10)
+        sid, _channel = await _setup(env, "rejected")
         await _fire(env, sid)
-        await _fire(env, sid)
-        first, second = await _retries(env, "run")
-        await env.pool.execute("UPDATE schedule_notice_retries SET state = 'gave_up' WHERE id = $1", first["id"])
+        [pending] = await _retries(env)
+        assert pending["state"] == "pending"
+        old = env.clock.now - timedelta(days=2)
+        await env.pool.execute(
+            "INSERT INTO schedule_notice_retries (schedule_id, kind, episode, role, state, retries, text, "
+            "created_at, updated_at) VALUES ($1, 'failures', 2, 'alert', 'gave_up', 3, 'old alert', $2, $2)",
+            sid, old)
         async with env.pool.acquire() as conn:
             await db_schedules.prune_notifications(conn, env.clock.now + timedelta(days=1))
-        assert [row["id"] for row in await _retries(env, "run")] == [second["id"]]  # a pending one is kept
+        assert [row["id"] for row in await _retries(env)] == [pending["id"]]
 
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -465,12 +493,10 @@ def test_a_successful_run_retry_marks_the_completion_event_sent(monkeypatch: pyt
         event = await env.pool.fetchrow(
             "SELECT sent_at FROM manager_events WHERE dedupe_key = $1", f"schedule_run:{run_id}")
         assert event is not None and event["sent_at"] is None
-        [row] = await _retries(env, "run")
-        assert row["state"] == "pending"
+        assert await env.pool.fetchval(
+            "SELECT count(*) FROM schedule_notice_retries WHERE kind = 'run'") == 0
         channel.default = "sent"
-        # The schedule is not enabled, so its next fire stays unset. Advance the clock and retry.
-        env.clock.now += timedelta(minutes=2)
-        await env.scheduler.idle()
+        await env.scheduler._notifier.run_ended(run_id)
         sent_at = await env.pool.fetchval(
             "SELECT sent_at FROM manager_events WHERE dedupe_key = $1", f"schedule_run:{run_id}")
         assert sent_at is not None

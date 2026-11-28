@@ -586,10 +586,10 @@ class Scheduler:
     async def idle(self) -> None:
         """Wait for the gates and messages under way, and those they start.
 
-        When this scheduler sends notices, also send the retries that are due, after that wait, so a recovery
-        spawned by this pass can name an alert before the alert is sent again. A scheduler with no sender (a
-        message backup and nothing else) does not query the database for this. The running loop does not wait:
-        it keeps one retry task in the background.
+        When this scheduler sends notices, also send the retries that are due, after that wait. A recovery is
+        claimed only once its alert is no longer sending, so the recovery can say whether the alert was
+        delivered. A scheduler with no sender (a message backup and nothing else) does not query the database
+        for this. The running loop does not wait: it keeps one retry task in the background.
         """
         while self._background:
             await asyncio.gather(*list(self._background), return_exceptions=True)

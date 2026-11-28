@@ -1,176 +1,230 @@
-"""Claim rows for a schedule notice that a channel refused or may have accepted.
+"""One episode of one alert kind of one schedule.
 
-The unique key is the schedule, the kind and the run (``run_key`` is ``''`` when there is no run). One
+The key is the schedule, the alert family (``kind``), the episode and the role (``alert`` or ``recovery``).
+Episode numbers increase when that kind's failure period opens and are not reused. One
 ``UPDATE ... WHERE state = 'pending'`` is the claim: a second caller updates nothing and does not send.
+A completion notice is not a row here.
 """
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, AsyncIterator
 
 import asyncpg
 
 Db = asyncpg.Pool | asyncpg.Connection
 
-_TERMINAL = ("sent", "uncertain", "gave_up")
-# Alerts a recovery may still have to tell the chat about. ``sending`` counts: the recovery can be written while
-# the alert is in flight. ``sent`` does not: that try was delivered.
-_UNREPORTED = ("pending", "sending", "gave_up", "uncertain")
+_TERMINAL = ("sent", "uncertain", "gave_up", "superseded")
 
 
-async def held(conn: Db, schedule_id: str, kind: str, run_key: str) -> str | None:
-    """``sent`` when a run notice was delivered, ``failed`` when it must not be sent, else None.
+@asynccontextmanager
+async def _transaction(db: Db) -> AsyncIterator[asyncpg.Connection]:
+    if isinstance(db, asyncpg.Pool):
+        async with db.acquire() as conn:
+            async with conn.transaction():
+                yield conn
+    else:
+        async with db.transaction():
+            yield db
 
-    A run notice still ``pending`` is None: its completion replay sends it again. ``sending``, ``uncertain`` and
-    ``gave_up`` are ``failed``. Any other kind may re-arm a terminal row for a later streak.
+
+async def open_alert(db: Db, *, schedule_id: str, kind: str, run_id: str | None, text: str, channel: str | None,
+                     chat: str | None, failures: int | None, now: datetime) -> Any | None:
+    """Open an alert as ``pending``, due now. Supersede a pending alert or recovery of this kind.
+
+    A recovery that was recorded and not yet claimed, whose episode has no alert row, is that same failure
+    period: the alert joins it and that recovery stays. Any other open is the next episode. None when the
+    schedule is already gone.
     """
-    row = await conn.fetchrow(
-        "SELECT state FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2 AND run_key = $3",
-        schedule_id, kind, run_key)
-    if row is None:
-        return None
-    if kind == "run":
-        if row["state"] == "sent":
-            return "sent"
-        if row["state"] == "pending":
+    async with _transaction(db) as conn:
+        if await conn.fetchval("SELECT id FROM schedules WHERE id = $1 FOR UPDATE", schedule_id) is None:
             return None
-        return "failed"
-    if row["state"] in ("pending", "sending"):
-        return "failed"
-    return None
-
-
-async def begin_send(conn: Db, *, schedule_id: str, kind: str, run_id: str | None, text: str, channel: str | None,
-                     chat: str | None, failures: int | None, summary_of: list[int] | None, now: datetime,
-                     ) -> Any | None:
-    """Claim the row as ``sending`` before the send. None when another caller already holds this notice."""
-    run_key = run_id or ""
-    row = await conn.fetchrow(
-        "INSERT INTO schedule_notice_retries (schedule_id, kind, run_id, run_key, state, retries, text, channel, "
-        "chat, failures, summary_of, created_at, updated_at) VALUES ($1, $2, $3, $4, 'sending', 0, $5, $6, $7, $8, "
-        "$9::bigint[], $10, $10) ON CONFLICT (schedule_id, kind, run_key) DO NOTHING RETURNING *",
-        schedule_id, kind, run_id, run_key, text, channel, chat, failures, summary_of, now)
-    if row is not None:
-        return row
-    if kind == "run":
-        # The completion replay of a refused run. The attempt count and the clock stay, so the retry budget does not
-        # move; a row that is already uncertain, gave up, or in flight is left alone.
+        latest = await conn.fetchval(
+            "SELECT COALESCE(MAX(episode), 0) FROM schedule_notice_retries "
+            "WHERE schedule_id = $1 AND kind = $2", schedule_id, kind)
+        attached = None
+        if latest:
+            recovery = await conn.fetchrow(
+                "SELECT * FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2 AND episode = $3 "
+                "AND role = 'recovery' FOR UPDATE", schedule_id, kind, latest)
+            has_alert = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2 "
+                "AND episode = $3 AND role = 'alert')", schedule_id, kind, latest)
+            if (recovery is not None and not has_alert and recovery["state"] == "pending"
+                    and recovery["retries"] == 0 and recovery["error"] is None):
+                attached = recovery
+        if attached is not None:
+            episode = attached["episode"]
+            await conn.execute(
+                "UPDATE schedule_notice_retries SET state = 'superseded', next_attempt_at = NULL, updated_at = $3, "
+                "error = COALESCE(error, 'a new failure period started') "
+                "WHERE schedule_id = $1 AND kind = $2 AND state = 'pending' AND id <> $4",
+                schedule_id, kind, now, attached["id"])
+        else:
+            await conn.execute(
+                "UPDATE schedule_notice_retries SET state = 'superseded', next_attempt_at = NULL, updated_at = $3, "
+                "error = COALESCE(error, 'a new failure period started') "
+                "WHERE schedule_id = $1 AND kind = $2 AND state = 'pending'",
+                schedule_id, kind, now)
+            episode = latest + 1
         return await conn.fetchrow(
-            "UPDATE schedule_notice_retries SET state = 'sending', next_attempt_at = NULL, error = NULL, "
-            "text = $4, channel = $5, chat = $6, updated_at = $7 "
-            "WHERE schedule_id = $1 AND kind = $2 AND run_key = $3 AND state = 'pending' RETURNING *",
-            schedule_id, kind, run_key, text, channel, chat, now)
-    return await conn.fetchrow(
-        "UPDATE schedule_notice_retries SET state = 'sending', retries = 0, next_attempt_at = NULL, error = NULL, "
-        "text = $4, channel = $5, chat = $6, failures = $7, summary_of = $8::bigint[], run_id = $9, "
-        "reported_at = NULL, created_at = $10, updated_at = $10 WHERE schedule_id = $1 AND kind = $2 "
-        "AND run_key = $3 AND state = ANY($11::text[]) RETURNING *",
-        schedule_id, kind, run_key, text, channel, chat, failures, summary_of, run_id, now, list(_TERMINAL))
+            "INSERT INTO schedule_notice_retries (schedule_id, kind, episode, role, run_id, state, retries, "
+            "next_attempt_at, failures, text, channel, chat, created_at, updated_at) "
+            "VALUES ($1, $2, $3, 'alert', $4, 'pending', 0, $5, $6, $7, $8, $9, $5, $5) RETURNING *",
+            schedule_id, kind, episode, run_id, now, failures, text, channel, chat)
+
+
+async def open_recovery(db: Db, *, schedule_id: str, kind: str, run_id: str | None, text: str, channel: str | None,
+                        chat: str | None, now: datetime) -> Any | None:
+    """Open the latest episode's recovery as ``pending``, due now, and supersede that episode's pending alert.
+
+    The text stored here is the plain recovery. The supplement is chosen later, when the row is claimed. None when
+    the schedule is gone, or when this episode's recovery has already left ``pending``. A recovery that is still
+    pending is made due now and returned.
+    """
+    async with _transaction(db) as conn:
+        if await conn.fetchval("SELECT id FROM schedules WHERE id = $1 FOR UPDATE", schedule_id) is None:
+            return None
+        latest = await conn.fetchval(
+            "SELECT COALESCE(MAX(episode), 0) FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2",
+            schedule_id, kind)
+        if latest:
+            recovery = await conn.fetchrow(
+                "SELECT * FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2 AND episode = $3 "
+                "AND role = 'recovery' FOR UPDATE", schedule_id, kind, latest)
+            if recovery is not None:
+                if recovery["state"] != "pending":
+                    return None
+                return await conn.fetchrow(
+                    "UPDATE schedule_notice_retries SET next_attempt_at = $2, updated_at = $2, text = $3, "
+                    "run_id = $4, channel = $5, chat = $6 WHERE id = $1 RETURNING *",
+                    recovery["id"], now, text, run_id, channel, chat)
+            await conn.execute(
+                "UPDATE schedule_notice_retries SET state = 'superseded', next_attempt_at = NULL, updated_at = $4, "
+                "error = COALESCE(error, 'the schedule recovered before this alert was sent') "
+                "WHERE schedule_id = $1 AND kind = $2 AND episode = $3 AND role = 'alert' AND state = 'pending'",
+                schedule_id, kind, latest, now)
+            episode = latest
+        else:
+            episode = 1
+        return await conn.fetchrow(
+            "INSERT INTO schedule_notice_retries (schedule_id, kind, episode, role, run_id, state, retries, "
+            "next_attempt_at, text, channel, chat, created_at, updated_at) "
+            "VALUES ($1, $2, $3, 'recovery', $4, 'pending', 0, $5, $6, $7, $8, $5, $5) RETURNING *",
+            schedule_id, kind, episode, run_id, now, text, channel, chat)
 
 
 async def due(conn: Db, now: datetime) -> list[Any]:
+    """Due ``pending`` rows, alerts before recoveries, so one pass finishes an alert before claiming its recovery."""
     return await conn.fetch(
-        "SELECT * FROM schedule_notice_retries WHERE state = 'pending' AND next_attempt_at <= $1 ORDER BY id", now)
+        "SELECT * FROM schedule_notice_retries WHERE state = 'pending' AND next_attempt_at <= $1 "
+        "ORDER BY role, id", now)
 
 
-async def claim(conn: Db, retry_id: int, now: datetime) -> Any | None:
-    """Move a due ``pending`` row to ``sending`` and count the attempt. None when another pass took it."""
-    return await conn.fetchrow(
-        "UPDATE schedule_notice_retries SET state = 'sending', retries = retries + 1, next_attempt_at = NULL, "
-        "updated_at = $2 WHERE id = $1 AND state = 'pending' AND next_attempt_at <= $2 RETURNING *", retry_id, now)
+async def claim_for_send(db: Db, retry_id: int, now: datetime) -> tuple[Any, Any | None] | None:
+    """Move a due ``pending`` row to ``sending``. None when it is no longer claimable.
+
+    The first claim does not count a retry. A later one does, once a previous attempt has failed. A recovery whose
+    alert is still ``sending`` stays ``pending`` and is not counted: the next pass tries again. The returned alert
+    row, when there is one, is locked with the claim so the supplement matches it.
+    """
+    async with _transaction(db) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM schedule_notice_retries WHERE id = $1 FOR UPDATE", retry_id)
+        if row is None or row["state"] != "pending":
+            return None
+        alert = None
+        if row["role"] == "recovery":
+            alert = await conn.fetchrow(
+                "SELECT * FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2 AND episode = $3 "
+                "AND role = 'alert' FOR UPDATE", row["schedule_id"], row["kind"], row["episode"])
+            if alert is not None and alert["state"] == "sending":
+                await conn.execute(
+                    "UPDATE schedule_notice_retries SET next_attempt_at = $2, updated_at = $2 WHERE id = $1",
+                    retry_id, now)
+                return None
+        retries = row["retries"] + (1 if row["retries"] or row["error"] is not None else 0)
+        claimed = await conn.fetchrow(
+            "UPDATE schedule_notice_retries SET state = 'sending', retries = $2, next_attempt_at = NULL, "
+            "updated_at = $3 WHERE id = $1 AND state = 'pending' AND next_attempt_at <= $3 RETURNING *",
+            retry_id, retries, now)
+        if claimed is None:
+            return None
+        return claimed, alert
+
+
+async def finish_send(db: Db, retry_id: int, *, outcome: str, error: str | None, now: datetime,
+                      rejected_state: str, rejected_at: datetime | None) -> str:
+    """Settle a ``sending`` row. A missing row was deleted with its schedule and is ``superseded``.
+
+    ``sent`` and ``unknown`` land as ``sent`` and ``uncertain``. A refusal is ``rejected_state`` unless this
+    episode's alert already has a recovery, or a later episode of this kind exists: then it is ``superseded``
+    and is not queued again.
+    """
+    async with _transaction(db) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM schedule_notice_retries WHERE id = $1 FOR UPDATE", retry_id)
+        if row is None:
+            return "superseded"
+        if row["state"] != "sending":
+            return row["state"]
+        if outcome == "sent":
+            state, nxt, err = "sent", None, None
+        elif outcome == "unknown":
+            state, nxt, err = "uncertain", None, error
+        else:
+            higher = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2 "
+                "AND episode > $3)", row["schedule_id"], row["kind"], row["episode"])
+            closed = False
+            if row["role"] == "alert":
+                closed = await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2 "
+                    "AND episode = $3 AND role = 'recovery')",
+                    row["schedule_id"], row["kind"], row["episode"])
+            if higher or closed:
+                state, nxt, err = "superseded", None, error
+            else:
+                state, nxt, err = rejected_state, rejected_at, error
+        await conn.execute(
+            "UPDATE schedule_notice_retries SET state = $2, error = $3, next_attempt_at = $4, updated_at = $5 "
+            "WHERE id = $1", retry_id, state, err, nxt, now)
+        return state
 
 
 async def give_up(conn: Db, retry_id: int, now: datetime, error: str) -> bool:
-    """Stop a ``pending`` retry without sending. False when it was no longer pending."""
+    """Stop a ``pending`` retry without sending. False when it was no longer pending, including when it was deleted."""
     return await conn.fetchrow(
         "UPDATE schedule_notice_retries SET state = 'gave_up', next_attempt_at = NULL, error = $3, updated_at = $2 "
         "WHERE id = $1 AND state = 'pending' RETURNING id", retry_id, now, error) is not None
 
 
-async def settle(conn: Db, retry_id: int, *, state: str, error: str | None, next_at: datetime | None,
-                 now: datetime) -> None:
-    await conn.execute(
-        "UPDATE schedule_notice_retries SET state = $2, error = $3, next_attempt_at = $4, updated_at = $5 "
-        "WHERE id = $1", retry_id, state, error, next_at, now)
-
-
-async def delete_retry(conn: Db, retry_id: int) -> None:
-    await conn.execute("DELETE FROM schedule_notice_retries WHERE id = $1", retry_id)
+async def settle_if_sending(conn: Db, retry_id: int, *, state: str, error: str, now: datetime) -> bool:
+    """Settle a claim that is still ``sending``. False when that send already finished or the row is gone."""
+    return await conn.fetchrow(
+        "UPDATE schedule_notice_retries SET state = $2, next_attempt_at = NULL, error = $3, updated_at = $4 "
+        "WHERE id = $1 AND state = 'sending' RETURNING id", retry_id, state, error, now) is not None
 
 
 async def note_failure_count(conn: Db, schedule_id: str, failures: int) -> None:
     """The open failure alert's count is the streak at the latest failure, not the count when it was opened."""
     await conn.execute(
         "UPDATE schedule_notice_retries SET failures = $2 "
-        "WHERE schedule_id = $1 AND kind = 'failures_alert' AND reported_at IS NULL "
-        "AND state = ANY($3::text[]) AND (failures IS NULL OR failures < $2)",
-        schedule_id, failures, list(_UNREPORTED))
-
-
-async def named_in_recovery(conn: Db, alert_id: int) -> bool:
-    """Whether a recovery already names this alert, so a later refusal is not queued again.
-
-    A recovery that was delivered is deleted, and the alert's ``reported_at`` is what remains. A recovery that is
-    still only written keeps the id in ``summary_of``.
-    """
-    if await conn.fetchval("SELECT reported_at IS NOT NULL FROM schedule_notice_retries WHERE id = $1", alert_id):
-        return True
-    return await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM schedule_notice_retries "
-        "WHERE kind = 'failures_recovered' AND summary_of @> ARRAY[$1]::bigint[])", alert_id) is True
-
-
-async def settle_if_sending(conn: Db, retry_id: int, *, state: str, error: str, now: datetime) -> bool:
-    """Settle a claim that is still ``sending``. False when that send already finished."""
-    return await conn.fetchrow(
-        "UPDATE schedule_notice_retries SET state = $2, next_attempt_at = NULL, error = $3, updated_at = $4 "
-        "WHERE id = $1 AND state = 'sending' RETURNING id", retry_id, state, error, now) is not None
-
-
-async def drop_pending_recoveries(conn: Db, schedule_id: str, now: datetime) -> None:
-    """A new failure streak starts: do not send a recovery that is still waiting."""
-    await conn.execute(
-        "UPDATE schedule_notice_retries SET state = 'gave_up', next_attempt_at = NULL, updated_at = $2, "
-        "error = COALESCE(error, 'a new failure started before this recovery was sent') "
-        "WHERE schedule_id = $1 AND kind = 'failures_recovered' AND state = 'pending'", schedule_id, now)
-
-
-async def unreported_failure_alerts(conn: Db, schedule_id: str) -> list[Any]:
-    return await conn.fetch(
-        "SELECT * FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = 'failures_alert' "
-        "AND reported_at IS NULL AND state = ANY($2::text[]) ORDER BY id", schedule_id, list(_UNREPORTED))
-
-
-async def fold_pending(conn: Db, retry_ids: list[int], now: datetime) -> None:
-    """The recovery's text names these alerts, so they are not sent on their own. ``reported_at`` stays null until
-    that recovery is sent or may have been sent."""
-    if not retry_ids:
-        return
-    await conn.execute(
-        "UPDATE schedule_notice_retries SET state = 'gave_up', next_attempt_at = NULL, updated_at = $2 "
-        "WHERE id = ANY($1::bigint[]) AND state = 'pending'", retry_ids, now)
-
-
-async def mark_reported(conn: Db, retry_ids: list[int], now: datetime) -> None:
-    if not retry_ids:
-        return
-    await conn.execute(
-        "UPDATE schedule_notice_retries SET reported_at = $2, updated_at = $2 "
-        "WHERE id = ANY($1::bigint[]) AND reported_at IS NULL", retry_ids, now)
-
-
-def summary_ids(row: Any) -> list[int]:
-    return [int(item) for item in (row["summary_of"] or ())]
+        "WHERE schedule_id = $1 AND kind = 'failures' AND role = 'alert' "
+        "AND episode = (SELECT MAX(episode) FROM schedule_notice_retries "
+        "WHERE schedule_id = $1 AND kind = 'failures') "
+        "AND state <> 'superseded' AND (failures IS NULL OR failures < $2)",
+        schedule_id, failures)
 
 
 async def settle_stopped(conn: Db, now: datetime, error: str) -> None:
-    """A claim left ``sending`` did not finish. It may have gone: uncertain, and never sent again. A recovery that
-    was in flight may have named its alerts, so those are not later described as never delivered."""
-    rows = await conn.fetch(
-        "SELECT summary_of FROM schedule_notice_retries WHERE state = 'sending' AND kind = 'failures_recovered' "
-        "AND summary_of IS NOT NULL")
-    await mark_reported(conn, [int(item) for row in rows for item in (row["summary_of"] or ())], now)
+    """A claim left ``sending`` did not finish. It may have gone: uncertain, and never sent again.
+
+    ``pending`` stays pending. A recovery that was waiting can still name the alert, which may not have been
+    delivered.
+    """
     await conn.execute(
         "UPDATE schedule_notice_retries SET state = 'uncertain', next_attempt_at = NULL, error = $2, updated_at = $1 "
         "WHERE state = 'sending'", now, error)
