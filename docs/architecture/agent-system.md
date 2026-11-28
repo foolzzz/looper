@@ -1081,7 +1081,15 @@ them.
   no recorded earlier value: it is checked, never written. When no such command can be built, the entry has no
   command but `not_restorable`: `too_many_symrefs` (more than 200 symbolic refs), `git_too_old` (older than
   git 2.46), `chain_outside_refs` (a chain through a name such as `HEAD`), `chain_unreadable` (git could not
-  read a hop) or `ref_file_unreadable` (below); the conversation says why in text the dashboard writes. The 2.46
+  read a hop), `ref_file_unreadable` (below) or `overlapping_turn` (below); the conversation says why in text the
+  dashboard writes. A missing command never hides a change: where git is not asked for direct targets or cannot read
+  one, a link whose own file, or the file of a hop outside branches and tags, spells another target is still listed
+  (a reftable repository has no such files, so there a retarget that leaves the end of the chain is not seen in
+  that state). Two in-place turns of different tasks on one repository (linked worktrees included) that run at the
+  same time cannot be told apart by comparing values, so each of their reports lists its changes with no command
+  (`overlapping_turn`, unless another reason already applies), also for refs the other turn never touched; the
+  windows are kept in the server's memory. Not covered: a ref changed during a turn by anything else (a Worker, a
+  worktree session, the operator) is still reported, with a command, as part of that turn. The 2.46
   floor is for the transaction's symbolic-ref lines; Looper runs the `git` on the server's `PATH`, and with an
   older one each such entry reads, in the conversation,
   `<ref> <change>（<old> → <new>） 不能给出恢复命令：本机的 git 版本低于 2.46，无法核对并改写符号引用；请自己检查这个引用。`
