@@ -3520,13 +3520,19 @@ Every run records the prompt in `llm_records.metadata`:
   runtime's system prompt (DSH and pi always, omp outside a repository: the
   first 32 KiB, with the text's `sha256`, the file's `bytes` and the
   `clipped_bytes`). Looper reads an injected file only from inside the
-  repository (the work directory outside a repository;
-  `looper/agents/safe_read.py`), and follows a link only to a file with an
+  repository (`looper/agents/safe_read.py`). The boundary is the work
+  directory instead outside a repository, and when the repository root is the
+  operator's home or Looper's runtime root, or a directory above either: files
+  above the work directory are then listed but left out as `outside`. A file in
+  another repository nested inside the boundary (a directory on the way holds
+  `.git`) is left out. Looper follows a link only to a file with an
   instruction file name: a link that resolves to a `CLAUDE.md` or `AGENTS.md`
-  inside it, such as `CLAUDE.md -> AGENTS.md`, is read. A file left out is
-  given to nobody and recorded with `skipped` (`outside`,
-  `not_an_instruction_file`, `symlink`, `hard_linked`, `not_regular`,
-  `too_large` or `io_error`) and the same in words as `error`.
+  of the same repository, such as `CLAUDE.md -> AGENTS.md`, is read. A file
+  left out is given to nobody and recorded with `skipped` (`outside`,
+  `other_repository`, `not_an_instruction_file`, `symlink`, `hard_linked`,
+  `not_regular`, `too_large` or `io_error`) and the same in words as `error`.
+  These limits are on what Looper reads itself; a runtime that reads a file
+  `native`ly follows its own rules.
   A run's history shows them as the prompt layers' "Instructions" row.
 
 The same inputs give the same prompt and hash; changing the harness, the role
