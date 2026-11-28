@@ -748,6 +748,260 @@ def test_a_configuration_with_includes_is_never_remembered(repo, probe, monkeypa
     assert git_safe.check_repository(repo).overrides == ("filter.inc.clean=",)
 
 
+# --- Object stores and replacement refs the repository supplies ---
+
+def _foreign_store(tmp_path: Path) -> tuple[Path, str]:
+    """Another repository under ``tmp_path`` and the id of a commit only it holds."""
+    other = tmp_path / "foreign"
+    other.mkdir()
+    plain(other, "init", "-q", "-b", "main")
+    (other / "foreign.txt").write_text("foreign\n")
+    plain(other, "add", "-A")
+    plain(other, "commit", "-q", "-m", "foreign commit")
+    return other, plain(other, "rev-parse", "HEAD").stdout.strip()
+
+
+def _borrow(common: Path, store: Path, name: str = "alternates") -> Path:
+    path = common / "objects" / "info" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{store / '.git' / 'objects'}\n")
+    return path
+
+
+def _refused_for_alternates(directory: Path, **kwargs) -> None:
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        git_safe.check_repository(directory, **kwargs)
+    assert refused.value.reason == "object_alternates"
+
+
+def test_an_alternate_object_store_is_refused(repo, tmp_path):
+    other, commit = _foreign_store(tmp_path)
+    assert plain(repo, "cat-file", "-e", commit, check=False).returncode != 0
+    _borrow(repo / ".git", other)
+    assert "foreign commit" in plain(repo, "cat-file", "-p", commit).stdout, "positive control: git reads the store"
+    _refused_for_alternates(repo)
+    _refused_for_alternates(repo, layout=False)
+    with pytest.raises(git_safe.RepositoryRefused):
+        safe(repo, "cat-file", "-p", commit)
+
+    async def go():
+        await git_safe.spawn(repo, "cat-file", "-p", commit, stdout=asyncio.subprocess.PIPE)
+
+    with pytest.raises(git_safe.RepositoryRefused):
+        asyncio.run(go())
+
+
+def test_http_alternates_are_refused(repo, tmp_path):
+    _borrow(repo / ".git", tmp_path, "http-alternates")
+    _refused_for_alternates(repo)
+
+
+@pytest.mark.parametrize("name", ["alternates", "http-alternates"])
+def test_an_empty_alternates_file_is_allowed(repo, name):
+    path = repo / ".git" / "objects" / "info" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    assert git_safe.check_repository(repo) is not None
+    assert safe(repo, "status", "--porcelain").returncode == 0
+
+
+@pytest.mark.parametrize("shape", ["link", "directory", "loop"])
+def test_an_alternates_path_that_is_not_an_empty_file_is_refused(repo, tmp_path, shape):
+    path = repo / ".git" / "objects" / "info" / "alternates"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if shape == "link":
+        (tmp_path / "list").write_text("/elsewhere\n")
+        path.symlink_to(tmp_path / "list")
+    elif shape == "directory":
+        path.mkdir()
+    else:
+        path.symlink_to(path)
+    _refused_for_alternates(repo)
+
+
+def test_the_worktrees_shared_alternates_are_refused(repo, tmp_path):
+    wt = tmp_path / "wt"
+    plain(repo, "worktree", "add", "-q", "--detach", str(wt), "HEAD")
+    _borrow(repo / ".git", _foreign_store(tmp_path)[0])
+    _refused_for_alternates(wt)
+
+
+@pytest.mark.parametrize("name", ["alternates", "http-alternates"])
+def test_alternates_written_after_a_check_are_seen(repo, tmp_path, name):
+    assert git_safe.check_repository(repo) is not None
+    path = repo / ".git" / "objects" / "info" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    assert git_safe.check_repository(repo) is not None
+    stamp = os.stat(path)
+    _borrow(repo / ".git", _foreign_store(tmp_path)[0], name)
+    os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    _refused_for_alternates(repo)
+
+
+def test_a_submodules_alternates_are_refused(repo, tmp_path):
+    module = _submodule(tmp_path, repo)
+    git_dir = Path(plain(module, "rev-parse", "--path-format=absolute", "--git-dir").stdout.strip())
+    assert git_safe.check_repository(repo) is not None  # remembered: the later file must still be seen
+    _borrow(git_dir, _foreign_store(tmp_path)[0])
+    _refused_for_alternates(repo)
+    _refused_for_alternates(module)
+
+
+def test_a_submodule_with_a_common_directory_is_checked_there(repo, tmp_path):
+    """A submodule whose ``.git`` names a linked worktree's entry reads the objects of that entry's repository."""
+    module = _submodule(tmp_path, repo)
+    holder = tmp_path / "holder"
+    holder.mkdir()
+    plain(holder, "init", "-q", "-b", "main")
+    plain(holder, "commit", "-q", "--allow-empty", "-m", "holder")
+    plain(holder, "worktree", "add", "-q", "--detach", str(tmp_path / "holder-wt"), "HEAD")
+    entry = next((holder / ".git" / "worktrees").iterdir())
+    (module / ".git").write_text(f"gitdir: {entry}\n")
+    assert git_safe.check_repository(repo) is not None
+    _borrow(holder / ".git", _foreign_store(tmp_path)[0])
+    _refused_for_alternates(repo)
+
+
+def test_loopers_own_clones_and_worktrees_pass_the_check(repo, tmp_path):
+    """The private verification clone (with a submodule), a step's worktree and a consult's checkout borrow no
+    objects through alternates."""
+    from looper.agents import consult, step_workspaces
+    from looper.agents.tiers import worker
+
+    _submodule(tmp_path, repo)
+    plain(repo, "commit", "-q", "-m", "module")
+    clone = Path(worker._verification_checkout(str(repo), tmp_path / "backup"))
+
+    async def worktree() -> Path:
+        found = await step_workspaces.inspect(str(repo))
+        assert isinstance(found, step_workspaces.Repo), found
+        workspace = step_workspaces.new_workspace(
+            found, runtime_root=tmp_path / "runtime", workspace_id=1, task_id="task-1", step_id="step-1",
+            step_key="s1", base=plain(repo, "rev-parse", "HEAD").stdout.strip(), checkpointed=False)
+        await step_workspaces.ensure_worktree(workspace)
+        return Path(workspace.path)
+
+    step = asyncio.run(worktree())
+    consulted = consult._snapshot(repo, tmp_path / "consult")
+    assert consulted is not None
+    for directory in (repo, repo / "module", clone, clone / "module", step, consulted[1]):
+        git_safe._memo.clear()
+        assert git_safe.check_repository(directory) is not None, directory
+        assert safe(directory, "status", "--porcelain").returncode == 0, directory
+
+
+def _replace_head(repo: Path) -> str:
+    """Put a replacement ref on HEAD's commit; the original commit's id."""
+    original = plain(repo, "rev-parse", "HEAD").stdout.strip()
+    tree = plain(repo, "rev-parse", "HEAD^{tree}").stdout.strip()
+    other = plain(repo, "commit-tree", "-m", "substituted", tree).stdout.strip()
+    plain(repo, "replace", original, other)
+    assert "substituted" in plain(repo, "cat-file", "-p", original).stdout, "positive control: git honours the ref"
+    return original
+
+
+def test_a_replace_ref_does_not_change_what_is_read(repo):
+    original = _replace_head(repo)
+    shown = safe(repo, "cat-file", "-p", original, check=True).stdout
+    assert "first" in shown and "substituted" not in shown
+
+    async def go() -> bytes:
+        process = await git_safe.spawn(repo, "cat-file", "-p", original, stdout=asyncio.subprocess.PIPE)
+        stdout, _ = await process.communicate()
+        return stdout
+
+    assert b"substituted" not in asyncio.run(go())
+
+
+@pytest.mark.parametrize("guard", ["argv", "environment"])
+def test_each_replace_ref_guard_works_on_its_own(repo, guard):
+    original = _replace_head(repo)
+    command = ["git", "-C", str(repo), "cat-file", "-p", original]
+    env = {**_PLAIN_ENV}
+    if guard == "argv":
+        command = git_safe.argv("cat-file", "-p", original, directory=repo)
+    else:
+        env = git_safe.environment()
+    shown = subprocess.run(command, env=env, capture_output=True, text=True, check=True, timeout=30,
+                           stdin=subprocess.DEVNULL).stdout
+    assert "first" in shown and "substituted" not in shown
+
+
+# --- A missing object is not fetched from a promisor remote ---
+
+
+def _promise_missing_blob(repo: Path, tmp_path: Path, marker: Path, config: str) -> str:
+    """Name a promisor remote in the repository's ``config`` file, with a transport program that writes the marker,
+    and delete the blob of ``a.txt``; its id."""
+    transport = tmp_path / "transport.sh"
+    transport.write_text(f'#!/bin/sh\necho "$0 $*" >> "{marker}"\nexit 1\n')
+    transport.chmod(0o755)
+    blob = plain(repo, "rev-parse", "HEAD:a.txt").stdout.strip()
+    if config == "config.worktree":
+        plain(repo, "config", "extensions.worktreeConfig", "true")
+    for key, value in (("url", str(tmp_path / "elsewhere")), ("promisor", "true"), ("uploadpack", str(transport))):
+        plain(repo, "config", "--file", str(repo / ".git" / config), f"remote.origin.{key}", value)
+    (repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+    (repo / "a.txt").write_text("two\n")
+    return blob
+
+
+@pytest.mark.parametrize("config", ["config", "config.worktree"])
+@pytest.mark.parametrize("command", [("cat-file", "-p", "BLOB"), ("show", "HEAD"), ("diff", "HEAD", "--", "a.txt"),
+                                     ("log", "-p", "-1")], ids=lambda command: command[0])
+def test_a_missing_object_is_not_fetched_from_a_promisor_remote(command, config, repo, marker, tmp_path):
+    blob = _promise_missing_blob(repo, tmp_path, marker, config)
+    command = tuple(blob if part == "BLOB" else part for part in command)
+    plain(repo, *command, check=False)
+    assert fired(marker), "positive control: ordinary git runs the transport to fetch the object"
+    marker.unlink()
+    done = safe(repo, *command)
+    assert fired(marker) == []
+    assert done.returncode != 0, done.stdout
+
+    async def go() -> int:
+        process = await git_safe.spawn(repo, *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await process.communicate()
+        return process.returncode
+
+    assert asyncio.run(go()) != 0
+    assert fired(marker) == []
+
+
+def test_every_git_call_refuses_lazy_fetches(repo, tmp_path, monkeypatch):
+    _submodule(tmp_path, repo)
+    monkeypatch.setenv("GIT_NO_LAZY_FETCH", "0")  # the server's own value does not reach git
+    seen: list[tuple[list[str], dict[str, str] | None]] = []
+    real_run, real_exec = subprocess.run, asyncio.create_subprocess_exec
+
+    def run(command, *args, **kwargs):
+        seen.append((list(command), kwargs.get("env")))
+        return real_run(command, *args, **kwargs)
+
+    async def execute(*command, **kwargs):
+        seen.append((list(command), kwargs.get("env")))
+        return await real_exec(*command, **kwargs)
+
+    monkeypatch.setattr(git_safe.subprocess, "run", run)
+    monkeypatch.setattr(git_safe.asyncio, "create_subprocess_exec", execute)
+
+    async def go() -> None:
+        process = await git_safe.spawn(repo, "rev-parse", "HEAD", stdout=asyncio.subprocess.PIPE)
+        await process.communicate()
+        await git_safe.recheck_async(process)
+
+    safe(repo, "status", "--porcelain", check=True)
+    git_safe._memo.clear()
+    asyncio.run(go())
+    git_safe.run(None, "--version", capture_output=True, check=True, timeout=30)
+    subcommands = {word for command, _ in seen for word in command}
+    assert {"rev-parse", "config", "ls-files", "status", "--version"} <= subcommands
+    assert [command for command, env in seen if (env or {}).get("GIT_NO_LAZY_FETCH") != "1"] == []
+    with pytest.raises(ValueError):
+        git_safe.environment({"GIT_NO_LAZY_FETCH": "0"})
+
+
 # --- No direct git call in looper/ outside the places listed here ---
 
 # A file may run git directly only for a directory Looper owns the content of (its own checkout, a clone it just

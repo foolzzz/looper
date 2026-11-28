@@ -271,6 +271,8 @@ GIT_WRITES = [
     "printf x > .git/hooks/pre-commit", "printf x >> .git/config", "printf x > .git/info/attributes",
     "printf x >> .git/info/exclude", "printf x >> .git/modules/sub/config",
     "printf x > .git/config.new && mv .git/config.new .git/config", "mv .git .git.moved",
+    "printf x > .git/objects/info/alternates", "mv .git/objects/info .git/objects/info.moved",
+    "mv .git/objects .git/objects.moved",
 ]
 
 
@@ -292,6 +294,7 @@ def test_p9_git_internals_are_not_writable_and_git_still_works(probe):
     for command, outcome in zip(GIT_WRITES, outcomes):
         assert "rc=0" not in outcome, (command, outcome)
     assert not (probe.cwd / ".git/hooks/pre-commit").exists() and not (probe.cwd / ".git/info/attributes").exists()
+    assert not (probe.cwd / ".git/objects/info/alternates").exists() and (probe.cwd / ".git/objects/info").is_dir()
     assert (probe.cwd / ".git/config").read_text() == before["config"]
     assert (probe.cwd / ".git/info/exclude").read_text() == exclude_before
     assert "x" not in (probe.cwd / ".git/modules/sub/config").read_text().splitlines()[-1]
