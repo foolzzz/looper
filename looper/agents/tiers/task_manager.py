@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -17,9 +18,9 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import (task_manager_alerts, task_manager_denials, task_manager_dirs, task_manager_network,
-                task_manager_readback, task_manager_refs, task_manager_safety, task_manager_sandbox,
-                task_manager_settings)
+from .. import (task_manager_alerts, task_manager_denials, task_manager_dirs, task_manager_edit,
+                task_manager_network, task_manager_project_instructions, task_manager_readback, task_manager_refs,
+                task_manager_safety, task_manager_sandbox, task_manager_settings)
 from .. import task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
@@ -297,6 +298,24 @@ class TaskManagerAgent:
         self.started_for_turn: Literal["launch", "resume"] | None = None  # what the turn's ``prepare`` started
         self.work_dir = ""
         self.dir_lock: task_manager_dirs.DirectoryLock | None = None
+        # The project instruction files the last direct launch could not read, and the set last reported to the user.
+        self.instructions_skipped: tuple[task_manager_project_instructions.Skipped, ...] = ()
+        self.instructions_notified: frozenset[tuple[str, str]] = frozenset()
+
+    def _edit_dir(self, launch: Launch, work_dir: str) -> Path:
+        """The private looper-edit directory for a direct launch; never where the sandbox writes or cannot read."""
+        cli = launch.runtime.environment(launch)
+        return task_manager_edit.edit_bin(cli, forbidden=(work_dir, cli.get("TMPDIR") or tempfile.gettempdir(), *self.read_deny))
+
+    async def _notice_skipped(self, sink: TurnSink, message_id: str) -> None:
+        """Tell the user which project instruction files were not read, when that set changes; never in a model's input."""
+        current = frozenset((item.name, item.reason.value) for item in self.instructions_skipped)
+        if current and current != self.instructions_notified:
+            await sink.event(TaskManagerEvent.SANDBOX_NOTICE, {
+                "notice": task_manager_project_instructions.SKIPPED_NOTICE,
+                "detail": "; ".join(f"{name}: {reason}" for name, reason in sorted(current)),
+                "message_id": message_id})
+        self.instructions_notified = current
 
     def _mcp_cwd(self) -> Path:
         return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
@@ -398,15 +417,7 @@ class TaskManagerAgent:
             else:
                 self.mcp_fingerprints = {}
             return run
-        # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
-        from ...db.connection import get_pool
-        # Denial records are for the operator: the model's brief is unchanged by them.
-        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 AND kind <> 'sandbox_denial' "
-                                        "ORDER BY seq DESC LIMIT 20", self.task_id)
-        prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
-                                                                    reopened=reopened))
-        root = self.pool.runtime_root / "task-managers" / self.task_id
-        prompt_file = prompt.write_file(root)
+        # Direct mode: the directory admission runs before any file of that directory is read.
         launch = await configure()
 
         def live_direct() -> list[tuple[str, str]]:
@@ -422,6 +433,21 @@ class TaskManagerAgent:
                 task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
                 raise Refused(RefuseReason(problem.reason.value), problem.text, problem.kind)
             self.work_dir = reopened.work_dir
+        # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
+        from ...db.connection import get_pool
+        # Denial records are for the operator: the model's brief is unchanged by them.
+        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 AND kind <> 'sandbox_denial' "
+                                        "ORDER BY seq DESC LIMIT 20", self.task_id)
+        # Direct mode reads the project's instruction files every turn; the orchestrated prompt stays as it was.
+        loaded, skipped = task_manager_project_instructions.read(reopened.work_dir) if direct else ([], [])
+        self.instructions_skipped = tuple(skipped)
+        conventions = task_manager_project_instructions.section(loaded) if direct else ""
+        prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
+                                                                    reopened=reopened)
+                              + (f"\n\n{conventions}" if conventions else ""))
+        root = self.pool.runtime_root / "task-managers" / self.task_id
+        prompt_file = prompt.write_file(root)
+
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:
@@ -436,8 +462,9 @@ class TaskManagerAgent:
                                                                    prompt_file=prompt_file, launch=launch))
 
         command = command_for(launch)
-        env = task_manager_safety.environment(launch, self.task_id,
-                                              drop=task_manager_sandbox.dropped_env(launch) if direct else ())
+        env = task_manager_safety.environment(
+            launch, self.task_id, drop=task_manager_sandbox.dropped_env(launch) if direct else (),
+            edit_dir=self._edit_dir(launch, reopened.work_dir) if direct else None)
         # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
         # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
@@ -464,8 +491,9 @@ class TaskManagerAgent:
                     await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(launch, self.task_id,
-                                                      drop=task_manager_sandbox.dropped_env(launch) if direct else ())
+                env = task_manager_safety.environment(
+                    launch, self.task_id, drop=task_manager_sandbox.dropped_env(launch) if direct else (),
+                    edit_dir=self._edit_dir(launch, reopened.work_dir) if direct else None)
                 if direct and (warning := task_manager_sandbox.credential_warning(env)):
                     logger.warning("task Manager %s: %s", self.task_id, warning)
                 settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
@@ -560,6 +588,8 @@ class TaskManagerAgent:
                                     if self.mode == "direct" and task.get("workspace_mode") != "worktree" else (None, ""))
         if not request.admitted.done():
             request.admitted.set_result(Submitted("started"))
+        # After the readback and every gate that can refuse the turn: a refused turn does not use up the notice.
+        await self._notice_skipped(request.sink, request.message_id)
         rotating = self.context_rotation_pending
         if rotating:
             await request.sink.event(TaskManagerEvent.SESSION_FRESH,
@@ -672,6 +702,7 @@ class TaskManagerAgent:
                         # Re-run all configuration and review gates before the one fresh attempt.
                         task, reopened, launch, prompt = await self.prepare()
                         await self._verify(launch, reopened)
+                        await self._notice_skipped(request.sink, request.message_id)
                         continue
                     text = str((result.result_event or {}).get("result") or "".join(pieces))
                     outcome = ("stopped" if result.stopped else "success"

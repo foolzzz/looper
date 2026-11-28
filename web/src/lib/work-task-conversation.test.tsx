@@ -314,6 +314,8 @@ describe("task conversation", () => {
     const good = [
       { kind: "sandbox_notice", notice: "first_enable_in_place", detail: "server detail" },
       { kind: "sandbox_notice", notice: "refs_unreadable", detail: "server detail" },
+      { kind: "sandbox_notice", notice: "project_instructions_skipped", detail: "AGENTS.md: not_utf8; CLAUDE.md: outside" },
+      { kind: "sandbox_notice", notice: "project_instructions_skipped", detail: "CLAUDE.local.md: some_new_reason; AGENTS.md: hard_linked" },
       { kind: "ref_report", message_id: "turn-1", report_id: 7, own_commits: 2, needs_you: true,
         head: { before: "refs/heads/main", after: null }, info: [change("refs/heads/looper/t2/task", "moved", old, moved, "git update-ref refs/heads/looper/t2/task A B")],
         changes: [change("refs/heads/oth\\u202eer", "moved", old, moved, `git update-ref refs/heads/other ${old} ${moved}`),
@@ -333,7 +335,10 @@ describe("task conversation", () => {
     const text = container.textContent ?? "";
     expect(text).toContain("管家在你的真实检出目录里直接改文件；v1 只报告分支和标签的变化，不会恢复，删掉的对象也找不回来，建议先把重要分支推送或备份。");
     expect(text).toContain("本轮结束后没能重新读取分支和标签");
-    const report = container.querySelector('[data-feed-key="task-event:r2"]')!;
+    const skipped = (index: number) => container.querySelector(`[data-feed-key="task-event:r${index}"]`)!.textContent;
+    expect(skipped(2)).toContain("项目指令文件未读取：AGENTS.md（不是 UTF-8）；CLAUDE.md（解析到任务目录之外）。v1 的任务管家不加载项目技能、命令和子目录里的 CLAUDE.md。");
+    expect(skipped(3)).toContain("CLAUDE.local.md（some_new_reason）；AGENTS.md（有其他硬链接）");
+    const report = container.querySelector('[data-feed-key="task-event:r4"]')!;
     expect(report.textContent).toContain("refs/heads/oth\\u202eer 被移动（aaaaaaaa → bbbbbbbb）");
     expect(report.textContent).toContain("refs/heads/main 被改写（不是快进）");
     expect(report.textContent).toContain("reset --hard、rebase 或 commit --amend");
@@ -344,7 +349,7 @@ describe("task conversation", () => {
     expect(Array.from(report.querySelectorAll("code"), (node) => node.textContent)).toEqual([
       `git update-ref refs/heads/other ${old} ${moved}`, `git update-ref refs/heads/main ${moved} ${old}`,
       "git update-ref refs/heads/looper/t2/task A B"]);
-    for (const index of [3, 4, 5]) expect(container.querySelector(`[data-feed-key="task-event:r${index}"]`)?.textContent).toContain("无法读取这条事件");
+    for (const index of [5, 6, 7]) expect(container.querySelector(`[data-feed-key="task-event:r${index}"]`)?.textContent).toContain("无法读取这条事件");
   });
 
   it("keeps repeated identical sandbox notices of different turns apart, and folds one turn's copy", async () => {

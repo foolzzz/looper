@@ -49,7 +49,7 @@ const SANDBOX_CATEGORIES = ["network", "write", "other"] as const;
 const SANDBOX_CASES = ["not_allowed", "unsupported_client", "unknown", "not_allowable"] as const;
 const SANDBOX_CLIENTS = ["go_tls"] as const;
 const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward"] as const;
-const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable"] as const;
+const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable", "project_instructions_skipped"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached", "ref_symlink"] as const;
 
 type RefChange = { ref: string; change: (typeof REF_CHANGES)[number]; old: string | null; new: string | null; restore: string };
@@ -219,6 +219,21 @@ const CHANGE_TEXT: Record<RefChange["change"], string> = {
 };
 const shortId = (id: string | null) => (id ? id.slice(0, 8) : "无");
 const NON_FAST_FORWARD_WARNING = "执行 reset --hard、rebase 或 commit --amend 之后恢复这个引用，工作区会留下一份撤销那些提交的差异；不要不看就提交它。";
+const SKIP_REASONS: Record<string, string> = {
+  outside: "解析到任务目录之外", other_repository: "在任务目录内的另一个仓库里", not_an_instruction_file: "链接指向的不是说明文件",
+  symlink: "打开时路径变成了链接", hard_linked: "有其他硬链接", not_regular: "不是普通文件", too_large: "文件过大", io_error: "无法读取",
+  budget_exhausted: "前面的文件已用完总大小上限", not_utf8: "不是 UTF-8",
+};
+// The server's detail is "<file>: <reason>" per file, joined by "; ": show each reason in Chinese, an unknown one as sent.
+function skippedInstructionsText(detail: string): string {
+  const files = detail.split("; ").map((item) => {
+    const at = item.indexOf(": ");
+    if (at < 0) return item;
+    const reason = item.slice(at + 2);
+    return `${item.slice(0, at)}（${SKIP_REASONS[reason] ?? reason}）`;
+  });
+  return `项目指令文件未读取：${files.join("；")}。v1 的任务管家不加载项目技能、命令和子目录里的 CLAUDE.md。`;
+}
 const FIRST_ENABLE_TEXT = "管家在你的真实检出目录里直接改文件；v1 只报告分支和标签的变化，不会恢复，删掉的对象也找不回来，建议先把重要分支推送或备份。";
 
 const REFS_UNREADABLE_TEXT = "本轮结束后没能重新读取分支和标签，这一轮对它们的改动（如果有）没有被报告；请自己检查 git branch 和 git tag。";
@@ -287,6 +302,7 @@ function taskEventText(event: TaskEvent): string {
     case "ref_report":
       return refReportText(event);
     case "sandbox_notice":
+      if (event.notice === "project_instructions_skipped") return skippedInstructionsText(event.detail);
       return event.notice === "first_enable_in_place" ? FIRST_ENABLE_TEXT : REFS_UNREADABLE_TEXT;
     case "refused":
       return "status" in event ? `已拒绝（${event.reason}：${event.status}）` : `已拒绝（${event.reason}）`;
