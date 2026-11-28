@@ -563,6 +563,8 @@ def _without_unreadable(snap: Snapshot, *found: _Files) -> Snapshot:
     directories = {name for name in refused if name.startswith("refs/")}
     refused = {name for name in refused if not _within(name.rpartition("/")[0], directories)}
     edges = [pair for links in (*(files.links for files in found), snap.hops, snap.symrefs) for pair in links.items()]
+    # ``HEAD``'s own target is in none of those, and a ref can read through ``HEAD``.
+    edges += [("HEAD", files.head) for files in found if files.head]
     grew = True
     while grew:
         tainted = {name for name, target in edges if _within(target, refused) and not _within(name, refused)}

@@ -1235,6 +1235,48 @@ def test_head_over_a_hop_outside_refs_names_only_what_it_holds(repo, tmp_path, c
     assert found.head == "refs/heads/main" and not [secret for secret in secrets if secret in repr(found)], found
 
 
+@pytest.mark.parametrize("why", [None, "git_too_old", "too_many_symrefs"])  # with direct targets from git, or none
+@pytest.mark.parametrize("link", ["symlink", "hard_link"])
+@pytest.mark.parametrize("content", ["symref", "oid", "existing_ref"])
+@pytest.mark.parametrize("chain", [
+    {"refs/heads/a": "HEAD", "refs/heads/main": "x/hop", "x/hop": "y/secret"},
+    {"refs/heads/a": "HEAD", "refs/heads/main": "y/secret"},
+    {"refs/heads/a": "refs/hidden/b", "refs/hidden/b": "HEAD", "refs/heads/main": "x/hop", "x/hop": "y/secret"},
+], ids=["two_hops", "one_hop", "head_in_the_middle"])
+def test_a_ref_read_through_head_shows_nothing_read_through_a_refused_name(repo, tmp_path, monkeypatch, caplog, chain,
+                                                                           content, link, why):
+    if content == "existing_ref":  # what is outside may not pick which ref of the repository is reported either
+        git(repo, "update-ref", f"refs/remotes/o/{MARKER}", "HEAD")
+        (tmp_path / "elsewhere").mkdir()
+        outside, secrets = tmp_path / "elsewhere" / "x", [MARKER]
+        outside.write_text(f"ref: refs/remotes/o/{MARKER}\n")
+    else:
+        outside, secrets = _outside(tmp_path, repo, content)
+    if why:
+        _without_direct_targets(monkeypatch, why)
+    seen = []
+
+    async def scenario():
+        before = await refs.snapshot(repo)
+        _linked_hop(repo, outside, "y/secret", link)
+        for name, target in chain.items():
+            path = repo / ".git" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"ref: {target}\n")
+        seen.append(await refs.snapshot(repo))
+        return await refs.compare(repo, before, seen[0], task_branch="main", task_id=TASK, active_task=inactive)
+
+    caplog.set_level("DEBUG")
+    report = asyncio.run(scenario())
+    after, = seen
+    assert not [secret for secret in secrets if secret in repr(after)], after
+    assert "refs/heads/a" not in {*after.refs, *after.symrefs, *after.hops}
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, "refs/heads/a")
+    assert by_ref(report)["refs/heads/a"].new is None and report.needs_you
+    assert report.head_after == "refs/heads/main"
+
+
 @pytest.mark.parametrize("target", ["refs", "", "secret"])
 def test_a_target_outside_refs_never_hides_another_change_or_another_refusal(repo, tmp_path, caplog, target):
     """``refs`` holds every ref and an empty target is the parent of every one-level name: neither may stand for them."""
