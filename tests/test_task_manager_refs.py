@@ -98,6 +98,16 @@ def test_other_branches_and_tags_are_reported_with_a_restore_command_that_undoes
     assert asyncio.run(refs.snapshot(repo)).refs == before.refs
 
 
+@pytest.mark.parametrize("name", ["refs/heads/other", "refs/tags/v1"])
+def test_the_command_for_a_deleted_ref_refuses_once_the_name_exists_again(repo, name):
+    report = run(repo, lambda: git(repo, "update-ref", "-d", name))
+    command = by_ref(report)[name].restore
+    newer = git(repo, "commit-tree", "-m", "newer", "HEAD^{tree}")
+    git(repo, "update-ref", name, newer)
+    assert _run(repo, command).returncode != 0
+    assert git(repo, "rev-parse", name) == newer
+
+
 def test_restore_commands_quote_the_ref(repo):
     odd = "refs/heads/a$b;c"
     sha = git(repo, "rev-parse", "HEAD")
@@ -137,6 +147,8 @@ def test_another_looper_tasks_branch_is_information_only_while_that_task_is_acti
     if target == "info":
         assert [c.ref for c in report.info] == ["refs/heads/looper/task-two/task"]
         assert report.changes == () and not report.needs_you
+        # The other task is at work on it: a command would undo that work.
+        assert [(c.restore, c.not_restorable) for c in report.info] == [(None, refs.NotRestorable.OTHER_TASK_BRANCH)]
     else:
         assert [c.ref for c in report.changes] == ["refs/heads/looper/task-two/task"] and report.needs_you and not report.info
 
@@ -647,6 +659,8 @@ def _apply_in_order(repo, report) -> None:
     once; running it again is refused."""
     ran = set()
     for change in (*report.changes, *report.info):
+        if change.not_restorable is refs.NotRestorable.OTHER_TASK_BRANCH:
+            continue
         done = _run(repo, change.restore)
         assert (done.returncode != 0) == (change.restore in ran), f"{change.restore}: {done.stderr}"
         ran.add(change.restore)
@@ -868,8 +882,13 @@ def test_another_tasks_link_that_shares_a_command_with_a_change_is_listed_with_t
     report = run(repo, go, active=active, branch="other")
     assert [c.ref for c in report.changes] == ["refs/heads/a-outer", "refs/heads/leaf", step]
     assert [c.ref for c in report.info] == ["refs/heads/looper/task-two/bystander"]
+    assert report.info[0].restore is None and report.info[0].not_restorable is refs.NotRestorable.OTHER_TASK_BRANCH
     assert report.needs_you
     _apply_in_order(repo, report)
+    # No command was offered for the other task's own branch: it stays as the turn left it.
+    bystander = "refs/heads/looper/task-two/bystander"
+    assert _stored(repo)[bystander] != before[bystander]
+    before[bystander] = _stored(repo)[bystander]
     if through != "refs/heads/leaf":  # the turn made this ref outside: it is checked, not removed
         assert _stored(repo).pop(through) == ("ref", "refs/heads/leaf")
     assert {k: v for k, v in _stored(repo).items() if k != "refs/hidden/mid"} == before
@@ -879,7 +898,6 @@ def test_moving_the_commit_in_another_tasks_link_alone_does_not_need_you(repo):
     commit(repo, "b.txt")
     step, leaf = "refs/heads/looper/task-two/step", "refs/heads/looper/task-two/leaf"
     git(repo, "update-ref", step, "refs/heads/main")
-    before = _stored(repo)
 
     def go():
         git(repo, "update-ref", leaf, "refs/heads/main~1")
@@ -891,8 +909,7 @@ def test_moving_the_commit_in_another_tasks_link_alone_does_not_need_you(repo):
     report = run(repo, go, active=active)
     assert report.changes == () and [c.ref for c in report.info] == [leaf, step]
     assert not report.needs_you
-    _apply_in_order(repo, report)
-    assert _stored(repo) == before
+    assert {(c.restore, c.not_restorable) for c in report.info} == {(None, refs.NotRestorable.OTHER_TASK_BRANCH)}
 
 
 def test_the_snapshot_records_every_hop_of_a_chain_dangling_ones_and_those_outside_included(repo):
@@ -1155,6 +1172,93 @@ def test_a_target_spelled_so_that_git_still_opens_a_linked_file_shows_nothing_ou
     _leaks_nothing(run(repo, go), caplog, secrets)
 
 
+# git opens a symbolic ref's target outside ``refs/`` too, whatever it is called.
+_OUTSIDE_HOPS = ("x/secret", "secret", "worktrees/w/secret")
+
+
+def _linked_hop(repo: Path, outside: Path, target: str, link: str) -> None:
+    path = repo / ".git" / target
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if link == "symlink":
+        path.symlink_to(outside)
+    else:
+        os.link(outside, path)
+
+
+@pytest.mark.parametrize("link", ["symlink", "hard_link"])
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("target", _OUTSIDE_HOPS)
+def test_a_hop_outside_refs_shows_nothing_git_read_through_it(repo, tmp_path, caplog, target, kind, link):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    seen = []
+
+    def go():
+        _linked_hop(repo, outside, target, link)
+        (repo / ".git" / "refs" / "heads" / "via").write_text(f"ref: {target}\n")
+
+    async def scenario():
+        before = await refs.snapshot(repo)
+        go()
+        seen.append(await refs.snapshot(repo))
+        return await refs.compare(repo, before, seen[0], task_branch="main", task_id=TASK, active_task=inactive)
+
+    caplog.set_level("DEBUG")
+    report = asyncio.run(scenario())
+    after, = seen
+    assert not [secret for secret in secrets if secret in repr(after)], after
+    assert "refs/heads/via" not in {*after.refs, *after.symrefs, *after.hops}
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, "refs/heads/via")
+    assert by_ref(report)["refs/heads/via"].new is None and report.needs_you
+
+
+@pytest.mark.parametrize("link", ["symlink", "hard_link"])
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("through", [("refs/heads/main",), ("refs/heads/main", "refs/remotes/o/mid")])
+@pytest.mark.parametrize("target", _OUTSIDE_HOPS)
+def test_head_over_a_hop_outside_refs_names_only_what_it_holds(repo, tmp_path, caplog, target, through, kind, link):
+    outside, secrets = _outside(tmp_path, repo, kind)
+
+    def go():
+        _linked_hop(repo, outside, target, link)
+        for name, following in zip(through, (*through[1:], target)):
+            path = repo / ".git" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"ref: {following}\n")
+
+    caplog.set_level("DEBUG")
+    report = run(repo, go)
+    _leaks_nothing(report, caplog, secrets)
+    assert report.head_after == "refs/heads/main"
+    _typed(report, "refs/heads/main")
+    found = asyncio.run(refs.snapshot(repo))
+    assert found.head == "refs/heads/main" and not [secret for secret in secrets if secret in repr(found)], found
+
+
+@pytest.mark.parametrize("target", ["refs", "", "secret"])
+def test_a_target_outside_refs_never_hides_another_change_or_another_refusal(repo, tmp_path, caplog, target):
+    """``refs`` holds every ref and an empty target is the parent of every one-level name: neither may stand for them."""
+    outside, secrets = _outside(tmp_path, repo, "oid")
+    heads = repo / ".git" / "refs" / "heads"
+
+    def go():
+        _linked_hop(repo, outside, "secret", "symlink")
+        (heads / "bad").write_text(f"ref: {target}\n")
+        (heads / "via").write_text("ref: secret\n")
+        git(repo, "branch", "fresh")
+
+    caplog.set_level("DEBUG")
+    report = run(repo, go)
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, "refs/heads/via")
+    assert by_ref(report)["refs/heads/fresh"].change is Change.CREATED and by_ref(report)["refs/heads/fresh"].restore
+
+
+@pytest.mark.parametrize("space", ["\x0b", "\x0c"])
+def test_a_target_is_spelled_with_the_spaces_git_strips_and_no_others(space):
+    assert refs._spelled(f"ref: \t refs/heads/x{space} \r\n".encode()) == f"refs/heads/x{space}"
+
+
 def test_the_old_symlink_spelling_of_a_symbolic_ref_is_still_read(repo):
     (repo / ".git" / "refs" / "heads" / "old-style").symlink_to("refs/heads/other")
     found = asyncio.run(refs.snapshot(repo))
@@ -1393,6 +1497,31 @@ def test_a_retargeted_link_is_listed_when_only_one_snapshot_has_direct_targets(r
     change, = asyncio.run(go()).changes
     assert change.ref == "refs/heads/outer" and change.restore is None
     assert change.not_restorable is refs.NotRestorable.TOO_MANY_SYMREFS
+
+
+@pytest.mark.parametrize("why", ["git_too_old", "chain_unreadable"])
+@pytest.mark.parametrize("gapped_first", [False, True])
+def test_a_dangling_link_that_did_not_change_is_not_listed_when_one_side_has_no_direct_targets(
+        repo, monkeypatch, why, gapped_first):
+    git(repo, "symbolic-ref", "refs/heads/dang", "refs/heads/nothing")
+    git(repo, "symbolic-ref", "refs/heads/good", "refs/heads/other")  # git is asked for its direct target
+
+    async def snap(gapped):
+        with monkeypatch.context() as patch:
+            if gapped and why == "git_too_old":
+                _without_direct_targets(patch, why)
+            elif gapped:
+                _git_cannot_read(patch, "refs/heads/good")
+            return await refs.snapshot(repo)
+
+    async def scenario():
+        before = await snap(gapped_first)
+        after = await snap(not gapped_first)
+        assert (before.gap is None) is not gapped_first and (after.gap is None) is gapped_first
+        return await refs.compare(repo, before, after, task_branch="main", task_id=TASK, active_task=inactive)
+
+    report = asyncio.run(scenario())
+    assert "refs/heads/dang" not in by_ref(report)
 
 
 def test_a_hidden_link_git_cannot_read_that_is_retargeted_shows_through_its_reader(repo, monkeypatch):
@@ -1694,7 +1823,7 @@ async def _generated_case(repo: Path, commits: dict[str, str], seed: int) -> tup
     layout.write(repo)
     final = _stored(repo)
     after = await refs.snapshot(repo)
-    report = await refs.compare(repo, before, after, task_branch="main", task_id=TASK, active_task=_only_task_two)
+    report = await refs.compare(repo, before, after, task_branch="main", task_id=TASK, active_task=inactive)
     entries = (*report.changes, *report.info)
     context = (f"seed={seed}\nbefore={initial}\nturn={steps}\nafter={final}\ncommits={commits}\n"
                "commands:\n  " + "\n  ".join(str(change.restore) for change in entries))

@@ -13,7 +13,9 @@ and compared; any other ref (``refs/remotes`` too) is read only as a hop of a sy
 
 Looper opens ref files itself only through descriptors under the git directory, never through a link
 (``_ref_files``). git does follow links there, so a ref whose file or directory Looper refuses, and every link that
-reads through one, is left out of the snapshot (``Snapshot.unreadable``): nothing git said about it is kept.
+reads through one, is left out of the snapshot (``Snapshot.unreadable``): nothing git said about it is kept. git
+also opens a symbolic ref's target outside ``refs/`` (``x/y``, ``worktrees/w/y``); Looper reads none but ``HEAD``
+and the other root refs, so every other such name is refused the same way.
 
 A symbolic ref is recorded hop by hop (``Snapshot.hops``). Refs that such chains tie together are restored by one
 command: a single ``git update-ref`` transaction that checks every hop it reads through and puts back every hop that
@@ -104,6 +106,7 @@ class NotRestorable(str, Enum):
     CHAIN_UNREADABLE = "chain_unreadable"  # git could not read a hop of the chain
     REF_FILE_UNREADABLE = "ref_file_unreadable"  # Looper refused a ref file or directory the ref is read from
     OVERLAPPING_TURN = "overlapping_turn"  # another task's turn on this repository ran meanwhile; it may be its change
+    OTHER_TASK_BRANCH = "other_task_branch"  # information only: another unfinished task's branch, a command would undo it
 
 
 @dataclass(eq=False)
@@ -202,8 +205,11 @@ def _value(snap: Snapshot, name: str) -> Value:
 
 def _differs(before: Snapshot, after: Snapshot, name: str) -> bool:
     old, new = _value(before, name), _value(after, name)
-    if "end" in ((old or ("",))[0], (new or ("",))[0]) and name in before.symrefs and name in after.symrefs:
+    kinds = {(old or ("",))[0], (new or ("",))[0]}
+    if "end" in kinds and name in before.symrefs and name in after.symrefs:
         return before.symrefs[name] != after.symrefs[name]  # one side has no direct target: compare the chain's end
+    if kinds == {"end", "ref"} and name not in before.refs and name not in after.refs:
+        return old[1] != new[1]  # dangling: without direct targets, its "end" is the target its own file spells
     return old != new
 
 
@@ -237,8 +243,9 @@ def _resolved(snap: Snapshot, name: str) -> str | None:
 
 
 def _within(name: str, refused: Iterable[str]) -> bool:
-    """Whether ``name``, or a directory it is in, is one of ``refused``."""
-    return any(name == path or name.startswith(path + "/") for path in refused)
+    """Whether ``name`` is one of ``refused``, or is in a refused directory. Only a path below ``refs/`` stands for
+    what is in it: a refused target such as ``refs`` or an empty one names itself alone."""
+    return any(name == path or (path.startswith("refs/") and name.startswith(path + "/")) for path in refused)
 
 
 def _gap(before: Snapshot, after: Snapshot, names: Iterable[str]) -> NotRestorable | None:
@@ -257,13 +264,14 @@ def _gap(before: Snapshot, after: Snapshot, names: Iterable[str]) -> NotRestorab
 
 
 def _direct_command(ref: str, old: str | None, new: str | None) -> str:
-    """The command for a ref that no symbolic ref ties to another: it applies only while the ref still reads ``new``.
+    """The command for a ref that no symbolic ref ties to another: it applies only while the ref still reads ``new``
+    (for a deleted ref, while it still does not exist: the zero object id).
     --no-deref: if the name has become a symbolic ref since, only that name changes."""
     name = _quote(ref)
     if old is None:
         return f"git update-ref --no-deref -d {name} {new}"
     if new is None:
-        return f"git update-ref --no-deref {name} {old}"
+        return f"git update-ref --no-deref {name} {old} {'0' * len(old)}"
     return f"git update-ref --no-deref {name} {old} {new}"
 
 
@@ -431,8 +439,8 @@ def _is_ref_name(name: str) -> bool:
 
 
 def _spelled(data: bytes) -> str:
-    """The target a ``ref:`` file spells, ending where git ends it, at a NUL."""
-    return os.fsdecode(data[4:].split(b"\0", 1)[0].strip())
+    """The target a ``ref:`` file spells, ending where git ends it, at a NUL, without the white space git strips."""
+    return os.fsdecode(data[4:].split(b"\0", 1)[0].strip(b" \t\r\n"))
 
 
 def _read_entry(directory: int, entry: str, name: str, files: _Files) -> None:
@@ -487,8 +495,8 @@ def _walk(common: str, files: _Files) -> None:
 def _probe_chains(git_dir: str, common: str, names: Iterable[str], files: _Files) -> None:
     """The files of the refs ``names``, and of what those spell as targets, by the spelling that reaches them (on a
     case-insensitive disk another case of a walked name opens the same file). One that does not exist is packed or
-    missing. ``HEAD`` is checked with the top files; any other name outside ``refs/`` that
-    git would read is a file of the git directory."""
+    missing. ``HEAD`` is checked with the top files; any other root ref is a file of the git directory. git opens
+    other names outside ``refs/`` too (``x/y``, ``worktrees/w/y``): those are refused unread, existing or not."""
     queue, seen = deque(names), set()
     while queue:
         name = queue.popleft()
@@ -500,7 +508,8 @@ def _probe_chains(git_dir: str, common: str, names: Iterable[str], files: _Files
             files.unreadable[name] = "not_a_ref_name"
             continue
         if not in_refs and not _ROOT_REF.fullmatch(name):
-            continue  # git does not take it for a ref name, so it opens nothing for it
+            files.unreadable[name] = "outside_refs"
+            continue
         base = git_dir if not in_refs or name.startswith(_PER_WORKTREE) else common
         *parts, leaf = name.split("/")
         try:
@@ -551,7 +560,8 @@ def _without_unreadable(snap: Snapshot, *found: _Files) -> Snapshot:
     if not refused:
         return snap
     # One entry for a refused directory, not one more for each name found under it later.
-    refused = {name for name in refused if not _within(name.rpartition("/")[0], refused)}
+    directories = {name for name in refused if name.startswith("refs/")}
+    refused = {name for name in refused if not _within(name.rpartition("/")[0], directories)}
     edges = [pair for links in (*(files.links for files in found), snap.hops, snap.symrefs) for pair in links.items()]
     grew = True
     while grew:
@@ -636,7 +646,8 @@ async def snapshot(work_dir: str | Path) -> Snapshot:
             symrefs[ref] = target
     dangling = {name: target for name, target in sorted(first.links.items())
                 if name.startswith(COMPARED) and name not in refs}
-    if any((_LINE_BREAKS | {"\n"}) & set(name) for name in (*dangling, *first.unreadable)):
+    listed = (*dangling, *(name for name in first.unreadable if name.startswith("refs/")))  # the rest never shows
+    if any((_LINE_BREAKS | {"\n"}) & set(name) for name in listed):
         raise _unreadable("A branch or tag name holds a line-break character; Looper cannot read the refs safely.")
     code, head = await _git(work_dir, "symbolic-ref", "-q", "HEAD")
     # Only the trailing newline goes: ref names may end in (or hold) Unicode whitespace.
@@ -904,7 +915,12 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
     shared = {change.restore for change, (_, _, informs) in zip(done, entries) if not informs and change.restore}
     changes, info = [], []
     for change, (_, _, informs) in zip(done, entries):
-        (info if informs and change.restore not in shared else changes).append(change)
+        if informs and change.restore not in shared:
+            # Another task is at work on it: a command of its own is not offered.
+            info.append(replace(change, restore=None,
+                                not_restorable=change.not_restorable or NotRestorable.OTHER_TASK_BRANCH))
+        else:
+            changes.append(change)
     return Report(tuple(changes), tuple(info), before.head, after.head, own_commits, needs_you)
 
 

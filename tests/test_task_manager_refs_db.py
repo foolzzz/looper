@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -450,4 +451,38 @@ def test_however_a_pool_turn_ends_its_window_is_closed(monkeypatch, tmp_path, na
         finally:
             await pool.shutdown()
         assert opened == [task_id] and task_id not in refs._windows
+    run_db(check, monkeypatch, timeout=60)
+
+
+@pytest.mark.parametrize("link", ["symlink", "hard_link"])
+@pytest.mark.parametrize("target", ["x/secret", "secret", "worktrees/w/secret"])
+def test_head_over_a_hop_outside_refs_records_and_names_no_branch_from_outside(monkeypatch, tmp_path, native, caplog,
+                                                                              target, link):
+    async def check(db):
+        task_id, directory = await make_task(native, db, tmp_path)
+        outside = tmp_path / "outside-file"
+        outside.write_text("ref: refs/heads/outside-marker\n")
+        hop = directory / ".git" / target
+        hop.parent.mkdir(parents=True, exist_ok=True)
+        hop.symlink_to(outside) if link == "symlink" else os.link(outside, hop)
+        (directory / ".git" / "refs" / "heads" / "main").write_text(f"ref: {target}\n")
+        sink = Sink()
+        with caplog.at_level(logging.DEBUG):
+            before, branch = await refs.begin_turn({"id": task_id}, directory, sink=sink)  # the first record
+            assert (before.head, branch) == ("refs/heads/main", "main")
+            assert await db.fetchval("SELECT branch FROM task_manager_branches WHERE task_id=$1", task_id) == "main"
+            report = await refs.end_turn({"id": task_id}, directory, before, branch, sink=sink, message_id="m1")
+            await store.set_branch(task_id, "other")
+            with pytest.raises(tm.Refused) as refused:
+                await refs.begin_turn({"id": task_id}, directory, sink=sink)
+            assert refused.value.reason is tm.RefuseReason.HEAD_MOVED
+            async with v1_api(tmp_path, db) as call:
+                status, answer = await call("tasks.task_manager_branch_set", {"task_id": task_id})
+                assert status == 200, answer
+                assert answer["result"] == {"task_id": task_id, "branch": "main", "previous": "other"}
+        stored = await db.fetch("SELECT changes FROM task_manager_ref_reports")
+        for place, text in {"report": repr(report), "events": repr(sink.events), "refusal": str(refused.value),
+                            "stored": repr([row["changes"] for row in stored]), "answer": repr(answer),
+                            "log": caplog.text}.items():
+            assert "outside-marker" not in text, place
     run_db(check, monkeypatch, timeout=60)

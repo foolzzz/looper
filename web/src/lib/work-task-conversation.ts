@@ -49,7 +49,7 @@ const SANDBOX_CATEGORIES = ["network", "write", "other"] as const;
 const SANDBOX_CASES = ["not_allowed", "unsupported_client", "unknown", "not_allowable"] as const;
 const SANDBOX_CLIENTS = ["go_tls"] as const;
 const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward", "fast_forward_unverified", "unreadable"] as const;
-const NOT_RESTORABLE = ["too_many_symrefs", "git_too_old", "chain_outside_refs", "chain_unreadable", "ref_file_unreadable", "overlapping_turn"] as const;
+const NOT_RESTORABLE = ["too_many_symrefs", "git_too_old", "chain_outside_refs", "chain_unreadable", "ref_file_unreadable", "overlapping_turn", "other_task_branch"] as const;
 const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable", "project_instructions_skipped"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
@@ -235,6 +235,7 @@ const NOT_RESTORABLE_TEXT: Record<(typeof NOT_RESTORABLE)[number], string> = {
   chain_unreadable: "git 读不出引用链中的某一跳",
   ref_file_unreadable: "它要读的引用文件或目录是指向别处的链接、不是独立的普通文件、过大或读取失败，Looper 没有读它",
   overlapping_turn: "同一仓库里另一个任务的管家回合和本轮时间重叠，分不清是谁改的，恢复可能撤掉对方的改动",
+  other_task_branch: "它是另一个仍未结束的任务的分支，恢复可能撤掉那个任务的改动",
 };
 const SKIP_REASONS: Record<string, string> = {
   outside: "解析到任务目录之外", other_repository: "在任务目录内的另一个仓库里", not_an_instruction_file: "链接指向的不是说明文件",
@@ -264,10 +265,11 @@ function refChangeText(change: RefChange): string {
 }
 
 function refReportText(event: Extract<TaskEvent, { kind: "ref_report" }>): string {
-  const parts = ["本轮之后引用有变化，Looper 不会自动恢复，下面的恢复命令由你自己决定是否执行："];
+  const commands = [...event.changes, ...event.info].flatMap((change) => change.restore === null ? [] : [change.restore]);
+  const parts = [commands.length ? "本轮之后引用有变化，Looper 不会自动恢复，下面的恢复命令由你自己决定是否执行："
+    : "本轮之后引用有变化，Looper 不会自动恢复，这次没有可给出的恢复命令。"];
   parts.push(...event.changes.map(refChangeText).map((line) => `- ${line}`));
   parts.push(...event.info.map((change) => `- ${refChangeText(change)}（属于另一个 Looper 任务）`));
-  const commands = [...event.changes, ...event.info].flatMap((change) => change.restore === null ? [] : [change.restore]);
   if (new Set(commands).size < commands.length) parts.push("命令相同的几项由一条命令一起恢复，执行一次即可。");
   if (event.needs_you) parts.push("这些变化已列入「需要你处理」。");
   if (event.head) {

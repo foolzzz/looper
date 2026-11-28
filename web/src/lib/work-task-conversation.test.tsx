@@ -380,9 +380,25 @@ describe("task conversation", () => {
     expect(Array.from(shown.querySelectorAll("code"), (node) => node.textContent)).toEqual([shared]);
     expect(shown.textContent).toContain("执行一次即可");
     expect(shown.textContent).toContain("不能给出恢复命令：引用链经过 refs/ 之外的名字");
+    expect(shown.textContent).toContain("下面的恢复命令由你自己决定是否执行");
     for (const index of [1, 2, 3]) {
       expect(container.querySelector(`[data-feed-key="task-event:s${index}"]`)?.textContent).toContain("无法读取这条事件");
     }
+  });
+
+  it("promises no restore command below when a report has none", async () => {
+    const other = { ref: "refs/heads/looper/t2/task", change: "moved", old: null, new: null, restore: null,
+      not_restorable: "other_task_branch" };
+    const event = { kind: "ref_report", message_id: "turn-1", report_id: 9, own_commits: 0, needs_you: false,
+      head: null, changes: [], info: [other] };
+    api.fetchChatHistory.mockResolvedValue(idle([row("n0", "event", JSON.stringify(event), "2026-11-25T00:00:00Z")]));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    const shown = container.querySelector('[data-feed-key="task-event:n0"]')!;
+    expect(shown.textContent).toContain("这次没有可给出的恢复命令");
+    expect(shown.textContent).toContain("它是另一个仍未结束的任务的分支");
+    expect(shown.textContent).not.toContain("下面的恢复命令");
+    expect(shown.querySelectorAll("code")).toHaveLength(0);
   });
 
   it("keeps repeated identical sandbox notices of different turns apart, and folds one turn's copy", async () => {
