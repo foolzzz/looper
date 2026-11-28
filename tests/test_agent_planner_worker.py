@@ -1784,7 +1784,7 @@ def test_no_prompt_that_names_a_file_or_branch_lets_the_name_start_a_line(
     item = {"path": name, "deleted": False, "where": "commit", "commit": commit, "repo_path": name}
     result = {"status": "completed", "changed_files": {name: name}, "deleted_files": [name],
               "found_elsewhere": [item]}
-    monkeypatch.setattr(instructions, "read_injected", lambda _: instructions.Injected(text="instructions"))
+    monkeypatch.setattr(instructions, "read_injected", lambda *_: instructions.Injected(text="instructions"))
     monkeypatch.setattr("looper.agents.tiers.manager.db_projects.list_projects", AsyncMock(return_value=[
         {"name": "project", "work_dir": name, "description": ""}]))
     monkeypatch.setattr(reported_files, "check", lambda *args, **kwargs: reported_files.FilesCheck((
@@ -1822,7 +1822,7 @@ def test_no_prompt_that_names_a_file_or_branch_lets_the_name_start_a_line(
         "planner task": plan_task_section(task_id="t1", requirement="r", project_name="project", work_dir=name),
         "knowledge": compose_index([IndexEntry("title", "summary", name, name)]),
         "instructions": instructions.injected_section([
-            instructions.InstructionFile(Path("/w") / name, instructions.Delivery.INJECTED)], "OMP"),
+            instructions.InstructionFile(Path("/w") / name, instructions.Delivery.INJECTED)], "OMP", "/w"),
         "codex skill": runtime_notes(RuntimeCatalog((SkillDocument("skill", "description", name),))),
         "codex skill name": runtime_notes(RuntimeCatalog((SkillDocument(name, "description", "SKILL.md"),))),
         "manager projects": "\n".join(asyncio.run(

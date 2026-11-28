@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -108,24 +109,20 @@ def test_a_parent_and_a_child_cannot_both_prepare(monkeypatch, tmp_path, native)
         pool = tm.TaskManagerPool(runtime, native.executable, max_resident=lambda: 2)
         early: list[object] = []
         real_check = task_manager_dirs.check
+        # Both prepares must pass the early check before either takes the lock. The check runs in a worker
+        # thread, so a thread barrier holds each of them there until the other arrives.
+        barrier = threading.Barrier(2, timeout=20)
+        seen: set[str] = set()
 
         def wrapped(task, work_dir, **kwargs):
             result = real_check(task, work_dir, **kwargs)
-            early.append(result)
+            if work_dir not in seen:
+                seen.add(work_dir)
+                early.append(result)
+                barrier.wait()
             return result
 
-        arrived = {"n": 0}
-        release = asyncio.Event()
-
-        async def hold():
-            arrived["n"] += 1
-            if arrived["n"] >= 2:
-                release.set()
-            else:
-                await release.wait()
-
         monkeypatch.setattr(task_manager_dirs, "check", wrapped)
-        monkeypatch.setattr(task_manager_dirs, "before_directory_lock", hold)
         sink_parent, sink_child = Sink(), Sink()
         try:
             parent_result, child_result = await asyncio.gather(
@@ -151,7 +148,98 @@ def test_a_parent_and_a_child_cannot_both_prepare(monkeypatch, tmp_path, native)
                     probe = task_manager_dirs.DirectoryLock.acquire(runtime, str(directory), "probe")
                     probe.release()
         finally:
-            release.set()
+            barrier.abort()
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_a_directory_swapped_between_the_check_and_the_lock_never_starts(monkeypatch, tmp_path, native):
+    async def check(db):
+        repository = _repo(tmp_path / "repository")
+        other = _repo(tmp_path / "other")
+        task_id, _, _ = await native.create(db, path=repository, git=False)
+        runtime = tmp_path / "runtime"
+        pool = tm.TaskManagerPool(runtime, native.executable, max_resident=lambda: 1)
+        real_acquire = task_manager_dirs.DirectoryLock.acquire.__func__
+
+        def swapping(cls, *args, **kwargs):
+            # The workspace path is replaced by a link to another valid repository, after the check passed.
+            repository.rename(tmp_path / "repository.old")
+            repository.symlink_to(other, target_is_directory=True)
+            return real_acquire(cls, *args, **kwargs)
+
+        monkeypatch.setattr(task_manager_dirs.DirectoryLock, "acquire", classmethod(swapping))
+        try:
+            before = _count("workspace_unavailable")
+            sink = Sink()
+            result = await pool.submit(task_id, "reply", message_id="swap", sink=sink)
+            assert result.state == "refused" and result.reason is tm.RefuseReason.WORKSPACE_UNAVAILABLE
+            assert result.kind is task_manager_dirs.Kind.CHANGED_AFTER_CHECK
+            await sink.done()
+            assert ("refused", {"reason": result.reason}) in sink.events
+            assert native.records("launch") == []
+            assert not pool.agent(task_id).resident.started
+            assert _count("workspace_unavailable") == before + 1
+            probe = real_acquire(task_manager_dirs.DirectoryLock, runtime, str(other), "probe")  # no lock was left behind
+            probe.release()
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=30)
+
+
+@pytest.mark.parametrize("error, kind", (
+    (NotADirectoryError(20, "gone"), task_manager_dirs.Kind.NOT_A_DIRECTORY),
+    (PermissionError(13, "denied"), task_manager_dirs.Kind.IO_ERROR),
+))
+def test_an_os_error_while_locking_is_a_refusal_not_a_started_turn(monkeypatch, tmp_path, native, error, kind):
+    async def check(db):
+        repository = _repo(tmp_path / "repository")
+        task_id, _, _ = await native.create(db, path=repository, git=False)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+
+        def failing(cls, *args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(task_manager_dirs.DirectoryLock, "acquire", classmethod(failing))
+        try:
+            sink = Sink()
+            result = await pool.submit(task_id, "reply", message_id="oserror", sink=sink)
+            assert result.state == "refused" and result.reason is tm.RefuseReason.WORKSPACE_UNAVAILABLE
+            assert result.kind is kind
+            await sink.done()
+            assert sink.finals[0][1] == "refused" and "turn failed" not in sink.finals[0][0]
+            assert native.records("launch") == []
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=30)
+
+
+def test_the_directory_checks_and_the_lock_run_off_the_event_loop(monkeypatch, tmp_path, native):
+    async def check(db):
+        repository = _repo(tmp_path / "repository")
+        task_id, _, _ = await native.create(db, path=repository, git=False)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        loop_thread = threading.get_ident()
+        threads: dict[str, set[int]] = {"check": set(), "acquire": set()}
+        real_check = task_manager_dirs.check
+        real_acquire = task_manager_dirs.DirectoryLock.acquire.__func__
+
+        def wrapped_check(*args, **kwargs):
+            threads["check"].add(threading.get_ident())
+            return real_check(*args, **kwargs)
+
+        def wrapped_acquire(cls, *args, **kwargs):
+            threads["acquire"].add(threading.get_ident())
+            return real_acquire(cls, *args, **kwargs)
+
+        monkeypatch.setattr(task_manager_dirs, "check", wrapped_check)
+        monkeypatch.setattr(task_manager_dirs.DirectoryLock, "acquire", classmethod(wrapped_acquire))
+        try:
+            await submit_and_wait(pool, task_id)
+            assert pool.agent(task_id).resident.started
+            assert threads["check"] and threads["acquire"]
+            assert loop_thread not in threads["check"] | threads["acquire"]
+        finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=30)
 
@@ -168,6 +256,7 @@ def test_subdirectory_of_a_repository_is_not_a_direct_workspace(monkeypatch, tmp
             sink = Sink()
             result = await pool.submit(task_id, "reply", message_id="nested", sink=sink)
             assert result.state == "refused" and result.reason is tm.RefuseReason.WORKSPACE_NOT_REPO_ROOT
+            assert result.kind is task_manager_dirs.Kind.SUBDIRECTORY  # typed, not read back from the text
             await sink.done()
             assert ("refused", {"reason": result.reason}) in sink.events
             assert "subdirectory" in sink.finals[0][0] and os.path.realpath(repository) in sink.finals[0][0]

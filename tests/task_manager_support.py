@@ -13,6 +13,7 @@ from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.db import projects, tasks
 from tests.db_support import until
+from evals.prompt_regression.fake_readback import SOURCE as READBACK_SOURCE
 from tests.fake_claude import fake_claude
 
 
@@ -63,6 +64,7 @@ def emit(value):
     print(json.dumps(value), flush=True)
 if '--version' in sys.argv:
     print('2.1.332 (Claude Code)'); sys.exit()
+exec({READBACK_SOURCE!r})
 resuming = '--resume' in sys.argv
 record({{'kind':'launch', 'command':sys.argv[1:], 'cwd':os.getcwd(),
          'environment':{{key:os.environ.get(key) for key in ('LOOPER_TASK_MANAGER','LOOPER_AGENT_RUN','SERVER_PRIVATE')}}}})
@@ -81,6 +83,14 @@ def finish(text):
            **({{'usage_complete':False}} if measurement_config.get('unknown_cost') else {{}})}})
 for line in sys.stdin:
     data = json.loads(line)
+    if data.get('type') == 'control_request' and data['request']['subtype'] in READBACK_SUBTYPES:
+        record({{'kind':'control', 'subtype':data['request']['subtype']}})
+        answer = readback_answer(data['request'], str(log.with_name('readback-override.json')))
+        if answer is not None:
+            kind, body = answer
+            emit({{'type':'control_response','response':{{'subtype':kind,'request_id':data['request_id'],
+                  **({{'response':body}} if kind == 'success' else {{'error':body}})}}}})
+        continue
     if data.get('type') == 'control_request':
         emit({{'type':'control_response','response':{{'subtype':'success','request_id':data['request_id']}}}})
         finish('stopped')
@@ -89,7 +99,13 @@ for line in sys.stdin:
     config_path = Path('context-probe.json')
     measurement_config = json.loads(config_path.read_text()) if config_path.exists() else {{}}
     record({{'kind':'input','text':text,'session':session}})
-    emit({{'type':'system','subtype':'init','session_id':session}})
+    override_file = str(log.with_name('readback-override.json'))
+    mode = init_mode(override_file)
+    init_event = {{'type':'system','subtype':'init','session_id':session, **init_fields(override_file)}}
+    if mode == 'normal':
+        import time as _time
+        _time.sleep(init_delay(override_file))
+        emit(init_event)
     if text == 'wait':
         continue
     if text == '/compact':
@@ -128,10 +144,15 @@ for line in sys.stdin:
     if text.startswith('edit:'):
         for name in text[5:].split(','):
             Path(name).write_text('changed by the turn\\n')
-    emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})
-    emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'two'}}}}}})
-    emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':'tool-call','name':'Read','input':{{'file_path':'sample'}}}}]}}}})
-    emit({{'type':'user','message':{{'content':[{{'type':'tool_result','tool_use_id':'tool-call','content':'contents'}}]}}}})
+    if mode != 'bare':
+        if partial_tool(override_file):
+            emit({{'type':'stream_event','event':{{'type':'content_block_start','content_block':{{'type':'tool_use','id':'p','name':partial_tool(override_file)}}}}}})
+        emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})
+        emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'two'}}}}}})
+        emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':'tool-call','name':tool_name(override_file),'input':{{'command':'cat sample'}}}}]}}}})
+        emit({{'type':'user','message':{{'content':[{{'type':'tool_result','tool_use_id':'tool-call','content':'contents'}}]}}}})
+    if mode == 'late':
+        emit(init_event)
     finish('onetwo')
 ''')
 
