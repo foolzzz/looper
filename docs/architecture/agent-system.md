@@ -5020,46 +5020,64 @@ evaluation is required before the original schedule requirement is complete.
   an alert/recovery for a `deliverable` schedule, a removed target, or no sender).
   Pre-send refusals retain their reason in `error`; only messages handed to
   the sender are recorded as `sent` or `failed`.
-  A chat send the channel refuses (nothing was sent) is kept in
-  `schedule_notice_retries`, one row per schedule, kind and run (`run_key` is
-  empty when the notice has no run, so a stale alert still dedupes). It is
-  tried again up to 3 times, after 1, then 5, then 15 minutes. The row is
-  claimed (`sending`) before the send, so a second pass or a restart does not
-  send it twice. `ChannelRegistry.notify` still returns `(sent, error)` for
-  every existing caller. Schedule notices go through `notify_outcome`, which
-  also says whether the channel refused the send or may have accepted it.
+  A chat alert or recovery is one episode of one alert kind of one schedule,
+  in `schedule_notice_retries`. The key is `(schedule_id, kind, episode, role)`.
+  `kind` is the family (`failures`, `stale`, `deadline`, `overlap`, `check`,
+  `skip`), not the outbox name and not `run`. `role` is `alert` or `recovery`.
+  `episode` increases when that kind's failure period opens and is not reused.
+  Completion notices are not rows of this table. A failed completion send,
+  whether the sender raised or returned `(False, error)`, is sent again the
+  next time that run ends, because `sent_at` stays empty until a send is
+  accepted. An accepted completion send is not sent twice.
+  Row states are `pending`, `sending`, `sent`, `uncertain`, `gave_up` and
+  `superseded`. The last four are terminal and stay until prune, including a
+  successful first send. The first send is enqueued `pending` and due now; the
+  scheduler tick does not wait for it. One background retry task sends due
+  rows, alerts before recoveries, 30 seconds per send, and a drain is checked
+  between rows. A pass that
+  waits for in-flight messages also sends the retries that are due, and only
+  when a sender is configured. The claim (`sending`) is one update, so a
+  second pass does not send the same row. A refused send is tried again up to
+  3 times, after 1, then 5, then 15 minutes. The fourth refusal is `gave_up`.
   A send that raises, times out, or that the channel reports as unknown is
   `uncertain` and is never sent again. In Telegram's direct mode most network
   errors are unknown, so they become `uncertain` and a summary line, not
   another try. The same is true of a multi-part message of which any part
   already left, and of an outbound send whose result was not readable. A
-  restart settles a claim still `sending` to `uncertain` because the server
-  stopped while it was sending. Each send has its own time limit. The
-  scheduler loop starts one background retry task after a tick and does not
-  wait for it, so one attempt that does not return does not stop the ticks; a
-  drain stops that pass between rows. A pass that waits for in-flight messages
-  also sends the retries that are due, and only when a sender is configured.
-  After 3 refused retries the row is `gave_up`. A successful first send leaves
-  no retry row; a successful later try stays `sent`. While the server is
-  draining, due retries wait. If the schedule is gone, no longer notifies, has
-  no target, keeps the alert on the dashboard, or the chat is off the
-  allowlist, the retry is `gave_up` without another send. A schedule deleted
-  before the claim is logged and not raised. Dashboard-only notices are not
-  retried. A completion notice whose send failed is still replayed (its
-  `sent_at` stays empty until a send is accepted). A later try of that run
-  notice that is accepted marks the completion event sent, so the replay does
-  not send a second copy. `proactive_deliveries` records a push decision and
-  does not resend, and `schedule_notifications` stays an append-only outbox,
-  so neither table is the claim.
-  A failure recovery names each failure alert that is still `pending`,
-  `sending`, `gave_up` or `uncertain` (not one that was delivered):
-  `补充：<local time> 的失败告警没有送达，涉及连续 <n> 次运行。`
-  `<n>` is the streak at the latest failure, not the count when the alert
-  opened. An alert that is `uncertain` says `可能没有送达` instead. An alert
-  still `sending` when the recovery is written is counted the same way, and a
-  later refusal of that send is not queued again. A recovery that itself fails
-  is retried with the same line. The line is omitted when the alert was
-  delivered, and other recovery texts are unchanged.
+  restart leaves `pending` as it is and settles `sending` to `uncertain`.
+  While the server is draining, due retries wait. If the schedule no longer
+  notifies, has no target, keeps the alert on the dashboard, or the chat is
+  off the allowlist, a pending retry is `gave_up` without another send. A
+  schedule deleted before the claim is logged and not raised; a send that
+  finishes after the delete updates nothing and does not raise.
+  Dashboard-only notices are not retried. `ChannelRegistry.notify` still
+  returns `(sent, error)` for every existing caller. Schedule notices go
+  through `notify_outcome`. `proactive_deliveries` records a push decision
+  and does not resend, and `schedule_notifications` stays an append-only
+  outbox (the legacy kind names), so neither table is the claim.
+
+  | Event | Alert of episode e | Recovery of episode e |
+  | --- | --- | --- |
+  | The failure that opens the period | Create `pending`, due now. Supersede a pending alert or recovery of this kind. A recovery that was recorded and not yet claimed, and whose episode has no alert row, keeps that episode: the alert joins it | |
+  | Due, while `pending` | Claim `sending` and send | Claim `sending` only when the alert is not `sending`. Otherwise stay `pending`, due now, and do not count a retry |
+  | Send accepted | `sent` | `sent` |
+  | Send refused, fewer than 3 retries, episode still open | `pending`, after 1, then 5, then 15 minutes | `pending`, on the same backoff |
+  | Send refused after 3 retries, or the episode has closed | `gave_up`, or `superseded` when a recovery of this episode exists or a later episode exists | `gave_up`, or `superseded` when a later episode exists |
+  | Send raised, timed out, or unknown | `uncertain`, never sent again | `uncertain`, never sent again |
+  | The schedule recovers | A `pending` alert becomes `superseded` and is not sent. A `sending` alert stays until its result | Create `pending` with the plain recovery text |
+  | A new failure period opens | A `pending` alert becomes `superseded` | A `pending` recovery becomes `superseded` and is not sent |
+  | The schedule is deleted | `superseded`. A finished send updates nothing | `superseded`. A finished send updates nothing |
+  | The process restarts | `pending` stays. `sending` becomes `uncertain` | `pending` stays. `sending` becomes `uncertain` |
+
+  The recovery's supplement is chosen when the recovery is claimed, from that
+  episode's alert. `sent` adds nothing. `gave_up` or `superseded` (it was not
+  delivered) adds `补充：<local time> 的失败告警没有送达，涉及连续 <n> 次运行。`
+  for a failure alert, and the same shape without the streak for another kind.
+  `uncertain`, or still `sending`, says `可能没有送达` instead. `<n>` is the
+  streak at the latest failure of that episode, not the count when the alert
+  opened. A later episode does not send the previous episode's pending text,
+  and its recovery does not name the previous episode's alert. A recovery
+  that itself fails is retried with the line chosen again at the next claim.
 - **Deleting.** A project with schedules is not deleted (409) until they are.
   Deleting a schedule (the project's Schedules tab, the Schedules page, the
   schedule's page, `POST /api/v1/schedule_admin/delete` with `schedule_id`, the Manager's
@@ -9343,7 +9361,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`, `skipped_busy`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`, `manager_event_id` (the completion event that told a run's message: the Manager's reply or its fallback; NULL otherwise; a partial index, built online on an existing database); going with its schedule |
-| `schedule_notice_retries` | A chat send of a schedule notice that was not confirmed: `schedule_id`, `kind`, `run_id` (null for a stale alert; `run_key` is `''` then, and the unique key), `state` (`pending`, claim `sending`, then `sent`, `uncertain` or `gave_up`), `retries` (at most 3, backoff 1 then 5 then 15 minutes), `next_attempt_at`, `error`, `failures` (consecutive failures on a failure alert), `text`, `channel`, `chat`, `reported_at` (set when a failure recovery that names this alert was sent or may have been), `summary_of` (the failure alerts that recovery's text names), `created_at` (the scheduler clock); goes with its schedule. A restart settles `sending` to `uncertain` and does not send it again |
+| `schedule_notice_retries` | One episode of one alert kind of one schedule: `schedule_id`, `kind` (`failures`, `stale`, `deadline`, `overlap`, `check`, `skip`; a completion notice is not a row), `episode` (increases when that kind's failure period opens and is not reused), `role` (`alert` or `recovery`), `run_id` (null when the notice has no run), `state` (`pending`, claim `sending`, then `sent`, `uncertain`, `gave_up` or `superseded`), `retries` (at most 3, backoff 1 then 5 then 15 minutes), `next_attempt_at`, `error`, `failures` (the streak on a failure alert), `text` (the plain body; a recovery's supplement is chosen when the row is claimed), `channel`, `chat`, `created_at` (the scheduler clock); unique on `(schedule_id, kind, episode, role)`; goes with its schedule. Terminal rows stay until prune. A restart leaves `pending` and settles `sending` to `uncertain`, which is not sent again. A notice still `sending` is described as maybe not delivered |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report and the scheduler's `scheduler.min_interval_seconds` and `scheduler.run_timeout_seconds` |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at`, `skill_version` (the current project-skill version; null when the item has none) |
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
