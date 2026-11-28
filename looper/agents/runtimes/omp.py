@@ -395,7 +395,7 @@ class OmpRuntime(RuntimeAdapter):
         repository; outside one, where its discovery is off, the work directory's, put in the system prompt."""
         delivery = Delivery.INJECTED if outside_repository(cwd) else Delivery.NATIVE
         return tuple(InstructionFile(path, delivery) for path in instructions.first_per_directory(
-            cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+            cwd, instructions.NAMES))
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """What omp could not load of the installed items, when there is any (RFC P9)."""
@@ -572,7 +572,7 @@ def runtime_notes() -> str:
 
 
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
-    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label)
+    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label, cwd)
                if cwd is not None else "")
     return runtime_prompt_text(launch, looper_prompt, project, runtime_notes(), keep_empty=False)
 

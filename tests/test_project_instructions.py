@@ -264,6 +264,7 @@ def test_a_file_that_cannot_be_read_is_left_out_and_the_record_says_why(
         os.chmod(tmp_path / "CLAUDE.md", 0o600)
     assert prompt.startswith(f"# Runtime notes ({label})")
     assert entry["delivery"] == "injected" and entry["error"].startswith("PermissionError") and "sha256" not in entry
+    assert entry["skipped"] == "io_error"
 
 
 # --- The run's record ---
