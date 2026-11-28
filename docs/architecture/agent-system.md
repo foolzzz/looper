@@ -1122,8 +1122,9 @@ them.
   operator resolves it (`tasks.task_manager_ref_report_resolve`, which changes nothing in git); a change
   under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only, with no
   command (`other_task_branch`, unless another reason applies): it would undo that task's work. When chains tie
-  it to a change, it is listed among `changes` instead, still without "needs you", with the shared command, which
-  then also puts it back. The
+  it to a change, so that one command would write both, nothing on that chain gets a command: the changes are
+  listed with `overlapping_turn` (unless another reason applies), so following the commands Looper gives never
+  writes that task's branch. The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
