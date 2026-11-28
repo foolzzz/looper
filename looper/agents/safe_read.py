@@ -2,15 +2,17 @@
 
 Files that anyone who can change a repository may have written (project instruction files) are read by Looper
 itself, outside any sandbox. ``read_inside`` reads one only when it is a regular file, with no other hard link,
-whose resolved path is inside ``boundary``. A name that is a link to another file inside the boundary is read as
-that file; with ``names``, only when the file it resolves to has one of those names.
+whose resolved path is inside ``boundary`` with no other repository on the way: no directory below the boundary
+down to the file's own holds a ``.git`` entry. A name that is a link to another such file is read as that file; with
+``names``, only when the file it resolves to has one of those names.
 
 The check by path alone can be raced by a process that swaps a directory for a link between the check and the
 open, so the open walks the resolved path from a descriptor of the boundary one component at a time with
-``O_NOFOLLOW`` and checks the opened descriptor (``fstat``), not the path. The link count is taken both from that
-descriptor and from the name it was opened by, which must still be that file. At most ``limit + 1`` bytes are
-read, and a leaf that is not a regular file (a FIFO, a device) is opened without blocking and never read. Every
-descriptor is closed on every path. A refused file is a typed ``Skipped``; nothing of its content is kept.
+``O_NOFOLLOW``, looks for ``.git`` in each directory it opens, and checks the opened descriptor (``fstat``), not the
+path. The link count is taken both from that descriptor and from the name it was opened by, which must still be that
+file. At most ``limit + 1`` bytes are read, and a leaf that is not a regular file (a FIFO, a device) is opened
+without blocking and never read. Every descriptor is closed on every path. A refused file is a typed ``Skipped``;
+nothing of its content is kept.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from pathlib import Path
 
 class Skip(StrEnum):
     OUTSIDE = "outside"  # the resolved path is not inside the boundary
+    OTHER_REPOSITORY = "other_repository"  # inside the boundary, in a repository nested below it
     NOT_AN_INSTRUCTION_FILE = "not_an_instruction_file"  # the resolved file has none of the caller's ``names``
     SYMLINK = "symlink"  # a link was found while walking the path (the path changed after it was resolved)
     HARD_LINKED = "hard_linked"  # more than one link: the same inode may also be a file elsewhere
@@ -52,6 +55,10 @@ class _LeftTheBoundary(Exception):
     """A component of the path turned out to be a link (or not a directory) while it was walked."""
 
 
+class _OtherRepository(Exception):
+    """A directory on the way holds ``.git``."""
+
+
 def _open(name: str, flags: int, parent: int | None = None) -> int:
     try:
         return os.open(name, flags | os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent)
@@ -61,9 +68,18 @@ def _open(name: str, flags: int, parent: int | None = None) -> int:
         raise
 
 
+def _holds_git(directory: int) -> bool:
+    try:
+        os.stat(".git", dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _open_inside(base: str, relative: str) -> tuple[int, int, str]:
-    """Open ``relative`` below ``base``, both already resolved, refusing any link on the way. Returns the
-    descriptors of the directory holding the file and of the file, and its name there; the caller closes both."""
+    """Open ``relative`` below ``base``, both already resolved, refusing any link and any other repository on the
+    way. Returns the descriptors of the directory holding the file and of the file, and its name there; the caller
+    closes both."""
     parts = [part for part in relative.split(os.sep) if part not in ("", ".")]
     held = _open(base, os.O_DIRECTORY)
     try:
@@ -71,6 +87,8 @@ def _open_inside(base: str, relative: str) -> tuple[int, int, str]:
             following = _open(part, os.O_DIRECTORY, held)
             os.close(held)
             held = following
+            if _holds_git(held):
+                raise _OtherRepository(part)
         # O_NONBLOCK: opening a FIFO must not wait for a writer
         return held, _open(parts[-1], os.O_NONBLOCK, held), parts[-1]
     except BaseException:
@@ -90,8 +108,8 @@ def _read_bytes(fd: int, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def _io_error(exc: OSError) -> Skipped:
-    return Skipped(Skip.IO_ERROR, f"{type(exc).__name__}: {exc.strerror or exc}")
+def _io_error(exc: OSError | RecursionError) -> Skipped:
+    return Skipped(Skip.IO_ERROR, f"{type(exc).__name__}: {getattr(exc, 'strerror', None) or exc}")
 
 
 def read_inside(boundary: str | Path, path: str | Path, limit: int, *, clip: bool = False,
@@ -101,8 +119,11 @@ def read_inside(boundary: str | Path, path: str | Path, limit: int, *, clip: boo
 
     A file larger than ``limit`` is ``Skip.TOO_LARGE``, or with ``clip`` its first ``limit`` bytes (``size`` tells
     how large it was). Never more than ``limit + 1`` bytes are read."""
-    base = os.path.realpath(boundary)
-    real = os.path.realpath(path)
+    try:
+        base = os.path.realpath(boundary)
+        real = os.path.realpath(path)
+    except (OSError, RecursionError) as exc:  # a link replaced while it was resolved; a chain of links too deep
+        return _io_error(exc)
     if real != base and not real.startswith(base.rstrip(os.sep) + os.sep):
         return Skipped(Skip.OUTSIDE)
     if real == base:
@@ -114,6 +135,8 @@ def read_inside(boundary: str | Path, path: str | Path, limit: int, *, clip: boo
         directory, fd, name = _open_inside(base, os.path.relpath(real, base))
     except _LeftTheBoundary:
         return Skipped(Skip.SYMLINK)
+    except _OtherRepository:
+        return Skipped(Skip.OTHER_REPOSITORY)
     except OSError as exc:
         return _io_error(exc)
     try:

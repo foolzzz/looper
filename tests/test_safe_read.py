@@ -103,6 +103,50 @@ def test_a_path_outside_the_boundary_is_skipped(base: Path, tmp_path: Path, path
     assert read_inside(base, f"{tmp_path}/{path}", LIMIT) == Skipped(Skip.OUTSIDE)
 
 
+@pytest.mark.parametrize("marker", ["directory", "file", "dangling link"])
+@pytest.mark.parametrize("below", ["file", "dir/file"], ids=["at its root", "below its root"])
+def test_a_file_of_another_repository_inside_the_boundary_is_skipped(base: Path, marker: str, below: str) -> None:
+    (base / ".git").mkdir()  # the boundary's own is not another one
+    nested = base / "nested"
+    (nested / "dir").mkdir(parents=True)
+    (nested / below).write_text("FAKE-NESTED")
+    if marker == "directory":
+        (nested / ".git").mkdir()
+    elif marker == "file":
+        (nested / ".git").write_text("gitdir: elsewhere")
+    else:
+        (nested / ".git").symlink_to("gone")
+    (base / "alias").symlink_to(f"nested/{below}")
+
+    for path in (base / "alias", nested / below):
+        assert read_inside(base, path, LIMIT) == Skipped(Skip.OTHER_REPOSITORY)
+    assert read_inside(base, base / "dir" / "file", LIMIT) == Content(b"INSIDE", 6)
+    assert read_inside(nested, nested / below, LIMIT) == Content(b"FAKE-NESTED", 11)  # inside its own
+
+
+@pytest.mark.parametrize("raised, detail", [
+    (OSError(22, "Invalid argument"), "OSError: Invalid argument"),  # a link replaced between lstat and readlink
+    (RecursionError("maximum recursion depth exceeded"), "RecursionError: maximum recursion depth exceeded"),
+], ids=["OSError", "RecursionError"])
+@pytest.mark.parametrize("failing", ["", "dir/file"], ids=["the boundary", "the file"])
+def test_a_path_that_cannot_be_resolved_is_an_io_error(
+    base: Path, monkeypatch: pytest.MonkeyPatch, failing: str, raised: Exception, detail: str,
+) -> None:
+    realpath = os.path.realpath
+    broken_path = str(base / failing)
+
+    def broken(path: Any, **kwargs: Any) -> Any:
+        if str(path) == broken_path:
+            raise raised
+        return realpath(path, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os.path, "realpath", broken)
+        result = read_inside(base, base / "dir" / "file", LIMIT)
+
+    assert result == Skipped(Skip.IO_ERROR, detail)
+
+
 def _after_the_check(monkeypatch: pytest.MonkeyPatch, swap: Callable[[], None]) -> None:
     """Run ``swap`` after the path was resolved and found inside, before it is opened."""
     opened = safe_read._open_inside
@@ -133,6 +177,11 @@ def test_a_link_swapped_in_after_the_check_is_not_followed(
 
     _after_the_check(monkeypatch, swap)
     assert read_inside(base, base / "dir" / "file", LIMIT) == Skipped(Skip.SYMLINK)
+
+
+def test_a_repository_moved_in_after_the_check_is_not_read(base: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _after_the_check(monkeypatch, lambda: (base / "dir" / ".git").mkdir())
+    assert read_inside(base, base / "dir" / "file", LIMIT) == Skipped(Skip.OTHER_REPOSITORY)
 
 
 def test_a_file_with_another_hard_link_is_skipped(base: Path, tmp_path: Path) -> None:

@@ -792,6 +792,17 @@ def _gate_command_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_cost_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The process-wide cost guard is created lazily from the cached settings; a test that enforces a budget must not
+    leave that guard behind for later tests in the same worker."""
+    cost_guard = sys.modules.get("looper.agents.cost_guard")
+    if cost_guard is None:
+        return
+
+    monkeypatch.setattr(cost_guard, "_guard", None)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The runs going on now and their token windows belong to one test, not to earlier recorders in this worker."""
     live_runs = sys.modules.get("looper.agents.live_runs")
