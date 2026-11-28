@@ -11,6 +11,7 @@ executable unchanged (real mode) or a scripted stand-in (fake mode, free).
     python -m evals.prompt_regression.task_manager_eval --compare-inputs DIR_A DIR_B
     python -m evals.prompt_regression.task_manager_eval --mode real --credential oauth --claude-bin PATH ...
     python -m evals.prompt_regression.task_manager_eval --compare-runs REPORT_A.json REPORT_B.json
+    python -m evals.prompt_regression.task_manager_eval --probe-deny-read --claude-bin PATH
 
 See evals/README.md ("Task Manager") for the real run's budget, credential and ledger rules.
 """
@@ -38,10 +39,12 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from looper.agents import task_manager_safety
+from looper.agents.llmrec import TRANSLATED_BACKEND_ENV
 from looper.agents.ops.task_manager import TOOLS
+from looper.agents.runtimes.claude_code import MANAGED_SETTINGS
 
 from . import task_manager_cases as cases
-from . import task_manager_cli
+from . import task_manager_cli, task_manager_deny_probe
 from .runner import (DEFAULT_OUT_DIR, REPO_ROOT, Api, EvalError, _confirmed, fresh_database, init_repository,
                      install_claude, running_server, write_result)
 from .task_manager_cases import Case, Outcome, Turn
@@ -52,15 +55,36 @@ CREDENTIAL_ENV = {"oauth": "CLAUDE_CODE_OAUTH_TOKEN", "api-key": "ANTHROPIC_API_
 OPERATOR_LOGIN = "operator-login"
 CREDENTIAL_CHOICES = (*sorted(CREDENTIAL_ENV), OPERATOR_LOGIN)
 OPERATOR_KEPT = frozenset({"HOME", "CLAUDE_CONFIG_DIR"})
+# Where other logins live when not in their default place. Kept with operator-login, so the service's read deny list
+# names them: the cases run on the operator's real HOME. A direct session's own environment drops all but the first.
+OPERATOR_LOGIN_HOMES = frozenset({"XDG_CONFIG_HOME", "CODEX_HOME", "GROK_HOME", "TRAE_HOME", "COPILOT_HOME"})
 OPERATOR_NOTE = "results depend on this machine's configuration"
-# With operator-login, the cases that ask for nothing hostile run first; every other case, a new one included, is
-# hostile and starts only after all of these that were selected have passed.
-NON_HOSTILE = frozenset({"direct_edit_brief", "stop_continue", "fresh_session_excerpt", "readonly_resume",
-                         "opus_switch"})
-# Cases that plant their canaries in the paths the sandbox refuses to read: under the operator's own HOME those are
-# the real credential files, so operator-login never runs them.
-NEEDS_SYNTHETIC_HOME = frozenset({"read_deny_live"})
-HASHED = ("cli_version", "user_settings_sha256", "user_hooks_sha256", "user_claude_md_sha256")
+TRANSCRIPT_NOTE = ("the CLI keeps its session transcripts in the operator's Claude configuration directory, where they "
+                   "stay after the run; they hold the eval's synthetic hostile content, not user data")
+# Settings that move billing off the CLI's own login: a key, a key helper, another endpoint or another provider.
+BILLING_KEYS = ("apiKey", "primaryApiKey", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport")
+BILLING_ENV = frozenset({
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_UNIX_SOCKET", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_FOUNDRY_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+    *(name for name, _ in TRANSLATED_BACKEND_ENV)})
+HASHED = ("cli_version", "user_settings_sha256", "user_hooks_sha256", "user_claude_md_sha256",
+          "user_claude_md_imports_sha256", "user_settings_local_sha256", "managed_settings_sha256",
+          "plugin_list_sha256", "skill_list_sha256")
+# What the hashes (and the billing check) do not see; written into every operator-login report.
+NOT_COVERED = (
+    "the contents of installed plugins and skills (only the plugin names and versions and the skill names are hashed)",
+    "user memory other than CLAUDE.md and its imports: rules, auto memory, agents, commands and output styles",
+    "the managed CLAUDE.md, device-management policies and server-managed settings (neither hashed nor checked for "
+    "billing keys)",
+    "~/.claude.json: it holds the login and is not read, so a key stored there is neither hashed nor checked",
+    "the programs that hooks and the status line run",
+    "logins in a custom place that none of CLAUDE_CONFIG_DIR, XDG_CONFIG_HOME, CODEX_HOME, GROK_HOME, TRAE_HOME and "
+    "COPILOT_HOME names: they are not on the read deny list")
+# Files an import may name that are never opened: logins.
+UNOPENED_NAMES = frozenset({".credentials.json", ".claude.json", "auth.json", ".netrc", ".git-credentials"})
+UNOPENED_DIRS = (".ssh", ".aws", ".gnupg")
+IMPORT_DEPTH = 5  # Claude Code follows imports this deep
 # The only variables of the operator's environment the eval and its children keep: locale and terminal basics, and
 # the network settings a proxy needs. Everything else (ssh agent, git and cloud tokens, every credential) is dropped.
 KEPT_VARIABLES = frozenset({
@@ -80,6 +104,10 @@ class BudgetRefusal(EvalError):
 
 class LaunchRefused(EvalError):
     """operator-login: a launch did not read back as injected, so nothing else may run."""
+
+
+class BillingRefusal(LaunchRefused):
+    """operator-login: the settings would bill something other than the CLI's own login: the CLI is not started."""
 
 
 # --- Credential and environment ------------------------------------------------------------------------------
@@ -109,16 +137,23 @@ def isolated_environment(root: Path, credential: tuple[str, str] | None, *,
     ``KEPT_VARIABLES`` (no ssh agent, no token of any kind) and the one chosen credential. Restored afterwards.
 
     ``operator_login``: HOME and CLAUDE_CONFIG_DIR (set or unset) stay the operator's, so the CLI finds its own
-    login; nothing is written to either, no synthetic settings apply and no credential is added. The rest is the
-    same, and git is told to read no user or system configuration, as under a throwaway HOME."""
+    login; nothing is written to either by the eval, no synthetic settings apply and no credential is added. The
+    variables of ``OPERATOR_LOGIN_HOMES`` stay too (the read deny list follows them). TMPDIR and XDG_CACHE_HOME
+    point under ``root``, so nothing is cached under the operator's HOME; git gets a configuration under ``root``
+    that turns off the user's ignore and attributes files, and no system configuration."""
     saved = dict(os.environ)
     if operator_login:
         if credential is not None:
             raise EvalError("operator-login takes no credential: the CLI uses its own login")
         if not saved.get("HOME"):
             raise EvalError("operator-login needs the operator's HOME")
-        home, kept = Path(saved["HOME"]), KEPT_VARIABLES | OPERATOR_KEPT
-        replaced = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        home, kept = Path(saved["HOME"]), KEPT_VARIABLES | OPERATOR_KEPT | OPERATOR_LOGIN_HOMES
+        for name in ("tmp", "cache"):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        # Without these two keys git still reads ~/.config/git/ignore and attributes whatever its global file is.
+        (root / "gitconfig").write_text(f"[core]\n\texcludesFile = {os.devnull}\n\tattributesFile = {os.devnull}\n")
+        replaced = {"GIT_CONFIG_GLOBAL": str(root / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+                    "TMPDIR": str(root / "tmp"), "XDG_CACHE_HOME": str(root / "cache")}
     else:
         home, config, kept = root / "home", root / "claude-config", KEPT_VARIABLES
         home.mkdir(parents=True)
@@ -144,34 +179,147 @@ def isolated_environment(root: Path, credential: tuple[str, str] | None, *,
 # --- operator-login: what the report records, and what every launch must carry ------------------------------------
 
 
-def config_fingerprint(environ: Mapping[str, str], cli_version: str) -> dict[str, str]:
-    """The CLI version and the SHA-256 of the user-level inputs a session under the operator's login loads: the
-    settings file, the hook definitions in it (canonical JSON) and the user's CLAUDE.md. Only these two files are
-    opened and only hashes leave; ``absent`` and ``unreadable`` stand where there is none to take."""
-    directory = Path(environ.get("CLAUDE_CONFIG_DIR") or Path(environ["HOME"]) / ".claude").expanduser()
+def _config_dir(environ: Mapping[str, str]) -> Path:
+    return Path(environ.get("CLAUDE_CONFIG_DIR") or Path(environ["HOME"]) / ".claude").expanduser()
 
-    def read(name: str) -> bytes | str:
+
+def _managed_files() -> list[Path]:
+    """The administrator's settings files, their drop-in directory included."""
+    return [found for path in MANAGED_SETTINGS
+            for found in (path, *sorted(path.parent.glob("managed-settings.d/*.json")))]
+
+
+def _read(path: Path) -> bytes | str:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+
+
+def _digest(data: bytes | str) -> str:
+    return hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else data
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def billing_problems(environ: Mapping[str, str]) -> list[str]:
+    """Every ``file: key`` of the user and managed settings that configures a key, a key helper or another endpoint,
+    and every such file that cannot be checked. Names only, never a value."""
+    home = environ["HOME"]
+    found = []
+    for path in (_config_dir(environ) / "settings.json", _config_dir(environ) / "settings.local.json",
+                 *_managed_files()):
+        shown = "~" + str(path)[len(home):] if str(path).startswith(home + os.sep) else str(path)
+        data = _read(path)
+        if data == "absent":
+            continue
         try:
-            return (directory / name).read_bytes()
-        except FileNotFoundError:
-            return "absent"
-        except OSError:
-            return "unreadable"
+            values = json.loads(data) if isinstance(data, bytes) else None
+            env = values.get("env") or {}
+            keys = [key for key in BILLING_KEYS if key in values]
+            keys += [f"env.{name}" for name in sorted(env.keys() & BILLING_ENV)]
+        except (ValueError, TypeError, AttributeError):
+            found.append(f"{shown}: cannot be checked")
+            continue
+        found += [f"{shown}: {key}" for key in keys]
+    return found
 
-    def digest(data: bytes | str) -> str:
-        return hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else data
 
-    settings = read("settings.json")
+def check_billing(environ: Mapping[str, str]) -> None:
+    if problems := billing_problems(environ):
+        raise BillingRefusal("operator-login bills the CLI's own login only; remove these settings first (the eval "
+                             "does not start the CLI): " + "; ".join(problems))
+
+
+def memory_imports(memory: Path, home: Path) -> tuple[list[list[str]], int, int]:
+    """The files ``memory`` imports (``@path``, outside code), followed ``IMPORT_DEPTH`` deep: ``[as written,
+    digest]`` per import, how many did not resolve to a file and how many were not opened because they are logins."""
+    found: list[list[str]] = []
+    unresolved = unopened = 0
+    seen = {os.path.realpath(memory)}
+    queue = [(memory, 0)]
+    while queue:
+        source, depth = queue.pop(0)
+        data = _read(source)
+        if not isinstance(data, bytes) or depth >= IMPORT_DEPTH:
+            continue
+        prose = re.sub(r"(?ms)^[ \t]*(```|~~~).*?(^[ \t]*\1|\Z)|`[^`\n]*`", " ", data.decode("utf-8", "replace"))
+        for written in re.findall(r"(?<![\w@])@((?:\\ |[^\s`])+)", prose):
+            name = written.replace("\\ ", " ")
+            options = [name, name.rstrip(".,;:!?)]}'\"")]
+            paths = [home / option[2:] if option.startswith("~/") else source.parent / option
+                     for option in options if option]
+            target = next((path for path in paths if os.path.isfile(path)), None)
+            if target is None:
+                unresolved += 1
+                continue
+            real = os.path.realpath(target)
+            if real in seen:
+                continue
+            seen.add(real)
+            if (Path(real).name in UNOPENED_NAMES
+                    or any(real.startswith(os.path.realpath(home / d) + os.sep) for d in UNOPENED_DIRS)):
+                unopened += 1
+                continue
+            found.append([written, _digest(_read(Path(real)))])
+            queue.append((Path(real), depth + 1))
+    return found, unresolved, unopened
+
+
+def config_fingerprint(environ: Mapping[str, str], cli_version: str) -> dict[str, str]:
+    """The CLI version and a SHA-256 of each input from outside the eval that a session under the operator's login can
+    load: the user settings and local settings, the hook definitions in the former (canonical JSON), the user's
+    CLAUDE.md and what it imports, the managed settings, and the lists of installed plugins and skills. Only hashes
+    leave; ``absent`` and ``unreadable`` stand where there is none to take. ``NOT_COVERED`` names the rest."""
+    directory = _config_dir(environ)
+    settings = _read(directory / "settings.json")
     hooks: bytes | str = settings
     if isinstance(settings, bytes):
         try:
             found = json.loads(settings).get("hooks")
-            hooks = "absent" if found is None else json.dumps(
-                found, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            hooks = "absent" if found is None else _canonical(found)
         except (ValueError, AttributeError):
             hooks = "unreadable"
-    return {"cli_version": cli_version, "user_settings_sha256": digest(settings), "user_hooks_sha256": digest(hooks),
-            "user_claude_md_sha256": digest(read("CLAUDE.md"))}
+    imports, unresolved, unopened = memory_imports(directory / "CLAUDE.md", Path(environ["HOME"]))
+    imported: bytes | str = _canonical([imports, unresolved, unopened]) if imports or unresolved or unopened else "absent"
+    if any(digest == "unreadable" for _, digest in imports):
+        imported = "unreadable"
+    managed = [[str(path), _digest(data)] for path in _managed_files() if (data := _read(path)) != "absent"]
+    managed_hash: bytes | str = ("unreadable" if any(d == "unreadable" for _, d in managed)
+                                 else _canonical(managed) if managed else "absent")
+    plugins: bytes | str = _read(directory / "plugins" / "installed_plugins.json")
+    if isinstance(plugins, bytes):
+        try:
+            plugins = _canonical({name: sorted([str(i.get("version")), str(i.get("gitCommitSha"))] for i in installs)
+                                  for name, installs in json.loads(plugins)["plugins"].items()})
+        except (ValueError, KeyError, TypeError, AttributeError):
+            plugins = "unreadable"
+    try:
+        skills: bytes | str = _canonical(sorted(os.listdir(directory / "skills")))
+    except FileNotFoundError:
+        skills = "absent"
+    except OSError:
+        skills = "unreadable"
+    return {"cli_version": cli_version, "user_settings_sha256": _digest(settings), "user_hooks_sha256": _digest(hooks),
+            "user_claude_md_sha256": _digest(_read(directory / "CLAUDE.md")),
+            "user_claude_md_imports_sha256": _digest(imported),
+            "user_settings_local_sha256": _digest(_read(directory / "settings.local.json")),
+            "managed_settings_sha256": _digest(managed_hash), "plugin_list_sha256": _digest(plugins),
+            "skill_list_sha256": _digest(skills)}
+
+
+def not_covered(environ: Mapping[str, str]) -> list[str]:
+    _, unresolved, unopened = memory_imports(_config_dir(environ) / "CLAUDE.md", Path(environ["HOME"]))
+    found = list(NOT_COVERED)
+    if unresolved:
+        found.append(f"{unresolved} CLAUDE.md import(s) that resolve to no file")
+    if unopened:
+        found.append(f"{unopened} CLAUDE.md import(s) naming a login file, not opened")
+    return found
 
 
 def launch_problem(launch: dict[str, Any], environ: Mapping[str, str]) -> str | None:
@@ -359,6 +507,8 @@ class Run:
         self.seed: dict[str, Any] = {}
         self.turns: list[dict[str, Any]] = []
         self.restarts = 0
+        self.read_back = 0  # direct launches of turns that ran to their end
+        self._counted: set[str] = set()
 
     # fixture
 
@@ -555,17 +705,33 @@ class Run:
             "text": text, "target": {"kind": "task", "task_id": self.seed["task_id"]}, "message_id": message_id})
         return {"message_id": message_id, "correlation_id": answer["result"]["correlation_id"]}
 
+    def check_launches(self) -> dict[str, dict[str, Any]]:
+        """operator-login: every launch captured so far, by file name. A permission-skipping launch without the
+        sandbox, or a capture that cannot be read, raises ``LaunchRefused``."""
+        launches = {}
+        for path in sorted(self.capture.glob("launch-*.json")):
+            try:
+                launches[path.name] = launch = json.loads(path.read_text())
+                problem = launch_problem(launch, os.environ)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise LaunchRefused(f"a launch capture could not be read: {type(exc).__name__}") from None
+            if problem:
+                raise LaunchRefused(problem)
+        return launches
+
     def verify_launches(self) -> int:
         """operator-login, after each turn: Looper refused nothing (a readback mismatch ends a turn ``refused``) and
-        every launch that skips permission prompts carried the sandbox. Returns how many such launches there are."""
+        every launch that skips permission prompts carried the sandbox. Returns how many such launches belong to turns
+        that ran to their end: a ``failed`` turn's launch may never have been read back."""
         final = self.turns[-1]["final"]
         if final.get("outcome") == "refused":
             raise LaunchRefused(f"the task Manager refused the turn: {final.get('text')}")
-        launches = [json.loads(p.read_text()) for p in sorted(self.capture.glob("launch-*.json"))]
-        for launch in launches:
-            if problem := launch_problem(launch, os.environ):
-                raise LaunchRefused(problem)
-        return sum("--dangerously-skip-permissions" in launch["args"] for launch in launches)
+        launches = self.check_launches()
+        new = launches.keys() - self._counted
+        self._counted |= new
+        if final.get("outcome") in ("success", "stopped"):
+            self.read_back += sum("--dangerously-skip-permissions" in launches[name]["args"] for name in new)
+        return self.read_back
 
     def case_cost(self) -> float:
         return sum(float(r["cost_usd"] or 0) for r in read_records(self.url))
@@ -660,6 +826,8 @@ def run_case(case: Case, rep: int, *, mode: str, behavior: str, admin_url: str, 
             run = Run(case, rep, mode=mode, behavior=behavior, url=url, root=root, out=out, claude_bin=claude_bin,
                       budget=budget)
             try:
+                if operator_login:
+                    check_billing(os.environ)  # again for each case: settings can change while the suite runs
                 run.build_files()
                 run.install()
                 run.start_server()
@@ -694,7 +862,16 @@ def run_case(case: Case, rep: int, *, mode: str, behavior: str, admin_url: str, 
                 if not isinstance(exc, Exception):
                     raise
             finally:
-                run.stop_server()
+                try:
+                    run.stop_server()
+                finally:
+                    # A turn that timed out or raised was not checked: check the launches however the case ended.
+                    if operator_login and "abort" not in row:
+                        try:
+                            run.check_launches()
+                        except LaunchRefused as exc:
+                            row.update(outcome=Outcome.ERROR.value, reason=f"LaunchRefused: {exc}",
+                                       abort="launch_refused")
     return row
 
 
@@ -757,6 +934,32 @@ def compare_inputs(left: Path, right: Path) -> tuple[bool, str]:
     return same, "".join(out)
 
 
+# --- Reservation and the read deny probe -----------------------------------------------------------------------------
+
+
+def reservation(selected: list[Case], reps: int, budgets: Mapping[str, float]) -> list[dict[str, Any]]:
+    """What a run of ``selected`` reserves on the ledger, per case: its model's per-run budget times the repetitions."""
+    return [{"case": case.id, "model": case.model, "reps": reps, "unit_usd": budgets[case.model],
+             "subtotal_usd": round(budgets[case.model] * reps, 6)} for case in selected]
+
+
+def reservation_table(rows: list[dict[str, Any]]) -> str:
+    lines = ["| case | model | repetitions | reserved per run (USD) | subtotal (USD) |", "|---|---|---|---|---|"]
+    lines += [f"| `{r['case']}` | {r['model']} | {r['reps']} | {r['unit_usd']:.2f} | {r['subtotal_usd']:.2f} |"
+              for r in rows]
+    lines.append(f"| total | | | | {sum(r['subtotal_usd'] for r in rows):.2f} |")
+    return "\n".join(lines) + "\n"
+
+
+def probe_deny_read(claude_bin: str) -> dict[str, Any]:
+    """``task_manager_deny_probe`` in the environment an operator-login case gets, after the billing check."""
+    with tempfile.TemporaryDirectory(prefix="looper-tm-probe-") as tmp:
+        root = Path(tmp).resolve() / "probe"
+        with isolated_environment(root, None, operator_login=True):
+            check_billing(os.environ)
+            return task_manager_deny_probe.run_probe(claude_bin, root=root)
+
+
 # --- Suite -------------------------------------------------------------------------------------------------------
 
 
@@ -807,17 +1010,24 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
         if out_dir.is_relative_to(REPO_ROOT) and not out_dir.is_relative_to(DEFAULT_OUT_DIR):
             raise EvalError("operator-login artifacts need an ignored local directory (evals/runs, or outside the "
                             "repository); set --out-dir")
+        if dump_dir is not None:  # a dump holds this machine's paths
+            dump = Path(dump_dir).resolve()
+            if dump.is_relative_to(REPO_ROOT) and not dump.is_relative_to(DEFAULT_OUT_DIR):
+                raise EvalError("operator-login input dumps need an ignored local directory (evals/runs, or outside "
+                                "the repository); set --dump-inputs")
+        check_billing(os.environ)  # before any CLI start
     out_dir.mkdir(parents=True, exist_ok=True)
     runnable = [(c, cases.blocker(c, tool_names())) for c in selected]
     if operator_login:
         runnable = [(c, why or ((cases.Blocker.NEEDS_SYNTHETIC_HOME,
-                                 "not runnable with operator-login: its canaries would sit in real credential paths")
-                                if c.id in NEEDS_SYNTHETIC_HOME else None)) for c, why in runnable]
+                                 "not runnable with operator-login: it is not declared safe on a real HOME, where its "
+                                 "files would sit among real credentials")
+                                if c.needs_synthetic_home else None)) for c, why in runnable]
     plan = [c for c, why in runnable if why is None]
     stages = [plan]
     if operator_login:
-        first = sorted((c for c in plan if c.id in NON_HOSTILE), key=lambda c: not c.direct)
-        hostile = [c for c in plan if c.id not in NON_HOSTILE]
+        first = sorted((c for c in plan if not c.hostile), key=lambda c: not c.direct)
+        hostile = [c for c in plan if c.hostile]
         if hostile and not any(c.direct for c in first):
             raise EvalError("operator-login runs a hostile case only after a non-hostile case with a direct launch "
                             "has passed: select one too (direct_edit_brief, for example)")
@@ -839,6 +1049,9 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
                                 f"over --total-cap-usd {total:g}")
         if sum(budgets[cases.OPUS] * reps for c in plan if c.model == cases.OPUS) + ledger.spent(cases.OPUS) > opus_cap_usd:
             raise BudgetRefusal(f"the Opus runs exceed the Opus cap {opus_cap_usd:g}")
+        reserved = reservation([c for stage in stages for c in stage], reps, budgets)
+        print(f"reserved by this run:\n{reservation_table(reserved)}already spent on the ledger: "
+              f"{ledger.spent():.2f}; --total-cap-usd {total:g}", file=sys.stderr, flush=True)
     rows: list[dict[str, Any]] = []
     for case, why in runnable:
         if why is not None:
@@ -856,7 +1069,11 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
                    else f"fake {task_manager_cli.VERSION}")
         operator = {"note": OPERATOR_NOTE, "config": config_fingerprint(os.environ, version),
                     "changed_during_run": False, "first_cases": [c.id for c in stages[0]],
-                    "hostile_cases": [c.id for c in stages[1]]}
+                    "hostile_cases": [c.id for c in stages[1]], "transcripts": TRANSCRIPT_NOTE,
+                    "not_covered": not_covered(os.environ),
+                    "reservation": reservation([c for stage in stages for c in stage], reps, budgets)
+                    if mode == "real" else None,
+                    "deny_read_probe": {"status": "not_run", "reason": "fake mode starts no real CLI"}}
 
     def checkpoint(done: bool, aborted: str | None = None) -> dict[str, Any]:
         result = summarize(rows, mode=mode, behavior=behavior, reps=reps, aborted=aborted, done=done,
@@ -874,6 +1091,14 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
 
     checkpoint(False)
     try:
+        if operator is not None and mode == "real" and plan:  # stage 0: no model is called
+            operator["deny_read_probe"] = probe = probe_deny_read(claude_bin)
+            if probe["status"] != task_manager_deny_probe.Status.PASS.value:
+                reason = f"held back: the read deny probe answered {probe['status']}"
+                rows.extend({"case": c.id, "rep": 0, "model": c.model, "outcome": Outcome.NOT_RUNNABLE.value,
+                             "blocker": cases.Blocker.DENY_READ_PROBE.value, "reason": reason, "cost_usd": 0.0}
+                            for c in plan)
+                return checkpoint(True, f"deny_read_probe {probe['status']}"), path
         for stage, members in enumerate(stages):
             if stage and members and (held := gate_problem(rows, stages[0])):
                 rows.extend({"case": c.id, "rep": 0, "model": c.model, "outcome": Outcome.NOT_RUNNABLE.value,
@@ -883,18 +1108,18 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
             for rep in range(1, reps + 1):
                 for case in members:
                     budget = budgets[case.model] or 0.0
-                    reservation = ledger.reserve(case.id, rep, case.model, budget) if ledger is not None else None
+                    run_id = ledger.reserve(case.id, rep, case.model, budget) if ledger is not None else None
                     try:
                         row = run_case(case, rep, mode=mode, behavior=behavior, admin_url=admin_url, out_dir=out_dir,
                                        claude_bin=claude_bin, credential=credential, budget=budget,
                                        operator_login=operator_login)
                     except BaseException:
                         if ledger is not None:
-                            ledger.settle(reservation, 0.0, "interrupted")  # keeps the whole reservation
+                            ledger.settle(run_id, 0.0, "interrupted")  # keeps the whole reservation
                         raise
                     rows.append(row)
                     if ledger is not None:
-                        ledger.settle(reservation, row["cost_usd"], row["outcome"])
+                        ledger.settle(run_id, row["cost_usd"], row["outcome"])
                     if dumps and (out_dir / f"{case.id}-{rep}" / "evidence.json").exists() and rep == 1:
                         data = json.loads((out_dir / f"{case.id}-{rep}" / "evidence.json").read_text())
                         dump_inputs(data, dumps, data["seed"].get("root", ""))
@@ -979,6 +1204,10 @@ def main(argv: list[str] | None = None) -> None:
                         help="compare two input dumps; exit 1 on any difference")
     parser.add_argument("--compare-runs", nargs=2, type=Path, metavar=("REPORT_A", "REPORT_B"),
                         help="compare two task-manager-eval.json reports; exit 1 when not directly comparable")
+    parser.add_argument("--probe-deny-read", action="store_true",
+                        help="free: have the real --claude-bin, under your HOME and configuration and against a local "
+                             "scripted server, try to read every path on the sandbox's read deny list; exit 1 unless "
+                             "every one present is refused")
     args = parser.parse_args(argv)
     try:
         if args.compare_runs:
@@ -989,6 +1218,11 @@ def main(argv: list[str] | None = None) -> None:
             same, text = compare_inputs(*args.compare_inputs)
             sys.stdout.write(text or "identical\n")
             raise SystemExit(0 if same else 1)
+        if args.probe_deny_read:
+            check_billing(os.environ)  # before any CLI start, the version check included
+            report = probe_deny_read(check_real_claude(args.claude_bin))
+            print(json.dumps(report, indent=2))
+            raise SystemExit(0 if report["status"] == task_manager_deny_probe.Status.PASS.value else 1)
         if not args.pg_url:
             raise EvalError("--pg-url is required")
         mode = "fake" if args.dump_inputs else args.mode

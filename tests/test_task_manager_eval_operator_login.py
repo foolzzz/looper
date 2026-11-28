@@ -3,13 +3,15 @@ tests only; no model is called. Every "operator home" here is a temporary direct
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -41,6 +43,8 @@ def operator(monkeypatch, tmp_path):
     for name in ("CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)
+    monkeypatch.setattr(evaluation, "MANAGED_SETTINGS", (tmp_path / "managed" / "managed-settings.json",),
+                        raising=False)
     return home
 
 
@@ -68,8 +72,12 @@ def test_environment_keeps_home_and_configuration_and_isolates_the_rest(operator
     if custom:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "operator-config"))
     planted = {"SSH_AUTH_SOCK": "/tmp/agent.sock", "GH_TOKEN": "x", "ANTHROPIC_API_KEY": SECRET,
-               "ANTHROPIC_AUTH_TOKEN": SECRET, "CLAUDE_CODE_OAUTH_TOKEN": SECRET, "XDG_CONFIG_HOME": "/operator/xdg",
-               "LOOPER_ANYTHING": "x", "GIT_CONFIG_GLOBAL": "/operator/gitconfig", "ANTHROPIC_BASE_URL": "x"}
+               "ANTHROPIC_AUTH_TOKEN": SECRET, "CLAUDE_CODE_OAUTH_TOKEN": SECRET, "XDG_CACHE_HOME": "/operator/cache",
+               "LOOPER_ANYTHING": "x", "GIT_CONFIG_GLOBAL": "/operator/gitconfig", "ANTHROPIC_BASE_URL": "x",
+               "XDG_DATA_HOME": "/operator/data"}
+    logins = {name: f"/operator/{name.lower()}" for name in
+              ("XDG_CONFIG_HOME", "CODEX_HOME", "GROK_HOME", "TRAE_HOME", "COPILOT_HOME")}
+    planted.update(logins)
     for name, value in planted.items():
         monkeypatch.setenv(name, value)
     before = dict(os.environ)
@@ -77,14 +85,47 @@ def test_environment_keeps_home_and_configuration_and_isolates_the_rest(operator
         assert home == operator and os.environ["HOME"] == str(operator)
         assert os.environ.get("CLAUDE_CONFIG_DIR") == (str(tmp_path / "operator-config") if custom else None)
         assert os.environ["PATH"] == evaluation.MINIMAL_PATH
-        assert os.environ["GIT_CONFIG_GLOBAL"] == os.devnull and os.environ["GIT_CONFIG_NOSYSTEM"] == "1"
-        extra = set(os.environ) - evaluation.KEPT_VARIABLES - {
+        root = tmp_path / "case"
+        assert os.environ["GIT_CONFIG_GLOBAL"] == str(root / "gitconfig") and os.environ["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert os.environ["TMPDIR"] == str(root / "tmp") and os.environ["XDG_CACHE_HOME"] == str(root / "cache")
+        assert {name: os.environ[name] for name in logins} == logins  # the read deny list follows them
+        extra = set(os.environ) - evaluation.KEPT_VARIABLES - set(logins) - {
             "HOME", "PATH", "CLAUDE_CONFIG_DIR", "GIT_TERMINAL_PROMPT", "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY",
-            "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"} - {n for n in os.environ if n.startswith("LC_")}
+            "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "XDG_CACHE_HOME"} - {
+            n for n in os.environ if n.startswith("LC_")}
         assert not extra, extra
     assert dict(os.environ) == before
     assert not (tmp_path / "case" / "home").exists() and not (tmp_path / "case" / "claude-config").exists()
     assert (operator / ".claude" / "settings.json").read_text() == json.dumps(SETTINGS)  # no synthetic layer
+
+
+def test_custom_login_homes_reach_the_read_deny_list(operator, monkeypatch, tmp_path):
+    custom = {name: str(tmp_path / name.lower()) for name in ("XDG_CONFIG_HOME", "CODEX_HOME", "GROK_HOME")}
+    for name, value in custom.items():
+        monkeypatch.setenv(name, value)
+    with evaluation.isolated_environment(tmp_path / "case", None, operator_login=True):
+        denied = task_manager_sandbox.read_deny_paths(os.environ, tmp_path / "case" / "runtime")
+    assert os.path.realpath(custom["XDG_CONFIG_HOME"] + "/gh") in denied
+    assert os.path.realpath(custom["CODEX_HOME"]) in denied and os.path.realpath(custom["GROK_HOME"]) in denied
+    # Default modes still drop them.
+    with evaluation.isolated_environment(tmp_path / "other", None):
+        assert not set(custom) & set(os.environ)
+
+
+def test_git_reads_neither_the_user_ignore_nor_attributes_files(operator, tmp_path):
+    (operator / ".config" / "git").mkdir(parents=True)
+    (operator / ".config" / "git" / "ignore").write_text("secret.txt\n")
+    (operator / ".config" / "git" / "attributes").write_text("*.txt marked\n")
+    work = tmp_path / "work"
+    work.mkdir()
+    with evaluation.isolated_environment(tmp_path / "case", None, operator_login=True):
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=work, capture_output=True, text=True, check=True).stdout
+
+        git("init", "-q")
+        (work / "secret.txt").write_text("x")
+        assert "secret.txt" in git("status", "--porcelain")
+        assert "marked" not in git("check-attr", "-a", "secret.txt")
 
 
 def test_operator_login_takes_no_credential_and_needs_a_home(operator, monkeypatch, tmp_path):
@@ -103,9 +144,12 @@ def test_operator_login_takes_no_credential_and_needs_a_home(operator, monkeypat
 def test_fingerprint_hashes_the_three_user_level_inputs_and_prints_only_hashes(operator, monkeypatch, tmp_path):
     found = evaluation.config_fingerprint(os.environ, "1.2.3")
     hooks = json.dumps(SETTINGS["hooks"], sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    absent = {key: "absent" for key in ("user_claude_md_imports_sha256", "user_settings_local_sha256",
+                                        "managed_settings_sha256", "plugin_list_sha256", "skill_list_sha256")}
     assert found == {"cli_version": "1.2.3",
                      "user_settings_sha256": sha(json.dumps(SETTINGS).encode()),
-                     "user_hooks_sha256": sha(hooks), "user_claude_md_sha256": sha(MEMORY.encode())}
+                     "user_hooks_sha256": sha(hooks), "user_claude_md_sha256": sha(MEMORY.encode()), **absent}
+    assert tuple(found) == evaluation.HASHED
     assert "secret-marker" not in json.dumps(found)
     # The configuration directory the operator uses is the one hashed.
     other = tmp_path / "other-config"
@@ -119,14 +163,152 @@ def test_fingerprint_hashes_the_three_user_level_inputs_and_prints_only_hashes(o
     assert evaluation.config_fingerprint(os.environ, "1")["user_hooks_sha256"] == "unreadable"
 
 
-def test_fingerprint_opens_no_other_file(operator, monkeypatch):
-    for name in (".credentials.json", "settings.local.json"):
-        (operator / ".claude" / name).write_text("never-read")
+def configure(operator, tmp_path):
+    """Every input the fingerprint covers, present."""
+    claude = operator / ".claude"
+    (operator / "notes").mkdir()
+    (operator / "notes" / "shared.md").write_text("shared @../notes/deeper.md\n")
+    (operator / "notes" / "deeper.md").write_text("deeper\n")
+    (claude / "relative.md").write_text("relative\n")
+    (claude / "CLAUDE.md").write_text("see @~/notes/shared.md and @relative.md.\n`@~/notes/in-code.md`\n"
+                                      "```\n@~/notes/in-block.md\n```\nmail a@example.invalid\n")
+    (claude / "settings.local.json").write_text("{}")
+    (claude / "plugins").mkdir()
+    (claude / "plugins" / "installed_plugins.json").write_text(json.dumps(
+        {"version": 2, "plugins": {"a@m": [{"version": "1", "gitCommitSha": "x", "lastUpdated": "t1"}]}}))
+    (claude / "skills" / "one").mkdir(parents=True)
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / "managed-settings.json").write_text("{}")
+    return claude, managed
+
+
+@pytest.mark.parametrize("change, key", [
+    ("notes/shared.md", "user_claude_md_imports_sha256"),
+    ("notes/deeper.md", "user_claude_md_imports_sha256"),
+    (".claude/relative.md", "user_claude_md_imports_sha256"),
+    (".claude/settings.local.json", "user_settings_local_sha256"),
+    ("managed", "managed_settings_sha256"),
+    ("managed-drop-in", "managed_settings_sha256"),
+    ("plugin", "plugin_list_sha256"),
+    ("skill", "skill_list_sha256"),
+])
+def test_every_covered_input_changes_its_hash_and_no_other(operator, tmp_path, change, key):
+    claude, managed = configure(operator, tmp_path)
+    before = evaluation.config_fingerprint(os.environ, "1")
+    assert not {"absent", "unreadable"} & set(before.values())
+    if change == "managed":
+        (managed / "managed-settings.json").write_text('{"a": 1}')
+    elif change == "managed-drop-in":
+        (managed / "managed-settings.d").mkdir()
+        (managed / "managed-settings.d" / "10.json").write_text("{}")
+    elif change == "plugin":
+        (claude / "plugins" / "installed_plugins.json").write_text(json.dumps(
+            {"version": 2, "plugins": {"a@m": [{"version": "2", "gitCommitSha": "x"}]}}))
+    elif change == "skill":
+        (claude / "skills" / "two").mkdir()
+    else:
+        (operator / change).write_text("changed @relative.md @~/notes/deeper.md @~/notes/shared.md\n"
+                                       if change.endswith("shared.md") else "changed\n")
+    after = evaluation.config_fingerprint(os.environ, "1")
+    assert {name for name in before if before[name] != after[name]} == {key}
+
+
+def test_a_plugin_timestamp_is_not_a_change(operator, tmp_path):
+    claude, _ = configure(operator, tmp_path)
+    before = evaluation.config_fingerprint(os.environ, "1")
+    (claude / "plugins" / "installed_plugins.json").write_text(json.dumps(
+        {"version": 2, "plugins": {"a@m": [{"version": "1", "gitCommitSha": "x", "lastUpdated": "t2"}]}}))
+    assert evaluation.config_fingerprint(os.environ, "1") == before
+
+
+def test_imports_skip_code_and_name_what_they_could_not_cover(operator, tmp_path):
+    claude, _ = configure(operator, tmp_path)
+    (operator / "notes" / "in-code.md").write_text("never")
+    (operator / "notes" / "in-block.md").write_text("never")
+    (operator / ".claude.json").write_text("never")
+    found, unresolved, unopened = evaluation.memory_imports(claude / "CLAUDE.md", operator)
+    assert [written for written, _ in found] == ["~/notes/shared.md", "relative.md.", "../notes/deeper.md"]
+    assert unresolved == unopened == 0
+    (claude / "CLAUDE.md").write_text("@~/gone.md @~/.claude.json\n")
+    assert evaluation.memory_imports(claude / "CLAUDE.md", operator)[1:] == (1, 1)
+    listed = "\n".join(evaluation.not_covered(os.environ))
+    assert "resolve to no file" in listed and "login file" in listed
+    for word in ("plugins and skills", "rules", "managed CLAUDE.md", ".claude.json", "hooks", "read deny list"):
+        assert word in listed
+
+
+def test_fingerprint_opens_no_other_file(operator, tmp_path, monkeypatch):
+    configure(operator, tmp_path)
+    (operator / ".claude" / ".credentials.json").write_text("never-read")
+    (operator / ".claude.json").write_text("never-read")
     opened = []
     real = Path.read_bytes
     monkeypatch.setattr(Path, "read_bytes", lambda self: opened.append(self.name) or real(self))
     evaluation.config_fingerprint(os.environ, "1")
-    assert sorted(set(opened)) == ["CLAUDE.md", "settings.json"]
+    evaluation.not_covered(os.environ)
+    assert sorted(set(opened)) == ["CLAUDE.md", "deeper.md", "installed_plugins.json", "managed-settings.json",
+                                   "relative.md", "settings.json", "settings.local.json", "shared.md"]
+
+
+# --- Billing ----------------------------------------------------------------------------------------------------
+
+
+def billing_file(operator, tmp_path, which):
+    path = {"settings.json": operator / ".claude" / "settings.json",
+            "settings.local.json": operator / ".claude" / "settings.local.json",
+            "managed-settings.json": tmp_path / "managed" / "managed-settings.json"}[which]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+FILES = ("settings.json", "settings.local.json", "managed-settings.json")
+
+
+@pytest.mark.parametrize("which", FILES)
+@pytest.mark.parametrize("content, key", [
+    ({"apiKey": SECRET}, "apiKey"),
+    ({"apiKeyHelper": SECRET}, "apiKeyHelper"),
+    ({"env": {"ANTHROPIC_BASE_URL": SECRET}}, "env.ANTHROPIC_BASE_URL"),
+    ({"env": {"ANTHROPIC_API_KEY": ""}}, "env.ANTHROPIC_API_KEY"),
+    ({"env": {"ANTHROPIC_AUTH_TOKEN": SECRET}}, "env.ANTHROPIC_AUTH_TOKEN"),
+    ({"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}, "env.CLAUDE_CODE_USE_BEDROCK"),
+])
+def test_a_billing_setting_stops_the_run_before_any_cli_start(operator, monkeypatch, tmp_path, which, content, key):
+    billing_file(operator, tmp_path, which).write_text(json.dumps(content))
+    monkeypatch.setattr(evaluation, "check_real_claude", lambda path: pytest.fail("the CLI was started"))
+    monkeypatch.setattr(evaluation, "probe_deny_read", lambda path: pytest.fail("the CLI was started"))
+    monkeypatch.setattr(evaluation, "run_case", lambda *a, **k: pytest.fail("a case started"))
+    with pytest.raises(evaluation.BillingRefusal) as refused:
+        real_suite(tmp_path)
+    assert f"{which}: {key}" in str(refused.value) and SECRET not in str(refused.value)
+
+
+@pytest.mark.parametrize("which", FILES)
+def test_a_settings_file_that_cannot_be_checked_stops_the_run(operator, tmp_path, which):
+    billing_file(operator, tmp_path, which).write_text("not json")
+    [problem] = evaluation.billing_problems(os.environ)
+    assert problem.endswith(f"{which}: cannot be checked")
+
+
+def test_a_billing_setting_added_during_the_run_aborts_it(operator, monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluation, "fresh_database", lambda url: contextlib.nullcontext(("postgresql://x", None)))
+    monkeypatch.setattr(evaluation.Run, "start_server", lambda self: pytest.fail("the server started"))
+    monkeypatch.setattr(evaluation.Run, "case_cost", lambda self: 0.0)
+    monkeypatch.setattr(evaluation, "read_records", lambda *a: [])
+    calls = []
+    real = evaluation.check_billing
+
+    def check(environ):
+        calls.append(1)
+        if len(calls) > 1:  # after the check before the suite
+            billing_file(operator, tmp_path, "settings.local.json").write_text(json.dumps({"apiKeyHelper": "x"}))
+        real(environ)
+
+    monkeypatch.setattr(evaluation, "check_billing", check)
+    result, _ = suite(tmp_path)
+    assert result["aborted"] == f"launch_refused in {next(r['case'] for r in result['rows'] if 'abort' in r)}"
+    assert len([r for r in result["rows"] if r["rep"]]) == 1
 
 
 def report(tmp_path, name, **operator_login):
@@ -139,7 +321,7 @@ def report(tmp_path, name, **operator_login):
 
 
 def test_runs_with_different_hashes_are_not_directly_comparable(tmp_path):
-    config = {"cli_version": "1", "user_settings_sha256": "a", "user_hooks_sha256": "b", "user_claude_md_sha256": "c"}
+    config = {key: "a" for key in evaluation.HASHED}
     base = report(tmp_path, "base", config=config, changed_during_run=False)
     same, text = evaluation.compare_runs(base, report(tmp_path, "same", config=config, changed_during_run=False))
     assert same and "not directly comparable" not in text and "direct_edit_brief" in text
@@ -225,26 +407,37 @@ def test_a_readback_refusal_aborts_the_whole_run(operator, monkeypatch, tmp_path
     assert json.loads(path.read_text())["aborted"] == result["aborted"]
 
 
-def test_a_new_case_is_hostile_until_it_is_listed(operator, monkeypatch, tmp_path):
-    started = stub(monkeypatch)
-    new = dataclasses.replace(cases.BY_ID["direct_edit_brief"], id="project_instructions_hostile")
-    suite(tmp_path, selected=[new, cases.BY_ID["direct_edit_brief"]])
-    assert [case for case, _ in started] == ["direct_edit_brief", "project_instructions_hostile"]
+def new_case(name):
+    """A case someone adds without saying anything about hostility or HOME."""
+    base = cases.BY_ID["direct_edit_brief"]
+    return cases.Case(name, base.rfc, base.title, base.model, base.fixture, base.turns, base.judge, base.script)
 
 
-def test_a_case_whose_canaries_sit_in_credential_paths_cannot_run(operator, monkeypatch, tmp_path):
+def test_a_new_case_is_hostile_and_needs_a_synthetic_home_until_it_says_otherwise(operator, monkeypatch, tmp_path):
     started = stub(monkeypatch)
-    live = dataclasses.replace(cases.BY_ID["direct_edit_brief"], id="read_deny_live")
-    result, _ = suite(tmp_path, selected=[live, cases.BY_ID["direct_edit_brief"]])
+    new = new_case("project_instructions_hostile")
+    assert new.hostile and new.needs_synthetic_home
+    result, _ = suite(tmp_path, selected=[new, cases.BY_ID["direct_edit_brief"]])
     assert [case for case, _ in started] == ["direct_edit_brief"]
-    row = next(row for row in result["rows"] if row["case"] == "read_deny_live")
+    row = next(row for row in result["rows"] if row["case"] == new.id)
     assert row["outcome"] == "not_runnable" and row["blocker"] == "needs_synthetic_home"
+    started.clear()
+    declared = dataclasses.replace(new, needs_synthetic_home=False)
+    suite(tmp_path, selected=[declared, cases.BY_ID["direct_edit_brief"]], out_dir=tmp_path / "second")
+    assert [case for case, _ in started] == ["direct_edit_brief", declared.id]
+
+
+def test_the_cases_on_this_checkout_say_what_they_are():
+    safe = {c.id for c in cases.CASES if not c.hostile}
+    assert safe == {"direct_edit_brief", "stop_continue", "fresh_session_excerpt", "readonly_resume", "opus_switch"}
+    assert {c.id for c in cases.CASES if not c.needs_synthetic_home} == safe | HOSTILE
 
 
 def test_refusals_before_any_case(operator, monkeypatch, tmp_path):
     started = stub(monkeypatch)
     for override, message in (({"behavior": "bad"}, "scripted"),
-                              ({"out_dir": evaluation.REPO_ROOT / "evals" / "x"}, "ignored")):
+                              ({"out_dir": evaluation.REPO_ROOT / "evals" / "x"}, "ignored"),
+                              ({"dump_dir": evaluation.REPO_ROOT / "evals" / "x"}, "ignored")):
         with pytest.raises(EvalError, match=message):
             suite(tmp_path, **override)
     assert started == []
@@ -270,32 +463,192 @@ def test_the_report_holds_hashes_and_no_free_text(operator, monkeypatch, tmp_pat
     assert section["config"]["user_claude_md_sha256"] == sha(MEMORY.encode())
     assert section["config"]["cli_version"].startswith("fake ") and section["changed_during_run"] is True
     assert section["note"] == "results depend on this machine's configuration"
+    assert "session transcripts" in section["transcripts"] and "configuration directory" in section["transcripts"]
+    assert "synthetic hostile content, not user data" in section["transcripts"]
+    assert section["not_covered"] and section["deny_read_probe"]["status"] == "not_run"
     local = (path.parent / "task-manager-eval.local.json").read_text()
     assert "detail-marker" in local and "secret-marker" not in local
 
 
-def test_real_mode_hands_no_credential_to_a_case_and_records_the_verified_version(operator, monkeypatch, tmp_path):
+def stand_in_claude(tmp_path):
     claude = tmp_path / "claude"
     claude.write_text("#!/bin/sh\necho '2.1.332 (Claude Code)'\n")
     claude.chmod(0o755)
+    return str(claude)
+
+
+def real_suite(tmp_path, **override):
+    arguments = {"mode": "real", "claude_bin": stand_in_claude(tmp_path), "total_cap_usd": 18, "case_budget_usd": 1.25,
+                 "opus_case_budget_usd": 3, **override}
+    return suite(tmp_path, **arguments)
+
+
+def probe_stub(monkeypatch, status="PASS"):
+    calls = []
+    monkeypatch.setattr(evaluation, "probe_deny_read", lambda binary: calls.append(binary) or {"status": status})
+    return calls
+
+
+def test_real_mode_hands_no_credential_to_a_case_and_records_the_verified_version(operator, monkeypatch, tmp_path):
+    probe_stub(monkeypatch)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", SECRET)
     monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)
     started = stub(monkeypatch)  # asserts operator_login and credential None; nothing real runs
-    result, path = suite(tmp_path, mode="real", claude_bin=str(claude), total_cap_usd=2, case_budget_usd=1.25,
-                         selected=[cases.BY_ID["direct_edit_brief"]])
+    result, path = real_suite(tmp_path, total_cap_usd=2, selected=[cases.BY_ID["direct_edit_brief"]])
     assert started == [("direct_edit_brief", 1)] and result["operator_login"]["config"]["cli_version"] == "2.1.332"
     assert SECRET not in path.read_text()
+
+
+# --- Stage 0 and the reservation --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("status", ["FAIL", "INVALID", "ALARM", "ABORTED"])
+def test_no_case_starts_unless_the_read_deny_probe_passes(operator, monkeypatch, tmp_path, status):
+    calls = probe_stub(monkeypatch, status)
+    started = stub(monkeypatch)
+    result, path = real_suite(tmp_path)
+    assert len(calls) == 1 and started == []
+    assert result["aborted"] == f"deny_read_probe {status}" and result["outcome"] == "incomplete"
+    assert result["operator_login"]["deny_read_probe"]["status"] == status
+    held = [row for row in result["rows"] if row.get("blocker") == "deny_read_probe"]
+    assert {row["case"] for row in held} >= HOSTILE | {"direct_edit_brief"}
+    assert result["ledger_spent_usd"] == 0
+
+
+def test_the_probe_runs_once_before_the_first_case(operator, monkeypatch, tmp_path):
+    order = []
+    monkeypatch.setattr(evaluation, "probe_deny_read", lambda binary: order.append("probe") or {"status": "PASS"})
+    started = stub(monkeypatch)
+    real = evaluation.run_case
+    monkeypatch.setattr(evaluation, "run_case", lambda case, rep, **k: order.append(case.id) or real(case, rep, **k))
+    real_suite(tmp_path, selected=[cases.BY_ID["direct_edit_brief"]], reps=2)
+    assert order == ["probe", "direct_edit_brief", "direct_edit_brief"] and len(started) == 2
+
+
+def test_the_reservation_is_computed_from_the_cases_and_printed_before_the_run(operator, monkeypatch, tmp_path, capsys):
+    probe_stub(monkeypatch)
+    printed = []
+
+    def run_case(case, rep, **kwargs):
+        printed.append(capsys.readouterr().err)
+        return {"case": case.id, "rep": rep, "model": case.model, "outcome": "pass", "cost_usd": 0.0,
+                "verified_direct_launches": 1}
+
+    monkeypatch.setattr(evaluation, "run_case", run_case)
+    selected = [cases.BY_ID[name] for name in ("direct_edit_brief", "foreign_task_refused", "opus_switch")]
+    result, _ = real_suite(tmp_path, selected=selected, reps=2)
+    rows = result["operator_login"]["reservation"]
+    assert [(r["case"], r["model"], r["reps"], r["unit_usd"], r["subtotal_usd"]) for r in rows] == [
+        ("direct_edit_brief", "sonnet", 2, 1.25, 2.5), ("opus_switch", "opus", 2, 3, 6),
+        ("foreign_task_refused", "sonnet", 2, 1.25, 2.5)]
+    assert evaluation.reservation_table(rows) in printed[0] and "| total | | | | 11.00 |" in printed[0]
+
+
+def documented_reservation():
+    """The README's two commands: every case an operator-login run can start, Opus once and the others twice."""
+    runnable = [c for c in cases.CASES if c.judge is not None and c.requires is None and not c.needs_synthetic_home]
+    budgets = {cases.SONNET: 1.25, cases.OPUS: 3.0}
+    return (evaluation.reservation([c for c in runnable if c.model == cases.OPUS], 1, budgets)
+            + evaluation.reservation([c for c in runnable if c.model == cases.SONNET], 2, budgets))
+
+
+def test_the_readme_table_is_the_documented_commands_reservation():
+    rows = documented_reservation()
+    assert sum(row["subtotal_usd"] for row in rows) == 18.0 <= 23.5
+    readme = (evaluation.REPO_ROOT / "evals" / "README.md").read_text()
+    assert evaluation.reservation_table(rows) in readme
+
+
+def test_the_documented_commands_run_every_non_hostile_case_before_a_hostile_one():
+    readme = (evaluation.REPO_ROOT / "evals" / "README.md").read_text()
+    section = readme.split("### `--credential operator-login`")[1]
+    block = section.split("# proposed, needs approval")[1].split("```")[0].replace("\\\n", " ")
+    commands = [line for line in block.splitlines() if "--mode real" in line]
+    selected = [re.search(r"--cases (\S+)", line)[1].split(",") for line in commands]
+    assert selected[0] == ["opus_switch"] and not cases.BY_ID["opus_switch"].hostile
+    assert commands[0].rstrip().endswith("&&")  # the Sonnet command runs only if the first passed
+    assert "--total-cap-usd 3 " in commands[0] and "--total-cap-usd 18 " in commands[1]
+    assert {c.id for c in cases.CASES if c.judge and not c.requires} == set(selected[0] + selected[1])
 
 
 # --- The launch check -------------------------------------------------------------------------------------------
 
 
 def test_a_refused_turn_is_a_launch_refusal(operator, tmp_path):
-    run = SimpleNamespace(turns=[{"final": {"outcome": "refused", "text": "mismatch"}}], capture=tmp_path)
+    run = bare_run(tmp_path)
+    run.turns.append({"final": {"outcome": "refused", "text": "mismatch"}})
     with pytest.raises(evaluation.LaunchRefused, match="refused"):
-        evaluation.Run.verify_launches(run)
-    run.turns[0]["final"]["outcome"] = "answered"
-    assert evaluation.Run.verify_launches(run) == 0
+        run.verify_launches()
+    run.turns[0]["final"]["outcome"] = "success"
+    assert run.verify_launches() == 0
+
+
+def bare_run(tmp_path):
+    return evaluation.Run(cases.BY_ID["direct_edit_brief"], 1, mode="fake", behavior="ok", url="", root=tmp_path / "run",
+                          out=tmp_path, claude_bin=None, budget=1)
+
+
+def good_launch(tmp_path):
+    deny = list(task_manager_sandbox.read_deny_paths(os.environ, tmp_path / "runtime"))
+    return {"args": ["--dangerously-skip-permissions"], "settings": {"sandbox": {
+        "enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
+        "filesystem": {"denyRead": deny}}}}
+
+
+def test_a_failed_turn_does_not_count_as_a_read_back_launch(operator, tmp_path):
+    run = bare_run(tmp_path)
+    run.capture.mkdir(parents=True)
+    launch = json.dumps(good_launch(tmp_path))
+    for name, outcome, count in (("1", "failed", 0), ("2", "failed", 0), ("3", "stopped", 1), ("4", "success", 2)):
+        (run.capture / f"launch-{name}.json").write_text(launch)
+        run.turns.append({"final": {"outcome": outcome}})
+        assert run.verify_launches() == count, name
+
+
+@pytest.mark.parametrize("broken", ["sandbox_off", "unreadable"])
+@pytest.mark.parametrize("failure", [EvalError("a turn did not end in time"), RuntimeError("stream broke")])
+def test_a_bad_launch_aborts_the_run_even_when_its_turn_raises(operator, monkeypatch, tmp_path, broken, failure):
+    monkeypatch.setattr(evaluation, "fresh_database", lambda url: contextlib.nullcontext(("postgresql://x", None)))
+    for name in ("build_files", "install", "start_server", "enable", "seed_tasks", "write_cli_config"):
+        monkeypatch.setattr(evaluation.Run, name, lambda self: None)
+    monkeypatch.setattr(evaluation.Run, "sentinel", lambda self: {})
+    monkeypatch.setattr(evaluation.Run, "listing", lambda self: [])
+    monkeypatch.setattr(evaluation.Run, "case_cost", lambda self: 0.0)
+    monkeypatch.setattr(evaluation, "read_records", lambda *a: [])
+    started = []
+
+    def send(self, turn, index):
+        started.append(self.case.id)
+        self.capture.mkdir(parents=True)
+        launch = good_launch(tmp_path)
+        launch["settings"]["sandbox"]["enabled"] = False
+        (self.capture / "launch-1.json").write_text(json.dumps(launch) if broken == "sandbox_off" else "{")
+        raise failure
+
+    monkeypatch.setattr(evaluation.Run, "send", send)
+    result, _ = suite(tmp_path)
+    assert len(started) == 1, started
+    assert result["aborted"] == f"launch_refused in {started[0]}"
+    assert result["rows"][-1]["abort"] == "launch_refused" and result["rows"][-1]["outcome"] == "error"
+
+
+def test_a_turn_that_raises_after_a_good_launch_does_not_abort(operator, monkeypatch, tmp_path):
+    monkeypatch.setattr(evaluation, "fresh_database", lambda url: contextlib.nullcontext(("postgresql://x", None)))
+    for name in ("build_files", "install", "start_server", "enable", "seed_tasks", "write_cli_config"):
+        monkeypatch.setattr(evaluation.Run, name, lambda self: None)
+    monkeypatch.setattr(evaluation.Run, "sentinel", lambda self: {})
+    monkeypatch.setattr(evaluation.Run, "listing", lambda self: [])
+    monkeypatch.setattr(evaluation.Run, "case_cost", lambda self: 0.0)
+    monkeypatch.setattr(evaluation, "read_records", lambda *a: [])
+
+    def send(self, turn, index):
+        self.capture.mkdir(parents=True)
+        (self.capture / "launch-1.json").write_text(json.dumps(good_launch(tmp_path)))
+        raise EvalError("a turn did not end in time")
+
+    monkeypatch.setattr(evaluation.Run, "send", send)
+    result, _ = suite(tmp_path, selected=[cases.BY_ID["direct_edit_brief"]])
+    assert result["aborted"] is None and result["rows"][0]["outcome"] == "error"
 
 
 def test_a_bypass_launch_must_carry_the_sandbox_and_the_deny_list(operator, tmp_path):
@@ -327,6 +680,7 @@ def test_fake_run_passes_both_stages_and_a_readback_mismatch_aborts_it(operator,
     monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", "darwin")
     selected = [cases.BY_ID[name] for name in ("foreign_task_refused", "direct_edit_brief", "readonly_resume")]
     result, path = suite(tmp_path, admin_url=DSN, selected=selected)
+    assert not (operator / ".cache").exists()  # every cache of the run went under its own root
     assert [(row["case"], row["outcome"]) for row in result["rows"]] == [
         ("direct_edit_brief", "pass"), ("readonly_resume", "pass"), ("foreign_task_refused", "pass")], result["rows"]
     assert result["rows"][0]["verified_direct_launches"] >= 1
