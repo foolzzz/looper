@@ -358,9 +358,10 @@ def test_only_complete_discovery_outside_git_allows_running_in_place(
 
     monkeypatch.setattr(ws, "_git", discovery_failure)
     if not outside_git:
-        with pytest.raises(TaskWorkspaceError, match="mount point"):
+        failed = r"repository inspection failed: git_failed:rev-parse \(exit 128\)$"  # none of git's output
+        with pytest.raises(TaskWorkspaceError, match=failed):
             run(tw.check(str(workspace), mode=WORKTREE))
-        with pytest.raises(TaskWorkspaceError, match="mount point"):
+        with pytest.raises(TaskWorkspaceError, match=failed):
             prepare(store, task("task-1", workspace), tmp_path / "rt")
         assert not store.worktrees and not store.work_dirs and not store.notes
         return

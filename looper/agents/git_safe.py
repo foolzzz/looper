@@ -137,6 +137,24 @@ class RepositoryRefused(subprocess.SubprocessError):
         self.path = path
 
 
+@dataclass(frozen=True)
+class GitFailure:
+    """A git command that failed, as it may be said outside git: its subcommand and exit code, never what it
+    printed. Git's messages can quote file content that Looper does not control, so a failed command's output must
+    not reach an exception, a returned value, an event, a prompt, the database or the log."""
+
+    subcommand: str
+    exit_code: int
+
+    @classmethod
+    def of(cls, args: Sequence[str], exit_code: int) -> GitFailure:
+        """The failure of ``git args``, which are Looper's own: the subcommand is the first that is no option."""
+        return cls(next((arg for arg in args if not arg.startswith("-")), "command"), exit_code)
+
+    def __str__(self) -> str:
+        return f"git_failed:{self.subcommand} (exit {self.exit_code})"
+
+
 def environment(extra: Mapping[str, str] | None = None, *, environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """The environment git starts with: the allowlisted variables of ``environ`` (the server's), the fixed ones, and
     ``extra`` (only names in ``CALLER_VARIABLES``; anything else is a programming error)."""

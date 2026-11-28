@@ -373,7 +373,7 @@ def _read_only(repo: Path, root: Path) -> StepWorkspace:
     (_reset, MergeError.BRANCH_CHANGED, (), "main no longer contains the step's start"),
     (_step_switched, MergeError.STEP_BRANCH_CHANGED, (), "no longer on its branch looper/task-1/s1-1"),
     (_step_rewritten, MergeError.STEP_BRANCH_CHANGED, (), "its commits were rewritten"),
-    (_read_only, MergeError.GIT_FAILED, (), "insufficient permission"),
+    (_read_only, MergeError.GIT_FAILED, (), "git_failed:commit-tree (exit "),
 ])
 def test_a_merge_that_cannot_be_made_leaves_the_task_directory_as_it_was(
     repo: Path, tmp_path: Path, arrange: Any, error: MergeError, files: tuple[str, ...], detail: str,
