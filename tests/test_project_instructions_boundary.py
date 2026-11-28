@@ -349,6 +349,7 @@ INJECTOR_IDS = ["dsh", "dsh runner", "pi", "pi runner"]
 # Which directory holds .git, as (that repository, the operator's home, the configured runtime root), below tmp_path.
 OUTER = {
     "the home": ("versioned", "versioned", None),
+    "the home, the runtime root elsewhere": ("versioned", "versioned", "elsewhere"),
     "above the home": ("versioned", "versioned/users/me", None),
     "the home through a link": ("versioned", "home-link", None),
     "the runtime root": ("versioned", "home", "versioned"),
@@ -391,6 +392,20 @@ def test_a_repository_holding_the_home_or_the_runtime_root_is_not_the_boundary(
     assert "FAKE-OTHER-TOOL-RULES" not in prompt and "FAKE-RULES-ABOVE-THE-WORK-DIRECTORY" not in prompt
     assert "# Project instructions" not in prompt and LOOPER_PROMPT in prompt
     assert _entries(runtime, work) == [_skipped("../AGENTS.md", "outside"), _skipped("AGENTS.md", "outside")]
+
+
+def test_a_versioned_home_is_known_however_the_work_directory_spells_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outer = _outer_repository(tmp_path, monkeypatch, "the home")
+    (outer / "pX").mkdir()
+    (outer / "AGENTS.md").write_text("FAKE-RULES-ABOVE-THE-WORK-DIRECTORY")
+    (tmp_path / "alias").symlink_to(outer)
+
+    prompt = _prompt(pi, "pi", tmp_path / "alias" / "pX")
+
+    assert "FAKE-RULES-ABOVE-THE-WORK-DIRECTORY" not in prompt
+    assert _entries("pi", tmp_path / "alias" / "pX") == [_skipped("../AGENTS.md", "outside")]
 
 
 @pytest.mark.parametrize("module, runtime", INJECTORS, ids=INJECTOR_IDS)
