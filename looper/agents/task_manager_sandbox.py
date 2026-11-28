@@ -18,7 +18,8 @@ the settings reference that could widen the boundary). Verified against Claude C
 - F9 ``--tools``: an allowlist of built-in tools (``BUILTIN_TOOLS``), because the sandbox covers only Bash children.
   Tool search is pinned off so the allowed MCP servers' tools are present without ``ToolSearch``.
 - F10 ``filesystem.denyRead``: credentials and trust roots (``read_deny_paths``); a blacklist, incomplete by nature.
-- F11 ``filesystem.denyWrite``: ``.git/hooks``, ``config``, ``info`` and ``modules`` of the task directory.
+- F11 ``filesystem.denyWrite``: ``.git/hooks``, ``config``, ``info``, ``modules`` and ``objects/info`` of the task
+  directory.
 """
 from __future__ import annotations
 
@@ -143,9 +144,10 @@ class Pin:
 def git_deny_write(work_dir: Path) -> tuple[str, ...]:
     """F11: the parts of the task directory's ``.git`` a Bash child must not write (absolute paths under the real
     path of ``work_dir``). ``hooks`` and ``config`` are protected by default; ``info`` (``attributes`` is not
-    neutralized by ``--attr-source``) and ``modules`` (a submodule's own config and hooks) are not."""
+    neutralized by ``--attr-source``), ``modules`` (a submodule's own config and hooks) and ``objects/info``
+    (``alternates`` names other object stores) are not."""
     root = os.path.realpath(work_dir)
-    return tuple(f"{root}/.git/{part}" for part in ("hooks", "config", "info", "modules"))
+    return tuple(f"{root}/.git/{part}" for part in ("hooks", "config", "info", "modules", "objects/info"))
 
 
 def pins(work_dir: Path, *, allowed_domains: Sequence[str], read_deny: Sequence[str]) -> tuple[Pin, ...]:

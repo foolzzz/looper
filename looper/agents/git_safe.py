@@ -16,6 +16,11 @@ Every git command Looper runs in a task, step or worktree directory goes through
   defines gets that definition back. ``check_repository`` finds them, with ``git config --show-scope``. The
   repository's ``info/attributes`` can assign a driver without a definition of its own that we can see, so
   ``check_repository`` refuses a repository whose file assigns a filter, diff or merge driver.
+* An object id means the object the repository itself holds: ``argv`` and ``environment`` turn replacement refs
+  (``refs/replace``) off, and ``check_repository`` refuses a repository (or a checked-out submodule) that borrows
+  another object store (a non-empty ``objects/info/alternates`` or ``http-alternates``). ``environment`` also
+  turns lazy fetches off: in a partial clone, objects not yet fetched are reported missing by Looper's git calls
+  instead of being fetched.
 * ``environment`` builds the child's environment from an allowlist: the server's database credentials, tokens
   and provider keys never reach git or anything it runs.
 * ``check_repository`` refuses, with ``RepositoryRefused``, a directory whose ``.git`` points somewhere that does
@@ -40,6 +45,7 @@ import inspect
 import logging
 import os
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -57,6 +63,8 @@ OVERRIDES = (
     "gpg.program=false", "gpg.ssh.program=false", "gpg.x509.program=false",
     "diff.external=", "protocol.ext.allow=never", "submodule.recurse=false",
     "gc.auto=0", "maintenance.auto=false",
+    # Not a program: a replacement ref would make git answer with another object than the one asked for.
+    "core.useReplaceRefs=false",
 )
 PREFLIGHT_TIMEOUT_SEC = 10
 logger = logging.getLogger(__name__)
@@ -74,19 +82,25 @@ CALLER_VARIABLES = frozenset({
     "GIT_OPTIONAL_LOCKS", "GIT_MERGE_AUTOEDIT", "GIT_REFLOG_ACTION", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
 })
-# Fixed: no prompt, no pager, an editor that edits nothing, no askpass, no external diff.
-_FIXED_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_EDITOR": "true", "GIT_ASKPASS": "true"}
+# Fixed: no prompt, no pager, an editor that edits nothing, no askpass, no external diff, no replacement refs, and
+# no lazy fetch (for a missing object git would read a promisor remote the repository names, through a transport
+# program its configuration chooses).
+_FIXED_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_EDITOR": "true", "GIT_ASKPASS": "true",
+              "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1"}
 
 # An attribute line that assigns a filter, diff or merge driver (``-diff`` and ``diff`` assign none).
 _DRIVER = re.compile(r"(?:^|\s)(filter|diff|merge)=")
+# The files under ``objects/info`` that point a repository at other object stores.
+_ALTERNATES = ("alternates", "http-alternates")
 
 
 class RepositoryRefused(subprocess.SubprocessError):
-    """Looper will not run git here: the repository's layout or its ``info/attributes`` could run its own code.
+    """Looper will not run git here: the repository's layout or its ``info/attributes`` could run its own code, or
+    it borrows another repository's objects.
 
     ``reason`` is ``attributes_driver`` (``info/attributes`` assigns a driver), ``git_dir_mismatch`` (the ``.git``
-    does not belong to this directory) or ``outside_worktree`` (the directory is not inside the work tree git
-    reports).
+    does not belong to this directory), ``outside_worktree`` (the directory is not inside the work tree git
+    reports) or ``object_alternates`` (``objects/info/alternates`` or ``http-alternates`` is not empty).
     """
 
     def __init__(self, reason: str, directory: str | Path, detail: str):
@@ -148,9 +162,9 @@ def _run_probe(command: list[str]) -> str:
 def _drivers(checkout: str | Path, depth: int = 0) -> tuple[str, list[Path]]:
     """The driver-definition answers (``git config --show-scope`` output) for the checkout and the submodules
     under it, nested ones too, with every gitlink path seen; and a refusal when a submodule's ``info/attributes``
-    assigns a driver: git runs a submodule's own filters and drivers when a command in the superproject recurses
-    into it. Cached per checkout inside ``cached()``, so a submodule seen from its superproject and on its own is
-    asked about once."""
+    assigns a driver or the submodule borrows another object store: git runs a submodule's own filters and drivers,
+    and reads its objects, when a command in the superproject recurses into it. Cached per checkout inside
+    ``cached()``, so a submodule seen from its superproject and on its own is asked about once."""
     store = _cache.get()
     key = ("drivers", _real(checkout))
     if store is not None and key in store:
@@ -164,6 +178,7 @@ def _drivers(checkout: str | Path, depth: int = 0) -> tuple[str, list[Path]]:
                 continue
             links.append(module)
             if module.joinpath(".git").exists():
+                _refuse_alternates(checkout, _common_dir_of(_git_dir_of(module)))
                 text, nested = _drivers(module, depth + 1)
                 answer, links = answer + text, links + nested
                 try:
@@ -196,7 +211,8 @@ def _stat(path: Path) -> tuple[int, int, int, int] | None:
 
 def _repository_files(git_dir: Path, common: Path) -> list[Path]:
     return [git_dir / "config", common / "config", git_dir / "config.worktree", common / "info" / "attributes",
-            git_dir / "info" / "attributes", git_dir / "index", git_dir / "gitdir", git_dir / "commondir"]
+            git_dir / "info" / "attributes", git_dir / "index", git_dir / "gitdir", git_dir / "commondir",
+            *_alternates_files(common)]
 
 
 def _files_state(sources: Sequence[tuple[Path, Path]]) -> list[Any] | None:
@@ -216,8 +232,9 @@ def _files_state(sources: Sequence[tuple[Path, Path]]) -> list[Any] | None:
 def _signature(directory: str | Path, top: str | None, git_dir: str, common: str,
                links: Sequence[Path] | None) -> tuple | None:
     """What a check depends on, as the state of the files it read: every ancestor's ``.git`` from the directory
-    to the top and the repository's configuration, attributes, index and link files; with ``links``, the same for
-    each gitlink (checked out or not). None when a configuration includes other files, which are not tracked."""
+    to the top and the repository's configuration, attributes, index, link and alternates files; with ``links``,
+    the same for each gitlink (checked out or not). None when a configuration includes other files, which are not
+    tracked."""
     parts: list[Any] = []
     here = Path(_real(directory))
     for ancestor in (here, *here.parents):
@@ -229,7 +246,7 @@ def _signature(directory: str | Path, top: str | None, git_dir: str, common: str
         parts.append(_stat(module / ".git"))
         if module.joinpath(".git").exists():
             dir_of = _git_dir_of(module)
-            sources.append((dir_of, dir_of))
+            sources.append((dir_of, _common_dir_of(dir_of)))
     state = _files_state(sources)
     return None if state is None else tuple(parts + state)
 
@@ -259,6 +276,36 @@ def _git_dir_of(checkout: Path) -> Path:
         return dot_git
     link = _gitdir_link(dot_git)
     return Path(link) if link else dot_git
+
+
+def _common_dir_of(git_dir: Path) -> Path:
+    """The repository that holds ``git_dir``'s objects: what its ``commondir`` file names, else itself."""
+    try:
+        line = (git_dir / "commondir").read_text().splitlines()[0]
+    except (OSError, UnicodeError, IndexError):
+        return git_dir
+    return Path(_real(git_dir / line))
+
+
+def _alternates_files(common: Path) -> list[Path]:
+    return [common / "objects" / "info" / name for name in _ALTERNATES]
+
+
+def _refuse_alternates(directory: str | Path, common: str | Path) -> None:
+    """Refuse unless each alternates file of the repository ``common`` is missing or an empty file."""
+    for path in _alternates_files(Path(common)):
+        try:
+            info = os.stat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            pass  # there, and unreadable: refused
+        else:
+            if stat.S_ISREG(info.st_mode) and not info.st_size:
+                continue
+        raise RepositoryRefused("object_alternates", directory,
+                                f"objects/info/{path.name} is not empty: the repository borrows another object store "
+                                "(`git repack -a -d`, then removing the file, makes it self-contained)")
 
 
 def _refuse_attributes(directory: str | Path, text: str) -> None:
@@ -326,7 +373,7 @@ def _judge(directory: str | Path, stdout: str, layout: bool = True) -> tuple[str
     repository at all.
 
     ``layout`` False skips the checks of where the ``.git`` points (for a directory being relocated, which the
-    caller owns); ``info/attributes`` is still checked. Raises ``RepositoryRefused``."""
+    caller owns); ``info/attributes`` and the alternates files are still checked. Raises ``RepositoryRefused``."""
     lines = stdout.splitlines()
     if len(lines) < 2:
         return None, False, "", ""  # no repository: the command itself will say so
@@ -355,6 +402,7 @@ def _judge(directory: str | Path, stdout: str, layout: bool = True) -> tuple[str
         here = _real(directory)
         if os.path.commonpath([here, top]) != top:
             raise RepositoryRefused("outside_worktree", directory, "the directory is outside the work tree git reports")
+    _refuse_alternates(directory, common)
     for place in dict.fromkeys((common, git_dir)):
         try:
             text = Path(place, "info", "attributes").read_text(errors="replace")
@@ -405,7 +453,7 @@ def check_repository(directory: str | Path, *, layout: bool = True) -> Inspectio
 
     An answer is remembered (up to ``MEMO_SECONDS``) while the files it read are unchanged (``_signature``): a
     configuration that includes other files is never remembered, and any change to a ``.git``, a configuration,
-    ``info/attributes``, the index or a submodule's, gives a fresh check."""
+    ``info/attributes``, the index, an alternates file or a submodule's, gives a fresh check."""
     store = _cache.get()
     key = _cache_key(directory, layout)
     if store is not None and key in store:
