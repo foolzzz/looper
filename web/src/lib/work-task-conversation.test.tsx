@@ -319,7 +319,8 @@ describe("task conversation", () => {
         changes: [change("refs/heads/oth\\u202eer", "moved", old, moved, `git update-ref refs/heads/other ${old} ${moved}`),
           change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`),
           change("refs/heads/big", "fast_forward_unverified", old, moved, `git update-ref refs/heads/big ${old} ${moved}`),
-          { ref: "refs/heads/dir", change: "unreadable", old: null, new: null, restore: null, not_restorable: "ref_file_unreadable" }] },
+          { ref: "refs/heads/dir", change: "unreadable", old: null, new: null, restore: null, not_restorable: "ref_file_unreadable" },
+          { ref: "refs/heads/both", change: "moved", old, new: moved, restore: null, not_restorable: "overlapping_turn" }] },
     ];
     const bad = [
       { kind: "sandbox_notice", notice: "other", detail: "x" },
@@ -342,6 +343,7 @@ describe("task conversation", () => {
     expect(report.textContent).toContain("不能说它被重置过");
     expect(report.textContent).toContain("refs/heads/dir 没有读取，是否变化未知");
     expect(report.textContent).toContain("Looper 没有读它");
+    expect(report.textContent).toContain("同一仓库里另一个任务的管家回合和本轮时间重叠");
     expect(report.textContent).not.toMatch(/refs\/heads\/big 被改写/);
     expect(report.textContent).toContain("reset --hard、rebase 或 commit --amend");
     expect(report.textContent).toContain("属于另一个 Looper 任务");

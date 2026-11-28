@@ -1321,6 +1321,220 @@ def test_a_hop_git_cannot_read_is_listed_as_not_restorable(repo, monkeypatch):
     assert change.restore is None and change.not_restorable is refs.NotRestorable.CHAIN_UNREADABLE
 
 
+def _git_cannot_read(monkeypatch, *names: str) -> None:
+    real = refs._git
+
+    async def failing(work_dir, *args):
+        if args[:1] == ("symbolic-ref",) and "--no-recurse" in args and args[-1] in names:
+            return 128, ""
+        return await real(work_dir, *args)
+
+    monkeypatch.setattr(refs, "_git", failing)
+
+
+GAPS = ("too_many_symrefs", "git_too_old", "chain_unreadable")
+
+
+def _gapped(monkeypatch, why: str, *unread: str) -> None:
+    if why == "chain_unreadable":
+        _git_cannot_read(monkeypatch, *unread)
+    else:
+        _without_direct_targets(monkeypatch, why)
+
+
+@pytest.mark.parametrize("why", GAPS)
+@pytest.mark.parametrize("through", ["refs/heads/mid", "refs/hidden/mid"])
+@pytest.mark.parametrize("retargeted", ["refs/heads/outer", "mid"])
+def test_a_hop_that_changes_while_the_chain_end_stays_is_listed_without_direct_targets(repo, monkeypatch, why,
+                                                                                      through, retargeted):
+    git(repo, "symbolic-ref", through, "refs/heads/other")
+    git(repo, "symbolic-ref", "refs/heads/outer", through)
+    git(repo, "symbolic-ref", "refs/heads/broken", "refs/heads/other")  # the one git fails on
+    _gapped(monkeypatch, why, "refs/heads/broken")
+    if retargeted == "mid":  # a hop between: it has its own entry, or shows through the link that reads it
+        git(repo, "symbolic-ref", "refs/heads/twin", "refs/heads/other")
+        listed = through if through.startswith("refs/heads/") else "refs/heads/outer"
+        changed = lambda: git(repo, "symbolic-ref", through, "refs/heads/twin")
+    else:
+        listed = retargeted
+        changed = lambda: git(repo, "symbolic-ref", "refs/heads/outer", "refs/heads/other")
+    report = run(repo, changed)
+    change, = report.changes
+    assert change.ref == listed and change.change is Change.MOVED and report.needs_you
+    assert change.restore is None and change.not_restorable.value == why
+
+
+@pytest.mark.parametrize("why", GAPS)
+def test_unchanged_links_stay_unreported_without_direct_targets(repo, monkeypatch, why):
+    git(repo, "symbolic-ref", "refs/hidden/mid", "refs/heads/other")
+    git(repo, "symbolic-ref", "refs/heads/outer", "refs/hidden/mid")
+    git(repo, "symbolic-ref", "refs/heads/dang", "refs/heads/nothing")
+    _gapped(monkeypatch, why, "refs/heads/outer")
+    assert not run(repo, lambda: None).worth_saying
+
+
+@pytest.mark.parametrize("before_only", [True, False])
+def test_a_retargeted_link_is_listed_when_only_one_snapshot_has_direct_targets(repo, monkeypatch, before_only):
+    git(repo, "symbolic-ref", "refs/heads/mid", "refs/heads/other")
+    git(repo, "symbolic-ref", "refs/heads/outer", "refs/heads/mid")
+
+    async def go():
+        with monkeypatch.context() as patch:
+            if before_only:
+                patch.setattr(refs, "SYMREF_LIMIT", 0)
+            before = await refs.snapshot(repo)
+        git(repo, "symbolic-ref", "refs/heads/outer", "refs/heads/other")
+        with monkeypatch.context() as patch:
+            if not before_only:
+                patch.setattr(refs, "SYMREF_LIMIT", 0)
+            after = await refs.snapshot(repo)
+        return await refs.compare(repo, before, after, task_branch="main", task_id=TASK, active_task=inactive)
+
+    change, = asyncio.run(go()).changes
+    assert change.ref == "refs/heads/outer" and change.restore is None
+    assert change.not_restorable is refs.NotRestorable.TOO_MANY_SYMREFS
+
+
+def test_a_hidden_link_git_cannot_read_that_is_retargeted_shows_through_its_reader(repo, monkeypatch):
+    git(repo, "symbolic-ref", "refs/hidden/mid", "refs/heads/other")
+    git(repo, "symbolic-ref", "refs/heads/outer", "refs/hidden/mid")
+    git(repo, "branch", "twin", "other")
+    _git_cannot_read(monkeypatch, "refs/hidden/mid")
+    change, = run(repo, lambda: git(repo, "symbolic-ref", "refs/hidden/mid", "refs/heads/twin")).changes
+    assert change.ref == "refs/heads/outer" and change.restore is None
+    assert change.not_restorable is refs.NotRestorable.CHAIN_UNREADABLE
+
+
+# --- Overlapping turns on one repository: which turn changed a ref cannot be told, so no command is offered ---
+
+
+async def _end(repo: Path, before, task_id: str) -> refs.Report:
+    return await refs.compare(repo, before, await refs.snapshot(repo), task_branch="main", task_id=task_id,
+                              active_task=_both_active)
+
+
+async def _both_active(_: str) -> bool:
+    return True
+
+
+def _two_task_layout(repo: Path) -> None:
+    git(repo, "branch", "shared", "main")
+    git(repo, "symbolic-ref", "refs/heads/looper/task-two/step", "refs/heads/shared")
+    git(repo, "symbolic-ref", "refs/heads/alias", "refs/heads/shared")
+
+
+def _task_one_work(repo: Path) -> None:
+    git(repo, "update-ref", "refs/heads/shared", git(repo, "commit-tree", "-p", "main", "-m", "x", "HEAD^{tree}"))
+    git(repo, "symbolic-ref", "refs/heads/alias", "refs/heads/other")
+
+
+@pytest.mark.parametrize("order", ["two_one", "one_two"])  # which turn starts first
+def test_a_command_never_undoes_what_an_overlapping_turn_changed(repo, order):
+    _two_task_layout(repo)
+
+    async def go():
+        if order == "two_one":
+            two = await refs.open_turn(repo, "task-two")
+            one = await refs.open_turn(repo, "task-one")
+        else:
+            one = await refs.open_turn(repo, "task-one")
+            two = await refs.open_turn(repo, "task-two")
+        _task_one_work(repo)
+        first = await _end(repo, one, "task-one")
+        refs.close_turn("task-one")
+        git(repo, "symbolic-ref", "refs/heads/looper/task-two/step", "refs/heads/other")
+        second = await _end(repo, two, "task-two")
+        refs.close_turn("task-two")
+        return first, second
+
+    first, second = asyncio.run(go())
+    shared = git(repo, "rev-parse", "shared")
+    for report in (first, second):
+        entries = (*report.changes, *report.info)
+        assert entries and all(c.restore is None for c in entries)
+        assert {c.not_restorable for c in entries} == {refs.NotRestorable.OVERLAPPING_TURN}
+    assert sorted(c.ref for c in (*second.changes, *second.info)) == [
+        "refs/heads/alias", "refs/heads/looper/task-two/step", "refs/heads/shared"]
+    assert second.needs_you and git(repo, "rev-parse", "shared") == shared
+
+
+def test_turns_one_after_another_keep_their_commands(repo):
+    _two_task_layout(repo)
+
+    async def go():
+        one = await refs.open_turn(repo, "task-one")
+        _task_one_work(repo)
+        await _end(repo, one, "task-one")
+        refs.close_turn("task-one")
+        two = await refs.open_turn(repo, "task-two")
+        git(repo, "symbolic-ref", "refs/heads/looper/task-two/step", "refs/heads/other")
+        second = await _end(repo, two, "task-two")
+        refs.close_turn("task-two")
+        return second
+
+    report = asyncio.run(go())
+    shared, alias = git(repo, "rev-parse", "shared"), git(repo, "symbolic-ref", "refs/heads/alias")
+    change, = report.changes  # the task's own branch, and nothing of what the earlier turn changed
+    assert report.info == () and change.ref == "refs/heads/looper/task-two/step"
+    assert _run(repo, change.restore).returncode == 0
+    assert (git(repo, "rev-parse", "shared"), git(repo, "symbolic-ref", "refs/heads/alias")) == (shared, alias)
+
+
+def test_turns_on_different_repositories_do_not_overlap_but_linked_worktrees_do(repo, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    subprocess.run(["git", "clone", "-q", str(repo), str(elsewhere)], check=True, timeout=30)
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", str(linked), "other")
+
+    async def go():
+        one = await refs.open_turn(repo, "task-one")
+        await refs.open_turn(elsewhere, "task-two")
+        git(repo, "branch", "alone")
+        alone, = (await _end(repo, one, "task-one")).changes
+        await refs.open_turn(linked, "task-three")  # the same refs
+        together, = (await _end(repo, one, "task-one")).changes
+        for task_id in ("task-one", "task-two", "task-three"):
+            refs.close_turn(task_id)
+        return alone, together
+
+    alone, together = asyncio.run(go())
+    assert alone.restore and together.restore is None
+    assert together.not_restorable is refs.NotRestorable.OVERLAPPING_TURN
+
+
+def test_a_new_turn_of_the_same_task_replaces_its_window(repo):
+    async def go():
+        await refs.open_turn(repo, "task-one")
+        again = await refs.open_turn(repo, "task-one")
+        git(repo, "branch", "fresh")
+        report = await _end(repo, again, "task-one")
+        refs.close_turn("task-one")
+        refs.close_turn("task-one")  # closing a closed turn is nothing
+        return report
+
+    change, = asyncio.run(go()).changes
+    assert change.restore
+
+
+def test_a_turn_whose_first_snapshot_fails_leaves_no_window(repo, monkeypatch):
+    async def failing(work_dir):
+        raise RuntimeError("unreadable")
+
+    async def go():
+        with monkeypatch.context() as patch:
+            patch.setattr(refs, "snapshot", failing)
+            with pytest.raises(RuntimeError):
+                await refs.open_turn(repo, "task-two")
+        one = await refs.open_turn(repo, "task-one")
+        git(repo, "branch", "fresh")
+        report = await _end(repo, one, "task-one")
+        refs.close_turn("task-one")
+        return report
+
+    change, = asyncio.run(go()).changes
+    assert change.restore
+
+
 # --- Generated ref layouts: the listed commands succeed in order and put back every hop of every chain ---
 
 OTHER_TASK = "refs/heads/looper/task-two/"
@@ -1538,3 +1752,156 @@ def test_the_listed_commands_restore_every_hop_of_generated_ref_layouts(tmp_path
           f"{sum(o[1] for o in outcomes)} refs, {sum(o[2] for o in outcomes)} of them links")
     # The generator must keep exercising the restore: several commands in many layouts, and chains in most.
     assert sum(o[0] >= 2 for o in outcomes) >= CHUNK // 2 and sum(o[2] >= 2 for o in outcomes) >= CHUNK // 2
+
+
+def _changed(initial: dict, final: dict) -> set[str]:
+    return {name for name in initial.keys() | final.keys() if initial.get(name) != final.get(name)}
+
+
+def _must_be_listed(initial: dict, final: dict) -> set[str]:
+    """The branches and tags a report has to list: every one whose stored value changed (not the commits made on a
+    direct task branch), and every one that reads, through hops outside them, a link that was retargeted."""
+    compared = ("refs/heads/", "refs/tags/")
+    wanted = {name for name in _changed(initial, final) if name.startswith(compared)}
+    old, new = initial.get(MAIN), final.get(MAIN)
+    if isinstance(old, str) and isinstance(new, str):
+        wanted.discard(MAIN)  # a move of a direct task branch is judged by ancestry, tested on its own
+    for name in initial.keys() & final.keys():
+        if not name.startswith(compared):
+            continue
+        hop, seen = name, set()
+        while hop not in seen and initial.get(hop) == final.get(hop) and isinstance(initial.get(hop), tuple):
+            seen.add(hop)
+            hop = initial[hop][1]
+            if hop.startswith(compared):
+                break
+            was, now = initial.get(hop), final.get(hop)
+            if was != now and isinstance(was, tuple) and isinstance(now, tuple):
+                wanted.add(name)
+    return wanted
+
+
+@pytest.mark.parametrize("first", range(0, CASES, CHUNK))
+def test_every_changed_ref_of_generated_layouts_is_listed_without_direct_targets(tmp_path, monkeypatch, first):
+    """Each seed takes one gap reason, on one or both snapshots, and also retargets a link, inside or outside branches
+    and tags, onto another spelling of the same end."""
+    repo = tmp_path / "generated"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    commits = _history(repo)
+    real = refs._git
+
+    async def go() -> tuple[int, int, set[str]]:
+        compared_names = hidden_only = 0
+        reasons: set[str] = set()
+        for seed in range(first, first + CHUNK):
+            why = GAPS[seed % len(GAPS)]
+            layout = Layout(random.Random(seed), commits)
+            layout.build()
+            middle = layout.rng.choice(["refs/heads/via", "refs/hidden/via"])
+            layout.refs["refs/heads/end"] = commits["tip"]
+            for name, target in (("refs/heads/twin", "refs/heads/end"), (middle, "refs/heads/end"),
+                                 ("refs/heads/reader", middle)):
+                layout.refs[name] = ("ref", target)
+            layout.write(repo)
+            initial = _stored(repo)
+            gapped_side = layout.rng.choice(["both", "both", "before", "after"])
+
+            async def take(side: str):
+                with monkeypatch.context() as patch:
+                    if gapped_side in (side, "both"):
+                        if why == "chain_unreadable":  # git fails on every link it lists
+                            async def failing(work_dir, *args):
+                                if args[:1] == ("symbolic-ref",) and "--no-recurse" in args:
+                                    return 128, ""
+                                return await real(work_dir, *args)
+                            stored = _stored(repo)
+                            if any(isinstance(v, tuple) and _path(stored, n)[-1] in stored
+                                   for n, v in stored.items() if n.startswith(("refs/heads/", "refs/tags/"))):
+                                patch.setattr(refs, "_git", failing)
+                        else:
+                            _without_direct_targets(patch, why)
+                    return await refs.snapshot(repo)
+
+            before = await take("before")
+            steps = [layout.mutate() for _ in range(layout.rng.randint(0, 4))]
+            if layout.refs.get(middle) == ("ref", "refs/heads/end") and layout.link(middle, "refs/heads/twin"):
+                steps.append(f"link {middle} -> refs/heads/twin")
+            layout.write(repo)
+            final = _stored(repo)
+            after = await take("after")
+            report = await refs.compare(repo, before, after, task_branch="main", task_id=TASK,
+                                        active_task=_only_task_two)
+            listed = {change.ref for change in (*report.changes, *report.info)}
+            wanted = _must_be_listed(initial, final)
+            assert wanted <= listed, (f"seed={seed} gap={why} on {gapped_side}\nbefore={initial}\nturn={steps}\n"
+                                      f"after={final}\nnot listed: {sorted(wanted - listed)}")
+            compared_names += len(wanted)
+            hidden_only += len(wanted - _changed(initial, final))
+            reasons |= {change.not_restorable.value for change in (*report.changes, *report.info)
+                        if change.not_restorable}
+        return compared_names, hidden_only, reasons
+
+    compared_names, hidden_only, reasons = asyncio.run(go())
+    print(f"seeds {first}-{first + CHUNK - 1}: {compared_names} refs had to be listed, {hidden_only} of them only "
+          f"through a hidden link, reasons {sorted(reasons)}")
+    assert compared_names >= CHUNK and hidden_only >= CHUNK // 5 and set(GAPS) <= reasons
+
+
+@pytest.mark.parametrize("first", range(0, CASES, CHUNK))
+def test_no_listed_command_writes_a_ref_the_turn_did_not_change_with_two_task_windows(tmp_path, first):
+    """Two tasks' turns on one repository in a seeded order, overlapping or not. Each report's commands, applied to
+    the repository as it is when the report is made, change only refs that this turn's own steps changed."""
+    repo = tmp_path / "generated"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    commits = _history(repo)
+
+    async def go() -> dict[str, int]:
+        seen = {"overlapping": 0, "apart": 0, "commands": 0}
+        for seed in range(first, first + CHUNK):
+            layout = Layout(random.Random(seed), commits)
+            layout.build()
+            layout.write(repo)
+            tasks = ("task-one", "task-two")
+            if layout.rng.random() < 0.5:  # one turn after the other
+                a, b = layout.rng.sample(tasks, 2)
+                order = [("open", a), ("work", a), ("close", a), ("open", b), ("work", b), ("close", b)]
+            else:
+                a, b = layout.rng.sample(tasks, 2)
+                order = [("open", a), ("open", b)] if layout.rng.random() < 0.5 else [("open", a), ("work", a), ("open", b)]
+                rest = [("work", a), ("work", b), ("work", layout.rng.choice(tasks))]
+                layout.rng.shuffle(rest)
+                order += rest + [("close", task) for task in layout.rng.sample(tasks, 2)]
+            windows, own, trace = {}, {task: set() for task in tasks}, []
+            overlapping = max(i for i, (step, _) in enumerate(order) if step == "open") < min(
+                i for i, (step, _) in enumerate(order) if step == "close")
+            seen["overlapping" if overlapping else "apart"] += 1
+            for step, task in order:
+                if step == "open":
+                    windows[task] = await refs.open_turn(repo, task)
+                elif step == "work":
+                    was = _stored(repo)
+                    trace += [(task, layout.mutate()) for _ in range(layout.rng.randint(1, 3))]
+                    layout.write(repo)
+                    own[task] |= _changed(was, _stored(repo))
+                else:
+                    now = _stored(repo)
+                    report = await refs.compare(repo, windows[task], await refs.snapshot(repo), task_branch="main",
+                                                task_id=task, active_task=_both_active)
+                    refs.close_turn(task)
+                    entries = (*report.changes, *report.info)
+                    context = f"seed={seed} task={task}\norder={order}\nsteps={trace}\nstored={now}"
+                    if overlapping:
+                        assert all(c.restore is None for c in entries), context
+                    for command in dict.fromkeys(c.restore for c in entries if c.restore):
+                        seen["commands"] += 1
+                        _run(repo, command)
+                        wrote = _changed(now, _stored(repo))
+                        assert wrote <= own[task], f"{command}\nwrote {sorted(wrote - own[task])}\n{context}"
+                    layout.write(repo)  # the next step starts from the layout again
+        return seen
+
+    seen = asyncio.run(go())
+    print(f"seeds {first}-{first + CHUNK - 1}: {seen}")
+    assert seen["overlapping"] >= CHUNK // 4 and seen["apart"] >= CHUNK // 4 and seen["commands"] >= CHUNK // 4

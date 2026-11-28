@@ -17,7 +17,11 @@ reads through one, is left out of the snapshot (``Snapshot.unreadable``): nothin
 
 A symbolic ref is recorded hop by hop (``Snapshot.hops``). Refs that such chains tie together are restored by one
 command: a single ``git update-ref`` transaction that checks every hop it reads through and puts back every hop that
-changed, or changes nothing. When the chains cannot be known, the report says so (``NotRestorable``) instead.
+changed, or changes nothing. When the chains cannot be known, the report says so (``NotRestorable``) instead; a
+change is still listed, told apart by what Looper's own read of the ref files shows (``Snapshot.spelled``).
+
+Snapshots cannot tell which of two turns on one repository changed a ref, so a turn whose time overlapped another
+task's turn there gets no command at all (``open_turn``, ``close_turn``).
 """
 from __future__ import annotations
 
@@ -99,6 +103,18 @@ class NotRestorable(str, Enum):
     CHAIN_OUTSIDE_REFS = "chain_outside_refs"  # a hop outside ``refs/``, such as ``HEAD``: Looper never writes those
     CHAIN_UNREADABLE = "chain_unreadable"  # git could not read a hop of the chain
     REF_FILE_UNREADABLE = "ref_file_unreadable"  # Looper refused a ref file or directory the ref is read from
+    OVERLAPPING_TURN = "overlapping_turn"  # another task's turn on this repository ran meanwhile; it may be its change
+
+
+@dataclass(eq=False)
+class Window:
+    """One task's turn on a repository, from before its first ref snapshot until it is closed."""
+
+    repository: tuple[int, int]  # the common git directory's device and inode: one for all its worktrees
+    overlapped: bool = False  # another task's window on this repository was open at the same time
+
+
+_windows: dict[str, Window] = {}  # task id -> its open window; a task runs one turn at a time
 
 
 @dataclass(frozen=True)
@@ -112,6 +128,9 @@ class Snapshot:
     gap: NotRestorable | None = None  # why symbolic refs here have no direct target in ``hops``
     # Ref files and directories Looper refused, and the links that read through one; nothing else here holds them.
     unreadable: frozenset[str] = frozenset()
+    # Symbolic ref -> the target its own file spells, read before git: tells a retarget apart where ``hops`` cannot.
+    spelled: Mapping[str, str] = field(default_factory=dict)
+    window: Window | None = field(default=None, compare=False)  # the turn this is the first snapshot of
 
 
 @dataclass(frozen=True)
@@ -194,6 +213,22 @@ def _chain(snap: Snapshot, name: str) -> list[str]:
     while (target := snap.hops.get(chain[-1])) is not None and target not in chain:
         chain.append(target)
     return chain
+
+
+def _spelled_retarget(before: Snapshot, after: Snapshot, name: str) -> bool:
+    """Whether the ref files show another direct target for ``name``, or for a ref outside branches and tags that it
+    reads through (such a hop has no entry of its own). Without direct targets from git, only this shows a retarget
+    that leaves the end of the chain where it was."""
+    seen: set[str] = set()
+    while name not in seen:
+        seen.add(name)
+        target = before.spelled.get(name)
+        if target != after.spelled.get(name):
+            return True
+        if target is None or target.startswith(COMPARED):
+            return False
+        name = target
+    return False
 
 
 def _resolved(snap: Snapshot, name: str) -> str | None:
@@ -533,7 +568,7 @@ def _without_unreadable(snap: Snapshot, *found: _Files) -> Snapshot:
     head = next((files.head if files.head.startswith(HEADS) else None for files in found
                  if files.head and _within(files.head, refused)), snap.head)
     return replace(snap, refs=keep(snap.refs), head=head, symrefs=keep(snap.symrefs), hops=keep(snap.hops),
-                   outside=keep(snap.outside), unreadable=frozenset(refused))
+                   outside=keep(snap.outside), spelled=keep(snap.spelled), unreadable=frozenset(refused))
 
 
 async def _symref_gap(work_dir: str | Path, count: int) -> NotRestorable | None:
@@ -606,7 +641,7 @@ async def snapshot(work_dir: str | Path) -> Snapshot:
     code, head = await _git(work_dir, "symbolic-ref", "-q", "HEAD")
     # Only the trailing newline goes: ref names may end in (or hold) Unicode whitespace.
     head = head.removesuffix("\n") if code == 0 else ""
-    found = Snapshot(refs, head if head.startswith(HEADS) else None, symrefs)
+    found = Snapshot(refs, head if head.startswith(HEADS) else None, symrefs, spelled=first.links)
     found = await _read_hops(work_dir, _without_unreadable(found, first), dangling)
     second = await _ref_files(work_dir, [*found.hops.values(), *found.outside])
     return _without_unreadable(found, first, second)
@@ -731,14 +766,49 @@ def _short(ref: str | None) -> str:
     return "detached" if ref is None else display(ref.removeprefix(HEADS))
 
 
+async def open_turn(work_dir: str | Path, task_id: str) -> Snapshot:
+    """Open ``task_id``'s window on the repository of ``work_dir`` and take its first snapshot. Every window open on
+    the same repository at the same time is marked as overlapped, this one included. ``close_turn`` ends it."""
+    _, common = await _git_dirs(work_dir)
+    try:
+        found = os.stat(common)
+    except OSError as exc:
+        raise _unreadable(f"Looper cannot read the git directory ({type(exc).__name__}).") from None
+    close_turn(task_id)
+    window = Window((found.st_dev, found.st_ino))
+    for other in _windows.values():
+        if other.repository == window.repository:
+            other.overlapped = window.overlapped = True
+    _windows[task_id] = window
+    try:
+        return replace(await snapshot(work_dir), window=window)
+    except BaseException:
+        close_turn(task_id)
+        raise
+
+
+def close_turn(task_id: str) -> None:
+    """End the task's window, if one is open."""
+    _windows.pop(task_id, None)
+
+
 async def begin_turn(task: Mapping[str, Any], work_dir: str | Path, *, sink: TurnSink,
                      phase: str = "turn") -> tuple[Snapshot, str]:
     """Record the refs, and settle the task branch: record it at the first enablement, refuse when ``HEAD`` is not on
-    it. Returns the snapshot (kept in memory by the running turn) and the task branch."""
+    it. Returns the snapshot (kept in memory by the running turn) and the task branch. The turn's window stays open
+    until ``end_turn`` or ``close_turn``."""
+    task_id = str(task["id"])
+    before = await open_turn(work_dir, task_id)
+    try:
+        return before, await _task_branch(task_id, work_dir, before, sink=sink, phase=phase)
+    except BaseException:
+        close_turn(task_id)
+        raise
+
+
+async def _task_branch(task_id: str, work_dir: str | Path, before: Snapshot, *, sink: TurnSink, phase: str) -> str:
     from .tiers.task_manager import RefuseReason, Refused, TaskManagerEvent
 
-    task_id = str(task["id"])
-    before = await snapshot(work_dir)
     recorded = await store.get_branch(task_id)
     if recorded is None:
         if before.head is None:
@@ -757,7 +827,7 @@ async def begin_turn(task: Mapping[str, Any], work_dir: str | Path, *, sink: Tur
                       f"任务分支记录的是 {display(recorded)}，目录现在在 {_short(before.head)}。"
                       f"把 {display(recorded)} 重新检出（git switch -- {_quote(recorded)}），"
                       "或者用 tasks.task_manager_branch_set 把当前分支记为任务分支，再发消息。")
-    return before, recorded
+    return recorded
 
 
 async def _active_task(task_id: str) -> bool:
@@ -792,7 +862,7 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
             needs_you = needs_you or (ref != task_ref and not informs)
             entries.append((RefChange(display(ref), Change.UNREADABLE, old, new, None), {ref}, informs))
             continue
-        changed = _differs(before, after, ref)
+        changed = _differs(before, after, ref) or _spelled_retarget(before, after, ref)
         path = _chain(before, ref)
         linked = ref in before.symrefs or ref in before.hops
         # A hop outside branches and tags has no entry of its own: its move shows only through a link that reads it.
@@ -825,6 +895,9 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
         needs_you = needs_you or (ref != task_ref and not informs)
         entries.append((RefChange(display(ref), kind, old, new, None), {*path, *_chain(after, ref)}, informs))
     commands = _commands(before, after, [scope for _, scope, _ in entries], kept)
+    if before.window is not None and before.window.overlapped:
+        # Any of these changes may be the other turn's: a command would undo it.
+        commands = [(None, why or NotRestorable.OVERLAPPING_TURN) for _, why in commands]
     done = [replace(entry, restore=command, not_restorable=why)
             for (entry, _, _), (command, why) in zip(entries, commands)]
     # An information entry whose command also restores a change is listed with the changes.
@@ -856,6 +929,8 @@ async def end_turn(task: Mapping[str, Any], work_dir: str | Path, before: Snapsh
         await sink.event(TaskManagerEvent.SANDBOX_NOTICE, {"notice": REFS_UNREADABLE_NOTICE,
                                                           "detail": REFS_UNREADABLE_DETAIL, "message_id": message_id})
         raise
+    finally:
+        close_turn(task_id)
     if not report.worth_saying:
         return report
     report_id = None
