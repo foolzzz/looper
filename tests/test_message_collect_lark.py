@@ -138,7 +138,7 @@ def test_cancelled_call_kills_and_reaps_its_local_cli_process(tmp_path):
     async def check():
         task = asyncio.create_task(lark_cli.run([sys.executable, str(script), str(marker)]))
         for _ in range(200):
-            if marker.exists():
+            if marker.exists() and marker.read_text():  # the file exists before the id is in it
                 break
             await asyncio.sleep(0.01)
         assert marker.exists()
