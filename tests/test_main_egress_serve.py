@@ -68,7 +68,9 @@ sys.exit(main(['serve', '--host', '127.0.0.1', '--port', sys.argv[1], '--runtime
                 calls = ([json.loads(line) for line in lark_cli_stand_in.read_text().splitlines()]
                          if lark_cli_stand_in.exists() else [])
                 sent_autonomous = any("AUTONOMOUS_REPLY" in arg for call in calls for arg in call)
-                if rows and ((group and events) or sent_autonomous):
+                # The withheld row is inserted first; record_id is filled by the next statement.
+                linked = bool(events) and events[0]["record_id"] is not None
+                if rows and ((group and linked) or ((not group) and sent_autonomous)):
                     break
                 assert time.monotonic() < deadline, (tmp_path / "serve.log").read_text()[-10000:]
                 time.sleep(.1)
