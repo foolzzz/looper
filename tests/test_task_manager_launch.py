@@ -44,8 +44,8 @@ def test_operator_command_golden(tmp_path):
     assert content == task_manager_sandbox.settings_content(tmp_path, read_deny=deny)
     assert "hooks" not in content and "disableAllHooks" not in content
     root = os.path.realpath(tmp_path)
-    assert content["sandbox"]["filesystem"]["denyWrite"] == [f"{root}/.git/{part}" for part in
-                                                             ("hooks", "config", "info", "modules")]
+    assert content["sandbox"]["filesystem"]["denyWrite"] == [
+        f"{root}/.git/{part}" for part in ("hooks", "config", "info", "modules", "objects/info")]
     assert content["sandbox"]["filesystem"]["denyRead"] == list(deny)
     assert content["disableSkillShellExecution"] is True
     assert Path(settings_file).stat().st_mode & 0o777 == 0o600

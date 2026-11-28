@@ -40,7 +40,8 @@ def test_git_deny_write_is_absolute_under_the_real_path(tmp_path):
     real.mkdir()
     link.symlink_to(real)
     root = os.path.realpath(real)
-    assert sandbox.git_deny_write(link) == tuple(f"{root}/.git/{p}" for p in ("hooks", "config", "info", "modules"))
+    assert sandbox.git_deny_write(link) == tuple(
+        f"{root}/.git/{p}" for p in ("hooks", "config", "info", "modules", "objects/info"))
 
 
 def test_settings_content_holds_every_pinned_value_and_nothing_else(tmp_path):

@@ -803,6 +803,18 @@ def _no_cost_guard(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _own_task_end_listeners(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task-end listeners live in a module-level list that the server fills once at startup. A test that starts the
+    server in-process and does not reach its shutdown leaves a listener bound to a closed loop and pool; every task end
+    in a later test of the same worker then logged "a task-end listener failed". Each test gets its own empty list."""
+    task_rows = sys.modules.get("looper.db.tasks")
+    if task_rows is None:
+        return
+
+    monkeypatch.setattr(task_rows, "task_ended_listeners", [])
+
+
+@pytest.fixture(autouse=True)
 def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The runs going on now and their token windows belong to one test, not to earlier recorders in this worker."""
     live_runs = sys.modules.get("looper.agents.live_runs")
