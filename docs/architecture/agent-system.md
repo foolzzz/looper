@@ -3521,10 +3521,12 @@ Every run records the prompt in `llm_records.metadata`:
   first 32 KiB, with the text's `sha256`, the file's `bytes` and the
   `clipped_bytes`). Looper reads an injected file only from inside the
   repository (the work directory outside a repository;
-  `looper/agents/safe_read.py`): a link that resolves inside it, such as
-  `CLAUDE.md -> AGENTS.md`, is read, and a file left out is given to nobody
-  and recorded with `skipped` (`outside`, `symlink`, `hard_linked`,
-  `not_regular`, `too_large` or `io_error`) and the same in words as `error`.
+  `looper/agents/safe_read.py`), and follows a link only to a file with an
+  instruction file name: a link that resolves to a `CLAUDE.md` or `AGENTS.md`
+  inside it, such as `CLAUDE.md -> AGENTS.md`, is read. A file left out is
+  given to nobody and recorded with `skipped` (`outside`,
+  `not_an_instruction_file`, `symlink`, `hard_linked`, `not_regular`,
+  `too_large` or `io_error`) and the same in words as `error`.
   A run's history shows them as the prompt layers' "Instructions" row.
 
 The same inputs give the same prompt and hash; changing the harness, the role
