@@ -4972,6 +4972,29 @@ evaluation is required before the original schedule requirement is complete.
   an alert/recovery for a `deliverable` schedule, a removed target, or no sender).
   Pre-send refusals retain their reason in `error`; only messages handed to
   the sender are recorded as `sent` or `failed`.
+  A chat send the channel refuses (nothing was sent) is kept in
+  `schedule_notice_retries`, one row per schedule, kind and run (`run_key` is
+  empty when the notice has no run, so a stale alert still dedupes). It is
+  tried again up to 3 times, after 1, then 5, then 15 minutes. The row is
+  claimed (`sending`) before the send, so a second pass or a restart does not
+  send it twice. A send that raises, or that the channel reports as unknown,
+  is `uncertain` and is never sent again; a restart settles a claim still
+  `sending` to `uncertain` because the server stopped while it was sending.
+  After 3 refused retries the row is `gave_up`. A successful first send leaves
+  no retry row; a successful later try stays `sent`. While the server is
+  draining, due retries wait. If the schedule is gone, no longer notifies, has
+  no target, keeps the alert on the dashboard, or the chat is off the
+  allowlist, the retry is `gave_up` without another send. Dashboard-only
+  notices are not retried. `proactive_deliveries`
+  records a push decision and does not resend, and `schedule_notifications`
+  stays an append-only outbox, so neither table is the claim.
+  A failure recovery whose failure alert is still `pending` or `gave_up`
+  (never delivered) adds one line:
+  `补充：<local time> 的失败告警没有送达，涉及连续 <n> 次运行。`
+  An alert that is `uncertain` says `可能没有送达` instead. That alert is not
+  sent on its own after the recovery names it. A recovery that itself fails
+  is retried with the same line. The line is omitted when the alert was
+  delivered, and other recovery texts are unchanged.
 - **Deleting.** A project with schedules is not deleted (409) until they are.
   Deleting a schedule (the project's Schedules tab, the Schedules page, the
   schedule's page, `POST /api/v1/schedule_admin/delete` with `schedule_id`, the Manager's
@@ -9255,6 +9278,7 @@ PostgreSQL is a hard startup dependency. All data paths:
 | `schedule_task_limits` | A schedule's `task_limits`: per role (`worker`, `reviewer`), `max_concurrency` (1–64), copied into each task it fires (`task_concurrency_limits`); going with its schedule |
 | `schedule_runs` | Each firing of a schedule: `scheduled_for`, `fired_at`, `trigger` (`scheduled`, `catch_up`, `manual`), `missed`, `status` (`queued`, `gating`, `running`, then once `completed`, `failed`, `stopped`, `cancelled`, `timed_out`, `gate_failed`, or `skipped_overlap`, `skipped_missed`, `skipped_gate`, `skipped_budget`, `skipped_busy`), `task_id` (null when skipped, or once the task is deleted), `summary`, `cost_usd`, `error`, `gate_output`, `run_timeout_seconds` (the timeout it started with; null: none), `carried_from` (the latest run whose unfinished input it was given), `carried_on` (its own unfinished input was handed on to a later run), `finished_at`, `firings` (how many firings it stands for: a repeated skip is counted on one run, from `scheduled_for` to `finished_at`); going with its schedule |
 | `schedule_notifications` | Every message about a schedule: `run_id`, `kind` (`run`, `failures_alert`, `failures_recovered`, `stale_alert`, `stale_recovered`), `channel`, `chat`, `text`, `status` (`sent`, `failed`, `dashboard`), `error`, `manager_event_id` (the completion event that told a run's message: the Manager's reply or its fallback; NULL otherwise; a partial index, built online on an existing database); going with its schedule |
+| `schedule_notice_retries` | A chat send of a schedule notice that was not confirmed: `schedule_id`, `kind`, `run_id` (null for a stale alert; `run_key` is `''` then, and the unique key), `state` (`pending`, claim `sending`, then `sent`, `uncertain` or `gave_up`), `retries` (at most 3, backoff 1 then 5 then 15 minutes), `next_attempt_at`, `error`, `failures` (consecutive failures on a failure alert), `text`, `channel`, `chat`, `reported_at` (set when a failure recovery that names this alert was sent or may have been), `summary_of` (the failure alerts that recovery's text names), `created_at` (the scheduler clock); goes with its schedule. A restart settles `sending` to `uncertain` and does not send it again |
 | `system_settings` | Settings shared by the whole system, one value per key (no row = the built-in default), such as the last library import's report and the scheduler's `scheduler.min_interval_seconds` and `scheduler.run_timeout_seconds` |
 | `library_items` | The capability catalog: kind, name, `origin` (`machine`, `upload`, `git`, `ui` or `project`), `modified`, `owner_project_id` (a project-authored item; goes with its project), `description`, source label, declared version, `sha256` of the files, size, file count, `imported_at`, `skill_version` (the current project-skill version; null when the item has none) |
 | `library_files` | Each catalog item's files: relative path, UTF-8 content, sha256, executable bit |
