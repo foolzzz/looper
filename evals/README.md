@@ -2144,10 +2144,10 @@ operator's environment (locale, terminal, proxy and certificate settings; no ssh
 each case has its own runtime root, database and port. With `oauth` and `api-key` they also get a throwaway `HOME` and
 `CLAUDE_CONFIG_DIR` holding fixed synthetic settings, and the chosen credential; its value is never written to a case,
 log, report or ledger. `--claude-bin` is required and must be the real executable (not a terminal shim) at the version
-the task Manager launches (`2.1.332`). Budget: `--total-cap-usd`,
+the task Manager launches (`2.1.332`). Budget: `--total-cap-usd` (default 23.50 with `operator-login`),
 `--case-budget-usd` (Sonnet cases) and `--opus-case-budget-usd` are required and finite; `--opus-cap-usd` (default 6)
-bounds all Opus spend. The selected runs' budgets are reserved up front against the cap, and a case that could exceed
-what is left (the ledger included) is not started. `--ledger` keeps the spend between commands (default
+bounds all Opus spend. The selected runs' budgets (except the `operator-login` re-run list, below) are reserved up
+front against the cap, and a case that could exceed what is left (the ledger included) is not started. `--ledger` keeps the spend between commands (default
 `OUT_DIR/ledger.jsonl`): a reservation row is written before each case and replaced by the actual spend afterwards,
 and a case that is interrupted or errors keeps its whole reservation, so a new process cannot reset the cap. Each Claude process also gets
 `--max-budget-usd` of the case budget, and a case stops after a turn that reaches it; calls in flight can overshoot.
@@ -2246,16 +2246,18 @@ pass says nothing about paths that are not on the deny list.
   do not prove equal configurations. `--compare-runs A.json B.json` prints both runs' outcomes and exits 1 with
   `not directly comparable` when a hash or the version differs or is unreadable, a configuration changed mid-run, or
   only one run used your configuration.
-- **Order.** A case is typed: `hostile` and `needs_synthetic_home`, both true for a new case until it says otherwise.
-  First the cases that are not hostile (`direct_edit_brief`, `stop_continue`, `fresh_session_excerpt`,
-  `readonly_resume`, `opus_switch` and the six `edit_*` cases; direct launches first), every repetition of them. Only
-  when all of those selected pass, and at least one direct launch of a turn that ran to its end was read back, do the
-  others start (`foreign_task_refused`; `readonly_progress`, whose requirement holds an injected instruction;
-  `project_instructions_hostile` and `branch_kept_against_convention`, whose `AGENTS.md` asks for something the session
-  must not do). Otherwise they
-  report `not_runnable` (`stage_gate`). Selecting one of them without a non-hostile direct case is refused. A model's
-  failed check in the first stage therefore holds the hostile cases back. The gate works within one command; the
-  commands below put the Opus case in a command of its own that must pass before the other starts.
+- **Repetitions and order.** A case is typed: `hostile` and `needs_synthetic_home`, both true for a new case until it
+  says otherwise, and `rerun_only`. In this mode a hostile case runs twice and every other case once, as the
+  definitions say; `--reps` is refused. One command runs, in this order: `opus_switch`; the other cases that are not
+  hostile (`direct_edit_brief`, `stop_continue`, `fresh_session_excerpt`, the `edit_*` cases that are not deferred,
+  then `readonly_resume`: direct launches first); the hostile ones (`readonly_progress`, whose requirement holds an
+  injected instruction; `foreign_task_refused`; `project_instructions_hostile` and `branch_kept_against_convention`,
+  whose `AGENTS.md` asks for something the session must not do); and last the re-run list
+  (`edit_large_file_local`, `edit_retry_after_mismatch`). Each of these four groups starts only when every run before
+  it passed, and the hostile ones also need at least one direct launch of a turn that ran to its end to have been
+  read back. Otherwise the held-back cases report `not_runnable` (`stage_gate`), those of the re-run list `skipped`
+  (`stage_gate`). Selecting a hostile case without a non-hostile direct case is refused, and so is selecting only
+  re-run cases. A model's failed check therefore holds back everything after its group.
 - **Abort.** A refused turn (Looper's readback found a mismatch, or any other launch refusal), or a launch that skips
   permission prompts without the sandbox on and the `denyRead` list holding your SSH, keychain, Claude and Looper
   paths, stops the whole run (`incomplete`, `aborted`). The launches are checked after every turn and again when a
@@ -2273,44 +2275,47 @@ pass says nothing about paths that are not on the deny list.
 - The scripted `bad` and `lie` behaviors are refused. `--mode fake --credential operator-login` rehearses the order
   and the checks for free (it starts no real CLI, so no probe).
 
-What every case this mode can start would reserve on a ledger, from the case definitions (Opus once, each Sonnet
-case twice; a real run prints the table of its own selection before it starts):
+What the documented command reserves, from the case definitions (a real run prints the tables of its own
+selection before it starts). Before any CLI starts, the run reserves every selected case except the re-run list on
+top of what the ledger already holds, and refuses to start when that exceeds `--total-cap-usd` (default 23.50 in this
+mode; `--opus-cap-usd` applies too):
 
 | case | model | repetitions | reserved per run (USD) | subtotal (USD) |
 |---|---|---|---|---|
 | `opus_switch` | opus | 1 | 3.00 | 3.00 |
-| `direct_edit_brief` | sonnet | 2 | 1.25 | 2.50 |
-| `stop_continue` | sonnet | 2 | 1.25 | 2.50 |
+| `direct_edit_brief` | sonnet | 1 | 1.25 | 1.25 |
+| `stop_continue` | sonnet | 1 | 1.25 | 1.25 |
+| `fresh_session_excerpt` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_multi_file` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_multi_file_bash` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_large_file_local_bash` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_retry_after_mismatch_bash` | sonnet | 1 | 1.25 | 1.25 |
+| `readonly_resume` | sonnet | 1 | 1.25 | 1.25 |
 | `readonly_progress` | sonnet | 2 | 1.25 | 2.50 |
 | `foreign_task_refused` | sonnet | 2 | 1.25 | 2.50 |
-| `fresh_session_excerpt` | sonnet | 2 | 1.25 | 2.50 |
-| `readonly_resume` | sonnet | 2 | 1.25 | 2.50 |
 | `project_instructions_hostile` | sonnet | 2 | 1.25 | 2.50 |
 | `branch_kept_against_convention` | sonnet | 2 | 1.25 | 2.50 |
-| `edit_multi_file` | sonnet | 2 | 1.25 | 2.50 |
-| `edit_large_file_local` | sonnet | 2 | 1.25 | 2.50 |
-| `edit_retry_after_mismatch` | sonnet | 2 | 1.25 | 2.50 |
-| `edit_multi_file_bash` | sonnet | 2 | 1.25 | 2.50 |
-| `edit_large_file_local_bash` | sonnet | 2 | 1.25 | 2.50 |
-| `edit_retry_after_mismatch_bash` | sonnet | 2 | 1.25 | 2.50 |
-| total | | | | 38.00 |
+| total | | | | 23.00 |
 
-**The total, 38.00 USD, is above the approved ceiling of 23.50 USD: do not start all of these cases in one
-approval.** The two commands below select the first seven rows only and reserve 18.00 USD; the other eight rows
-(`project_instructions_hostile`, `branch_kept_against_convention` and the six `edit_*` cases, 20.00 USD) are in
-neither command and need their own approval. `read_deny_live` is not in the table: it is `not_runnable` here. A
-real run refuses to start when what it reserves, on top of the ledger, exceeds `--total-cap-usd`.
+The re-run list counts against the same cap but is not part of that first reservation. Each of its runs reserves its
+budget at its own start against what is left (the ledger holds what the earlier runs actually spent) and is reported
+`skipped` (`over_cap`) when it does not fit: not a failure, though a report with a skipped case is `incomplete`.
+
+| case | model | repetitions | reserved per run (USD) | subtotal (USD) |
+|---|---|---|---|---|
+| `edit_large_file_local` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_retry_after_mismatch` | sonnet | 1 | 1.25 | 1.25 |
+| total | | | | 2.50 |
+
+`read_deny_live` is in neither table: it is `not_runnable` here.
 
 ```bash
-# proposed, needs approval: the non-hostile Opus case first; only if it passes, the Sonnet cases on the same ledger
+# proposed, needs approval: one command; the run orders and gates the cases itself
 uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
   --mode real --credential operator-login --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" \
-  --cases opus_switch --opus-case-budget-usd 3 --total-cap-usd 3 --ledger "$EVAL_OUT/ledger.jsonl" \
-  --out-dir "$EVAL_OUT/task-manager-opus" &&
-uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
-  --mode real --credential operator-login --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" \
-  --cases direct_edit_brief,stop_continue,readonly_progress,foreign_task_refused,fresh_session_excerpt,readonly_resume \
-  --reps 2 --case-budget-usd 1.25 --total-cap-usd 18 --ledger "$EVAL_OUT/ledger.jsonl" --out-dir "$EVAL_OUT/task-manager-sonnet"
+  --cases opus_switch,direct_edit_brief,stop_continue,fresh_session_excerpt,edit_multi_file,edit_multi_file_bash,edit_large_file_local_bash,edit_retry_after_mismatch_bash,readonly_resume,readonly_progress,foreign_task_refused,project_instructions_hostile,branch_kept_against_convention,edit_large_file_local,edit_retry_after_mismatch \
+  --opus-case-budget-usd 3 --case-budget-usd 1.25 --ledger "$EVAL_OUT/ledger.jsonl" \
+  --out-dir "$EVAL_OUT/task-manager-operator-login"
 ```
 
 The stand-in is a positive and negative control for the judges, not evidence about a model. Besides `ok`, it has
