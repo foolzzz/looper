@@ -26,7 +26,15 @@ Every git command Looper runs in a task, step or worktree directory goes through
 * ``check_repository`` refuses, with ``RepositoryRefused``, a directory whose ``.git`` points somewhere that does
   not point back (another repository, a ``core.worktree`` elsewhere, a ``gitdir:`` link that is not a linked
   worktree's or a submodule's), so the checks above are made on the repository the directory claims to be.
+* ``check_repository`` also refuses a repository (or a checked-out submodule) whose ref storage holds a symbolic
+  link (``ref_links``): git would read, write and delete refs through it, outside the repository. This part is never
+  remembered: every call walks the ref storage again, so every command ``run`` and ``spawn`` start is preceded by it,
+  inside ``cached()`` too.
 
+**Known race limits.** A check and the command it precedes are not atomic: a process writing the repository at the same
+time can put a link in place after the walk, and git follows it. A direct task Manager session checks again before and
+after each turn, while it holds the directory's lock. In orchestrated mode this risk remains: the Worker is not
+sandboxed and can already read and write such files itself, but what git then prints could still reach Looper's records.
 The drivers are found before the command runs, so an agent that writes a definition in between is not stopped
 (the fixed overrides, which do not depend on the repository, are). ``cached`` reuses one check for a directory
 inside a block, for an operation that runs many commands and has no agent running meanwhile.
@@ -50,9 +58,11 @@ import subprocess
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import ref_links
 
 # Each setting names a program or a place one is read from; the command line beats every configuration file,
 # so the repository's value never applies.
@@ -67,6 +77,8 @@ OVERRIDES = (
     "core.useReplaceRefs=false",
 )
 PREFLIGHT_TIMEOUT_SEC = 10
+# The ``RepositoryRefused`` reasons about the ref storage; their ``path`` names the place inside the repository.
+REF_REASONS = ("ref_symlink", "ref_unchecked")
 logger = logging.getLogger(__name__)
 
 # What reaches git. Where programs and the user's files are (PATH, HOME, USER, LOGNAME), temporary files (TMPDIR),
@@ -100,13 +112,16 @@ class RepositoryRefused(subprocess.SubprocessError):
 
     ``reason`` is ``attributes_driver`` (``info/attributes`` assigns a driver), ``git_dir_mismatch`` (the ``.git``
     does not belong to this directory), ``outside_worktree`` (the directory is not inside the work tree git
-    reports) or ``object_alternates`` (``objects/info/alternates`` or ``http-alternates`` is not empty).
+    reports), ``object_alternates`` (``objects/info/alternates`` or ``http-alternates`` is not empty),
+    ``ref_symlink`` (the ref storage holds a symbolic link) or ``ref_unchecked`` (a part of it could not be listed).
+    For the last two, ``path`` names the place (``.git/refs/heads/x``), never what a link points at.
     """
 
-    def __init__(self, reason: str, directory: str | Path, detail: str):
+    def __init__(self, reason: str, directory: str | Path, detail: str, *, path: str | None = None):
         super().__init__(f"git is not run in {directory}: {detail}")
         self.reason = reason
         self.directory = str(directory)
+        self.path = path
 
 
 def environment(extra: Mapping[str, str] | None = None, *, environ: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -317,9 +332,50 @@ def _refuse_attributes(directory: str | Path, text: str) -> None:
 
 @dataclass(frozen=True)
 class Inspection:
-    """What ``check_repository`` found: the ``-c`` settings that replace the repository's own driver definitions."""
+    """What ``check_repository`` found: the ``-c`` settings that replace the repository's own driver definitions, and
+    where the ref storage it walks on every call is."""
 
     overrides: tuple[str, ...] = ()
+    top: str | None = field(default=None, compare=False)
+    git_dir: str = field(default="", compare=False)
+    common: str = field(default="", compare=False)
+    modules: tuple[Path, ...] = field(default=(), compare=False)  # every gitlink, checked out or not
+
+
+def _ref_directories(directory: str | Path, found: Inspection) -> Iterator[tuple[str, str]]:
+    """Each git directory whose ref storage git may use for ``found``, with the name its places are reported under:
+    the repository's own, and those of its checked-out submodules. A linked worktree's entry is walked as part of the
+    repository that holds it."""
+    def places(git_dir: str, common: str) -> tuple[str, ...]:
+        covered = os.path.dirname(git_dir) == os.path.join(common, "worktrees")
+        return (common,) if covered or git_dir == common else (common, git_dir)
+
+    for place in places(found.git_dir, found.common):
+        yield place, ".git"
+    for module in found.modules:
+        if not module.joinpath(".git").exists():
+            continue
+        git_dir = _real(_git_dir_of(module))
+        for place in places(git_dir, str(_common_dir_of(Path(git_dir)))):
+            if place.startswith(found.common + os.sep):
+                yield place, f".git/{os.path.relpath(place, found.common)}"
+            else:
+                yield place, f"{os.path.relpath(module, found.top or directory)}/.git"
+
+
+def _refuse_ref_links(directory: str | Path, found: Inspection) -> None:
+    """Refuse when the ref storage holds a symbolic link, or a part of it cannot be checked. Reads the file system
+    every time it is called."""
+    for git_dir, label in _ref_directories(directory, found):
+        finding = ref_links.find(git_dir, label)
+        if finding is None:
+            continue
+        if finding.link:
+            raise RepositoryRefused("ref_symlink", directory,
+                                    f"{finding.path} is a symbolic link, which git would follow out of the repository "
+                                    "(replace it with a real file or directory)", path=finding.path)
+        raise RepositoryRefused("ref_unchecked", directory,
+                                f"{finding.path} could not be checked for symbolic links", path=finding.path)
 
 
 def _overrides(output: str) -> tuple[str, ...]:
@@ -451,6 +507,16 @@ def check_repository(directory: str | Path, *, layout: bool = True) -> Inspectio
     """What git_safe found in the repository ``directory`` is in, or None outside one.
     Raises ``RepositoryRefused``. Blocking: from async code use ``check_repository_async``.
 
+    The ref storage is walked on every call, whatever else is reused (``_refuse_ref_links``)."""
+    found = _inspect(directory, layout)
+    if found is not None:
+        _refuse_ref_links(directory, found)
+    return found
+
+
+def _inspect(directory: str | Path, layout: bool) -> Inspection | None:
+    """The part of ``check_repository`` that may be reused.
+
     An answer is remembered (up to ``MEMO_SECONDS``) while the files it read are unchanged (``_signature``): a
     configuration that includes other files is never remembered, and any change to a ``.git``, a configuration,
     ``info/attributes``, the index, an alternates file or a submodule's, gives a fresh check."""
@@ -466,7 +532,7 @@ def check_repository(directory: str | Path, *, layout: bool = True) -> Inspectio
         if inside:
             before = _signature(directory, top, git_dir, common, None)
             text, links = _drivers(top if top is not None else directory)
-            found = Inspection(_overrides(text))
+            found = Inspection(_overrides(text), top, git_dir, common, tuple(links))
             args = (top, git_dir, common, tuple(links))
             # Only what was read unchanged since before the probes is remembered.
             if before is not None and _signature(directory, top, git_dir, common, None) == before:
