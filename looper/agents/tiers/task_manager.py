@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import os
-import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -20,7 +19,7 @@ from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
 from .. import (task_manager_alerts, task_manager_denials, task_manager_dirs, task_manager_edit,
                 task_manager_network, task_manager_project_instructions, task_manager_readback, task_manager_refs,
-                task_manager_safety, task_manager_sandbox, task_manager_settings)
+                task_manager_safety, task_manager_sandbox, task_manager_settings, task_manager_tmpdir)
 from .. import task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
@@ -93,6 +92,7 @@ class RefuseReason(str, Enum):
     WORKTREE_UNSUPPORTED = "worktree_unsupported"
     HEAD_MOVED = "head_moved"
     HEAD_DETACHED = "head_detached"
+    PRIVATE_TMPDIR_UNUSABLE = "private_tmpdir_unusable"
 
 
 def _off_text(reason: RefuseReason) -> str:
@@ -164,6 +164,9 @@ class _TaskResident(ResidentClaude):
             lock, self.owner.dir_lock = self.owner.dir_lock, None
             if lock is not None:
                 lock.release()
+            tmp, self.owner.tmpdir = self.owner.tmpdir, None
+            if tmp is not None:
+                await asyncio.shield(asyncio.to_thread(tmp.remove))
 
 
 @dataclass(frozen=True)
@@ -297,14 +300,39 @@ class TaskManagerAgent:
         self.started_for_turn: Literal["launch", "resume"] | None = None  # what the turn's ``prepare`` started
         self.work_dir = ""
         self.dir_lock: task_manager_dirs.DirectoryLock | None = None
+        # The running direct launch's private temporary directory: the one source of ``CLAUDE_CODE_TMPDIR`` for the
+        # process environment and for the readback's expected write set.
+        self.tmpdir: task_manager_tmpdir.PrivateTmpdir | None = None
         # The project instruction files the last direct launch could not read, and the set last reported to the user.
         self.instructions_skipped: tuple[task_manager_project_instructions.Skipped, ...] = ()
         self.instructions_notified: frozenset[tuple[str, str]] = frozenset()
 
+    def _cli_environment(self, launch: Launch) -> dict[str, str]:
+        """The CLI's environment, with the running direct launch's temporary directory once it has one."""
+        env = launch.runtime.environment(launch)
+        if self.tmpdir is not None:
+            env[task_manager_tmpdir.ENV_NAME] = self.tmpdir.path
+        return env
+
+    def _writes_allowed(self, env: Mapping[str, str]) -> frozenset[str]:
+        return task_manager_readback.writes_allowed(
+            env.get("HOME") or str(Path.home()), os.getuid(), env.get(task_manager_tmpdir.ENV_NAME), self.read_deny)
+
+    def _process_environment(self, launch: Launch, work_dir: str) -> dict[str, str]:
+        direct = self.mode == "direct"
+        env = task_manager_safety.environment(
+            launch, self.task_id, drop=task_manager_sandbox.dropped_env(launch) if direct else (),
+            edit_dir=self._edit_dir(launch, work_dir) if direct else None)
+        if direct and self.tmpdir is not None:
+            env[task_manager_tmpdir.ENV_NAME] = self.tmpdir.path
+        return env
+
     def _edit_dir(self, launch: Launch, work_dir: str) -> Path:
         """The private looper-edit directory for a direct launch; never where the sandbox writes or cannot read."""
-        cli = launch.runtime.environment(launch)
-        return task_manager_edit.edit_bin(cli, forbidden=(work_dir, cli.get("TMPDIR") or tempfile.gettempdir(), *self.read_deny))
+        cli = self._cli_environment(launch)
+        # The sandbox's write set: ``.`` is the task directory, the device files are no directories.
+        writable = sorted(self._writes_allowed(cli) - {".", *task_manager_sandbox.DEVICE_WRITE_PATHS})
+        return task_manager_edit.edit_bin(cli, forbidden=(work_dir, *writable, *self.read_deny))
 
     async def _notice_skipped(self, sink: TurnSink, message_id: str) -> None:
         """Tell the user which project instruction files were not read, when that set changes; never in a model's input."""
@@ -457,9 +485,8 @@ class TaskManagerAgent:
                                                                    prompt_file=prompt_file, launch=launch))
 
         command = command_for(launch)
-        env = task_manager_safety.environment(
-            launch, self.task_id, drop=task_manager_sandbox.dropped_env(launch) if direct else (),
-            edit_dir=self._edit_dir(launch, reopened.work_dir) if direct else None)
+        # Fails a bad edit directory before any running process is replaced.
+        env = self._process_environment(launch, reopened.work_dir)
         # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
         # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
@@ -486,14 +513,19 @@ class TaskManagerAgent:
                     await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(
-                    launch, self.task_id, drop=task_manager_sandbox.dropped_env(launch) if direct else (),
-                    edit_dir=self._edit_dir(launch, reopened.work_dir) if direct else None)
+                if direct:  # removed by ``_TaskResident.stop``, which every way a session ends goes through
+                    try:
+                        self.tmpdir = task_manager_tmpdir.create()
+                    except task_manager_tmpdir.Unusable as exc:
+                        task_manager_safety.record_refusal(task_manager_safety.Reason.PRIVATE_TMPDIR_UNUSABLE, phase)
+                        await self.resident.stop(kill=True)
+                        raise Refused(RefuseReason.PRIVATE_TMPDIR_UNUSABLE, str(exc)) from exc
+                env = self._process_environment(launch, reopened.work_dir)
                 if direct and (warning := task_manager_sandbox.credential_warning(env)):
                     logger.warning("task Manager %s: %s", self.task_id, warning)
                 settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
-                    problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
+                    problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=self._cli_environment(launch),
                         phase=phase, settings_file=Path(settings_file), review_hook=False)
                     if problem is not None:
                         await self.resident.stop(kill=True)
@@ -526,15 +558,19 @@ class TaskManagerAgent:
         if self.mode != "direct":
             return
         phase = self.started_for_turn or "turn"
-        env = launch.runtime.environment(launch)
+        env = self._cli_environment(launch)
+        if self.tmpdir is None:  # a direct process is only ever started with one
+            raise RuntimeError("the direct session has no private temporary directory")
         work_dir = Path(reopened.work_dir)
+        shared = task_manager_sandbox.shared_write_roots(env)
         private_dir = (self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd").resolve()  # as launch wrapped it
         expected = task_manager_readback.Expected(
             private_dir=private_dir,
-            pins=task_manager_sandbox.pins(work_dir, allowed_domains=self.allowed_domains, read_deny=self.read_deny),
+            pins=task_manager_sandbox.pins(work_dir, allowed_domains=self.allowed_domains, read_deny=self.read_deny,
+                                           write_deny=shared),
             fs_allow_write=frozenset(),
-            writes_allowed=task_manager_readback.writes_allowed(
-                env.get("HOME") or str(Path.home()), os.getuid(), env.get("CLAUDE_CODE_TMPDIR"), self.read_deny),
+            writes_allowed=self._writes_allowed(env),
+            temp_root=self.tmpdir.write_root, shared_writes=frozenset(shared), uid=os.getuid(),
             mcp=task_manager_readback.expected_mcp(library_mcp_servers(launch.library), private_dir),
             known_tools=task_manager_readback.KNOWN_BUILTIN_TOOLS[task_manager_safety.VERIFIED_CLI_VERSION])
         self.init_tools = None
@@ -577,6 +613,8 @@ class TaskManagerAgent:
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
         await self._verify(launch, reopened)
+        # A worktree task never gets here in direct mode: ``task_manager_dirs.check`` refuses it before any launch
+        # (``worktree_unsupported``), so the worktree conditions below are unreachable guards in v1.
         # An in-place direct session writes the real checkout: record its branches and tags and settle the task branch
         # (a detached or moved HEAD refuses here, before the message is admitted).
         refs_before, task_branch = ((await task_manager_refs.begin_turn(task, reopened.work_dir, sink=request.sink, phase="turn"))

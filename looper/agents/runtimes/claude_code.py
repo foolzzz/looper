@@ -432,7 +432,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
 
     def operator_resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path,
                                   launch: Launch, settings_dir: Path, allowed_domains: Sequence[str] = (),
-                                  read_deny: Sequence[str] = ()) -> list[str]:
+                                  read_deny: Sequence[str] = (),
+                                  write_deny: Sequence[str] | None = None) -> list[str]:
         """A task Manager's direct session: the operator's user-level settings and memory (not the task directory's;
         ``Skill`` is not an allowlisted tool), inside Claude Code's Bash sandbox with every loosening key pinned (``task_manager_sandbox``).
         Its MCP servers are only the ``--mcp-config`` file's. The fixed items never come from ``launch``."""
@@ -442,6 +443,8 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         if launch.tool_hook is not None:
             raise ValueError("a direct session carries no Looper hook: the sandbox is its boundary")
         provider = launch.profile.provider
+        if write_deny is None:
+            write_deny = task_manager_sandbox.shared_write_roots(self.environment(launch))
         return [
             executable, "--print", "--verbose", "--output-format", "stream-json",
             "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages",
@@ -451,7 +454,7 @@ class ClaudeCodeRuntime(RuntimeAdapter):
             # F7 (no project or local settings layer) and F9 (the built-in tool allowlist).
             *task_manager_sandbox.launch_args(),
             *operator_settings_args(settings_dir, task_manager_sandbox.settings_content(
-                Path(cwd), allowed_domains=allowed_domains, read_deny=read_deny)),
+                Path(cwd), allowed_domains=allowed_domains, read_deny=read_deny, write_deny=write_deny)),
             *system_prompt_args(prompt_file), *permission_args(), *peer_args(False),
             "--model", launch.model, *(["--effort", launch.effort] if launch.effort else []),
             *(["--mcp-config", launch.library.mcp_config] if launch.library.mcp_config else []),
