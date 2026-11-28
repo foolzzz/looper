@@ -46,7 +46,7 @@ SUMMARY = _object({"enabled": _BOOL, "window_days": _INT,
     closed=True)
 SUMMARY["properties"]["work_mode"] = _object({"task_manager_launch_refusals_total": _array(_object({
     "reason": {"enum": ["review_hook_disabled", "cli_unverified",
-        "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"]},
+        "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached", "ref_symlink"]},
     "phase": {"enum": ["launch", "resume", "turn"]}, "cli_version": _STR, "count": _INT}, closed=True)),
     # One count per sandbox denial the task Manager saw; the host is never a dimension.
     "task_manager_sandbox_denials_total": _array(_object({

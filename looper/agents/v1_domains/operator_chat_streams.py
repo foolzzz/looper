@@ -68,7 +68,7 @@ SCHEMAS = {
         _object({"kind": {"const": "refused"}, "reason": {"enum": [
             "work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace",
             "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved",
-            "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"]}}, closed=True),
+            "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached", "ref_symlink"]}}, closed=True),
     ]},
     "OperatorChatMessage": _object({"message_id": _STR, "role": {"const": "assistant"},
         "content": _STR, "created_at": _STR}, closed=True),

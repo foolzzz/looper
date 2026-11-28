@@ -1086,6 +1086,11 @@ them.
   repository is refused before the session starts (see Directory checks below).
   `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
   Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
+  A turn also gets the full walk for links in the git directory (above) before anything else runs in the directory
+  and again when it ends. A hit refuses the turn (`ref_symlink`; the other `ref_` reasons are refused as `workspace`), names
+  only the path inside `.git`, and lists it in the needs-you section `task_manager_refs` (one unresolved row per
+  task and path). After a turn, a hit keeps the reply and ends the turn as refused, with no turn summary and no
+  ref report; context maintenance is skipped for that turn.
 
 **Project instructions and editing.** A direct session's fixed instructions
 (`task_manager_brief.instructions`) say what its sandbox allows: Bash is its only built-in
@@ -4546,6 +4551,54 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   the history as stored. Lazy fetches from a promisor remote are off
   (`GIT_NO_LAZY_FETCH=1`): in a partial clone, objects not yet fetched are
   reported missing by Looper's git calls instead of being fetched.
+  The helper also refuses a repository whose git directory holds a symbolic
+  link or a hard link where git reads refs or its own files, or a symbolic ref
+  that points outside `refs/` (`ref_symlink`, `ref_hardlink`,
+  `ref_symref_target`, `looper/agents/ref_links.py`; a root ref such as
+  `ORIG_HEAD` is also an allowed target, and `objects/` is checked as an entry
+  only); a place it cannot look at, or deeper than 64 directories, is refused
+  as `ref_unchecked`. The message names the path inside the repository, never
+  what a link or a symbolic ref points at. This refuses workspaces that
+  share parts of `.git` through links (`git-new-workdir` and similar layouts, a
+  linked `.git/hooks` directory, or an old `core.preferSymlinkRefs` `HEAD`).
+  Nothing is cached, inside `cached()` either. Two checks:
+  - **Before every command**, for the git directory and the common directory
+    (and those of each checked-out submodule): every entry at the top and in
+    `info/` (`objects` and `hooks` as entries only), the whole `refs` and
+    `reftable` trees, for each entry of `worktrees/` the entry itself and its
+    `HEAD`, `refs`, `logs`, `gitdir` and `commondir`, and the `logs`,
+    `logs/HEAD` and `logs/refs` entries. The root refs and the files under
+    `refs` are read for a symbolic ref's target; the `HEAD` of each entry of
+    `worktrees/` only for a command that can read other worktrees (one that can
+    write refs, `worktree`, `--all`, or an argument naming `worktrees/`). A
+    command that can write refs also has this worktree's whole `logs` tree
+    checked, and every component of the shared reflogs of `HEAD`'s branch and of the refs its arguments may name
+    (all of them for `fetch`, `pull`, `remote` and `--stdin`).
+  - **The full walk** adds the whole `logs` trees and each linked worktree's
+    root refs, `refs`, `logs` and `reftable`. It runs at the start and end of a
+    direct turn and of each Worker step, before a command that reads reflogs
+    (an argument containing `@{`, `-g`, `--reflog`, `--walk-reflogs`, `reflog`
+    or `stash`), and when the process first judges a repository (and again,
+    after a refusal, until a walk passes).
+
+  A Worker step whose directory is refused at its start does not run; one
+  refused at its end fails. Both checks grow with the number of directories
+  under `refs` and `logs`, and the one before a command also with the number of
+  linked worktrees: tens of milliseconds for a few hundred ref directories on a
+  system where opening a directory is slow (macOS with endpoint security), and
+  several times that for the full walk. Graft files are ignored
+  (`GIT_GRAFT_FILE=/dev/null`). **Known race limit:** a check and the command
+  are not atomic, so a process that writes the repository at the same moment can
+  add a link or such a symbolic ref after the check. One placed deeper under
+  `logs`, or among another worktree's own refs and root pseudo-refs, between two full walks is
+  found at the next full walk or at the next command that writes that reflog;
+  reading commands in between do not go through it (revisions passed on
+  standard input do not trigger the full walk), and no command Looper runs reads
+  another worktree's root pseudo-refs (`ORIG_HEAD`, ...). A direct session
+  checks before and after each turn under the directory lock. In orchestrated
+  mode the risk remains: the Worker is not sandboxed and can already read such
+  files itself, but what a git command that succeeds then prints could still
+  reach Looper's records (a failed command's output does not, below).
   `tests/test_git_safe.py` fails on a direct `git` call elsewhere
   in `looper/`, except for Looper's own checkout, a fresh clone, and the
   knowledge vault, each listed there with its reason.
