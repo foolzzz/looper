@@ -457,11 +457,11 @@ def _probe_chains(git_dir: str, common: str, names: Iterable[str], files: _Files
     queue, seen = deque(names), set()
     while queue:
         name = queue.popleft()
-        if name in seen or name == "HEAD":
+        if name in seen or name == "HEAD" or _within(name, files.unreadable):
             continue
         seen.add(name)
         in_refs = name.startswith("refs/")
-        if in_refs and not _is_ref_name(name):
+        if in_refs and {"", ".", ".."} & set(name.split("/")):  # not a path below the git directory
             files.unreadable[name] = "not_a_ref_name"
             continue
         if not in_refs and not _ROOT_REF.fullmatch(name):
@@ -471,7 +471,9 @@ def _probe_chains(git_dir: str, common: str, names: Iterable[str], files: _Files
         try:
             with safe_read.open_directory(base, parts) as directory:
                 if isinstance(directory, safe_read.Skipped):
-                    files.unreadable[name] = directory.reason.value
+                    # A regular file where a directory would be: there is no such ref (a reftable repository's HEAD).
+                    if not any(_is_plain_file(base, "/".join(parts[:end])) for end in range(1, len(parts) + 1)):
+                        files.unreadable[name] = directory.reason.value
                     continue
                 if stat.S_ISDIR(os.stat(leaf, dir_fd=directory, follow_symlinks=False).st_mode):
                     continue  # no ref: git opens nothing in it for this name
@@ -513,6 +515,8 @@ def _without_unreadable(snap: Snapshot, *found: _Files) -> Snapshot:
     refused = set(snap.unreadable).union(*(files.unreadable for files in found))
     if not refused:
         return snap
+    # One entry for a refused directory, not one more for each name found under it later.
+    refused = {name for name in refused if not _within(name.rpartition("/")[0], refused)}
     edges = [pair for links in (*(files.links for files in found), snap.hops, snap.symrefs) for pair in links.items()]
     grew = True
     while grew:

@@ -1135,27 +1135,24 @@ def test_a_chain_to_a_file_of_the_git_directory_that_is_linked_shows_nothing_out
 
 
 @pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("why", [None, "git_too_old"])
 @pytest.mark.parametrize("spelling", ["ref: refs/heads/OTHER\n", "ref: refs/heads/other\0x\n"])
-def test_a_target_spelled_so_that_git_still_opens_a_linked_file_shows_nothing_outside(repo, tmp_path, caplog, kind,
-                                                                                     spelling):
+def test_a_target_spelled_so_that_git_still_opens_a_linked_file_shows_nothing_outside(repo, tmp_path, monkeypatch,
+                                                                                     caplog, kind, why, spelling):
     """Another case of the name (a case-insensitive disk opens the same file), and bytes after a NUL (git stops
     there)."""
     outside, secrets = _outside(tmp_path, repo, kind)
     heads = repo / ".git" / "refs" / "heads"
+    if why:
+        _without_direct_targets(monkeypatch, why)
 
     def go():
         (heads / "other").unlink()
         (heads / "other").symlink_to(outside)
-        (repo / ".git" / "HEAD").write_bytes(spelling.encode())
         (heads / "via").write_bytes(spelling.encode())
 
     caplog.set_level("DEBUG")
-    try:
-        report = run(repo, go)
-    except Exception as refused:  # git may refuse the repository outright: that shows nothing either
-        assert all(secret not in str(refused) + caplog.text for secret in secrets)
-        return
-    _leaks_nothing(report, caplog, secrets)
+    _leaks_nothing(run(repo, go), caplog, secrets)
 
 
 def test_the_old_symlink_spelling_of_a_symbolic_ref_is_still_read(repo):
