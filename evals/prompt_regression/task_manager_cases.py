@@ -41,6 +41,8 @@ class Blocker(StrEnum):
     TOOL_NOT_ON_MAIN = "tool_not_on_main"
     JUDGE_MISSING = "judge_missing"
     SANDBOX_MACOS_ONLY = "sandbox_macos_only"  # a direct session runs in Claude Code's Bash sandbox: macOS only
+    NEEDS_SYNTHETIC_HOME = "needs_synthetic_home"  # operator-login: its canaries would sit in real credential paths
+    STAGE_GATE = "stage_gate"  # operator-login: a hostile case held back because the first stage did not pass
 
 
 class Unparsed(Exception):

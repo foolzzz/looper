@@ -168,7 +168,7 @@ class Scripted:
         """Answer one of the readback's control requests as a sandboxed direct launch's CLI would."""
         if not (self.sandboxed and data["request"]["subtype"] in _READBACK["READBACK_SUBTYPES"]):
             return False
-        answer = _READBACK["readback_answer"](data["request"], "/nonexistent",
+        answer = _READBACK["readback_answer"](data["request"], self.config.get("readback_override", "/nonexistent"),
                                               [tool["name"] for tool in self.mcp_tools] or None)
         kind, body = answer
         _emit({"type": "control_response", "response": {"subtype": kind, "request_id": data["request_id"],
