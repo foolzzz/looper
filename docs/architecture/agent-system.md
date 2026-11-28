@@ -1000,8 +1000,14 @@ them.
   Hooks are not pinned: v1 injects no Looper hook. The settings file is named by the SHA-256 of its
   content and is part of the launch signature, so a change in any pinned value, the network
   allowlist or the read deny list restarts the session.
-- **Write scope.** The task directory and the sandbox's temporary directory; `.git/objects/info`, `.git/hooks`,
-  `.git/config`, `.git/info` and `.git/modules` of the task directory are write-denied.
+- **Write scope.** The task directory and the session's temporary directory, which is private to the launch
+  (`task_manager_tmpdir`: `CLAUDE_CODE_TMPDIR` is a new 0700 directory under `/tmp/lpr-<uid>`, owner-checked and
+  removed when the session ends; a path the CLI would not accept, or a directory that is not private, refuses the
+  launch with `private_tmpdir_unusable`). `.git/objects/info`, `.git/hooks`, `.git/config`, `.git/info` and
+  `.git/modules` of the task directory are write-denied, and so are the sandbox runtime's fixed shared paths
+  (`shared_write_roots`). The readback refuses a write set that holds anything else besides device files, or the
+  temporary root shared by the user's Claude Code sessions. `evals/prompt_regression/task_manager_write_probe.py`
+  checks the same boundary with commands run inside a session.
 - **Read deny list.** `read_deny_paths()`: credential directories and files of the operator (`~/.ssh`,
   `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.azure`, `.netrc`, `.git-credentials`, `.npmrc`,
   `.pypirc`, ..., credential stores under `~/.config`), the login keychain, the whole Claude
@@ -1101,7 +1107,7 @@ the user's. The text does not
 promise that Looper explains a denial: only the network allowlist's denials are explained (#1873).
 `looper-edit` is on the session's `PATH` through a private directory under the operator's cache
 (`task_manager_edit.edit_bin`: one symlink to the console script next to the interpreter, never
-under the runtime root, the task directory or `$TMPDIR`; a missing console script fails the
+under the runtime root, the task directory or any other place the sandbox can write; a missing console script fails the
 launch). The orchestrated session's instructions are unchanged. Because a direct session loads
 user settings only, Claude Code no longer reads the project's `CLAUDE.md` files as memory;
 Looper reads `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md` from the task directory's root
