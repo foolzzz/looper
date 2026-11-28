@@ -38,7 +38,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from . import git_safe
+from . import git_jail, git_safe
 from ..db.tasks import TaskFilter
 from . import step_workspaces as ws
 from .operator_notes import notes_key, notes_view
@@ -329,6 +329,7 @@ Note = Callable[[str, str], Awaitable[None]]  # (kind, text) into the task's act
 
 
 def _worktree_path(runtime_root: Path, task_id: str) -> Path:
+    git_jail.add_workspace_root(runtime_root)
     return runtime_root / TASK_WORKTREES_DIR / task_id
 
 

@@ -62,11 +62,14 @@ def test_the_consult_contract_replaces_the_runs_and_its_answers_are_read_by_ques
 
 
 def test_a_throwaway_checkout_shows_what_the_consult_changed_and_goes(tmp_path: Path) -> None:
+    from looper.agents import git_jail
     from looper.agents.consult import _changed, _cleanup, _snapshot
 
     repo = tmp_path / "repo"
     _repo(repo)
-    snapshot = _snapshot(repo / "app", tmp_path / "consults" / "consult-1")
+    git_jail.add_workspace_root(tmp_path)  # as the consult service does with its runtime root
+    consults = tmp_path / ".local" / "consults"
+    snapshot = _snapshot(repo / "app", consults / "consult-1")
     assert snapshot is not None
     _, target, inside = snapshot
     assert inside == target / "app" and (inside / "a.py").read_text() == "x = 1\n"
@@ -77,7 +80,7 @@ def test_a_throwaway_checkout_shows_what_the_consult_changed_and_goes(tmp_path: 
     assert not target.exists()
     assert "consult-1" not in subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True,
                                              text=True).stdout
-    assert _snapshot(tmp_path / "plain", tmp_path / "consults" / "consult-2") is None
+    assert _snapshot(tmp_path / "plain", consults / "consult-2") is None
 
 
 def test_the_questions_share_one_prompt_allowance(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

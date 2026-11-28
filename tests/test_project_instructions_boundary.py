@@ -472,7 +472,8 @@ def test_serve_tells_the_instruction_reader_its_runtime_root(
         raise operator_auth.OperatorTokenError("stop here")
 
     monkeypatch.setattr(operator_auth, "ensure_token", stop)
-    ops = SimpleNamespace(host="127.0.0.1", port=1, public_url="", operator_notes_root="", projects_root="")
+    ops = SimpleNamespace(host="127.0.0.1", port=1, public_url="", operator_notes_root="", projects_root="",
+                          path=tmp_path / "ops.toml")
 
     with pytest.raises(serve.StartupCheckFailed):
         asyncio.run(serve._run_agent_system_watched(

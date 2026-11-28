@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from looper.agents import git_safe
+from looper.agents import git_jail, git_safe
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -38,6 +38,13 @@ def plain(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedPro
 def safe(repo: Path, *args: str, check: bool = False) -> subprocess.CompletedProcess:
     return git_safe.run(repo, *args, extra_env=_IDENTITY, capture_output=True, text=True, stdin=subprocess.DEVNULL,
                         check=check, timeout=30)
+
+
+@pytest.fixture
+def no_jail(monkeypatch):
+    """For a test whose probe records that it ran by writing outside the repository, which the macOS jail kills:
+    what is tested here is the overrides and the environment on their own (``tests/test_git_jail.py`` has the jail)."""
+    monkeypatch.setattr(git_jail, "ENABLED", False)
 
 
 @pytest.fixture(autouse=True)
@@ -192,6 +199,7 @@ def test_plain_git_runs_the_mechanism(name, repo, probe, marker):
     assert fired(marker), f"{name} did not fire with plain git"
 
 
+@pytest.mark.usefixtures("no_jail")
 @pytest.mark.parametrize("name", MECHANISMS)
 def test_the_helper_does_not_run_the_mechanism(name, repo, probe, marker):
     arm, trigger = MECHANISMS[name]
@@ -226,6 +234,7 @@ def test_the_worktrees_shared_info_attributes_is_refused(repo, probe):
         safe(repo.parent / "wt", "status")
 
 
+@pytest.mark.usefixtures("no_jail")
 def test_the_environment_does_not_carry_the_servers_secrets(repo, tmp_path, monkeypatch):
     """A hook that does run (here the override is undone on purpose, in the test only) sees no credentials."""
     secrets = {"LOOPER_DATABASE_URL": "postgresql://u:pw@db/x", "PGPASSWORD": "pw", "ANTHROPIC_API_KEY": "key",
@@ -539,6 +548,7 @@ def _arm_submodule(repo: Path, module: Path, probe: Path) -> None:
     (repo / "a.txt").write_text("changed in the superproject\n")
 
 
+@pytest.mark.usefixtures("no_jail")
 @pytest.mark.parametrize("command", SUBMODULE_COMMANDS)
 def test_a_submodule_runs_nothing_either(command, repo, probe, marker, tmp_path):
     module = _submodule(tmp_path, repo)
@@ -612,6 +622,7 @@ def test_gitattributes_still_apply(repo):
     assert _blob(repo, "c.txt") == "one\ntwo\n"  # normalised to LF in the object: the attribute applied
 
 
+@pytest.mark.usefixtures("no_jail")
 def test_a_user_level_filter_still_runs_and_converts(repo, probe, marker, tmp_path, monkeypatch):
     upper = tmp_path / "upper.sh"
     upper.write_text(f'#!/bin/sh\necho user-filter >> "{marker}"\ntr a-z A-Z\n')
@@ -871,7 +882,8 @@ def test_loopers_own_clones_and_worktrees_pass_the_check(repo, tmp_path):
 
     _submodule(tmp_path, repo)
     plain(repo, "commit", "-q", "-m", "module")
-    clone = Path(worker._verification_checkout(str(repo), tmp_path / "backup"))
+    git_jail.add_workspace_root(tmp_path)  # as the server does: checkouts are made under its runtime root
+    clone = Path(worker._verification_checkout(str(repo), tmp_path / ".local" / "verification" / "backup"))
 
     async def worktree() -> Path:
         found = await step_workspaces.inspect(str(repo))
@@ -883,7 +895,7 @@ def test_loopers_own_clones_and_worktrees_pass_the_check(repo, tmp_path):
         return Path(workspace.path)
 
     step = asyncio.run(worktree())
-    consulted = consult._snapshot(repo, tmp_path / "consult")
+    consulted = consult._snapshot(repo, tmp_path / ".local" / "consults" / "consult")
     assert consulted is not None
     for directory in (repo, repo / "module", clone, clone / "module", step, consulted[1]):
         git_safe._memo.clear()
@@ -1008,6 +1020,7 @@ def test_every_git_call_refuses_lazy_fetches(repo, tmp_path, monkeypatch):
 # made from a remote, the operator's knowledge vault whose hooks are meant to run) or where there is no repository.
 DIRECT_GIT_ALLOWED = {
     "looper/agents/git_safe.py": "the helper itself",
+    "looper/agents/git_jail.py": "finds the git binary and runs `git --version` in the jail's self-check",
     "looper/components.py": "Looper's own checkout (component install and upgrade)",
     "looper/agents/service.py": "Looper's own checkout (self-upgrade)",
     "looper/agents/catalog_sources.py": "a shallow clone of a remote into a new temporary directory, already neutralised",

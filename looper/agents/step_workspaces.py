@@ -45,7 +45,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from . import git_safe
+from . import git_jail, git_safe
 from .reported_files import prompt_name
 
 logger = logging.getLogger(__name__)
@@ -256,7 +256,11 @@ async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool 
         process.kill()
         await process.wait()
         raise GitError(f"git {args[0]} timed out after {GIT_TIMEOUT_SEC}s") from None
-    await git_safe.recheck_async(process)
+    try:
+        await git_safe.recheck_async(process)
+    except git_safe.RepositoryRefused as exc:
+        raise GitError(f"refused to run git in {prompt_name(cwd)}: {exc}",
+                       reason=f"repository_refused:{exc.reason}") from None
     run = _Run(process.returncode or 0, stdout, stderr)
     if check and run.returncode != 0:
         raise _failed(run, *args)
@@ -502,6 +506,7 @@ def new_workspace(repo: Repo, *, runtime_root: Path, workspace_id: int, task_id:
                   step_key: str, base: str, checkpointed: bool) -> StepWorkspace:
     """The workspace a step gets, before its worktree exists."""
     name = f"{_ref_component(step_key)}-{workspace_id}"
+    git_jail.add_workspace_root(runtime_root)
     return StepWorkspace(
         id=workspace_id, task_id=task_id, step_id=step_id, repo_dir=repo.toplevel, subdir=repo.subdir,
         target_branch=repo.branch, path=str(runtime_root / WORKTREES_DIR / task_id / name),

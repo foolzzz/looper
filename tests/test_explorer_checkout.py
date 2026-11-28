@@ -4,7 +4,13 @@ import subprocess
 
 import pytest
 
+from looper.agents import git_jail
 from looper.agents.explorer_checkout import CheckoutError, prepare, remove
+
+
+@pytest.fixture(autouse=True)
+def _runtime_root(tmp_path):
+    git_jail.add_workspace_root(tmp_path)  # as the spawner does: snapshots are made under its runtime root
 
 
 def git(repo: Path, *args: str) -> bytes:
@@ -30,7 +36,7 @@ def test_snapshot_includes_staged_unstaged_untracked_and_deletions(tmp_path):
     (repo / 'module/untracked').write_text('new')
     branch, status = git(repo, 'symbolic-ref', 'HEAD'), git(repo, 'status', '--porcelain=v1')
     index = (repo / '.git/index').read_bytes()
-    checkout = prepare(repo / 'module', tmp_path / 'explorers/spawn')
+    checkout = prepare(repo / 'module', tmp_path / '.local/explorers/spawn')
     try:
         assert checkout.cwd == checkout.root / 'module'
         assert (checkout.cwd / 'edited').read_text() == 'dirty'
@@ -48,7 +54,7 @@ def test_snapshot_includes_staged_unstaged_untracked_and_deletions(tmp_path):
 
 
 def test_non_repository_refused_and_failure_leaves_no_checkout(tmp_path):
-    target = tmp_path / 'explorers/spawn'
+    target = tmp_path / '.local/explorers/spawn'
     with pytest.raises(CheckoutError):
         prepare(tmp_path, target)
     assert not target.exists()
@@ -75,7 +81,7 @@ def test_snapshot_refuses_symlinks_without_changing_source(tmp_path, tracked, ta
         git(repo, 'add', '--', link.name)
     status = git(repo, 'status', '--porcelain=v1')
     index = (repo / '.git/index').read_bytes()
-    target = tmp_path / 'explorers/spawn'
+    target = tmp_path / '.local/explorers/spawn'
     with pytest.raises(CheckoutError, match='symbolic links'):
         prepare(repo, target)
     assert not target.exists()
@@ -95,7 +101,7 @@ def test_snapshot_failure_cleans_partial_target(tmp_path, monkeypatch):
             raise CheckoutError('snapshot failed')
         return original(directory, *args, **kwargs)
     monkeypatch.setattr(explorer_checkout, '_git', fail_checkout)
-    target = tmp_path / 'explorers/spawn'
+    target = tmp_path / '.local/explorers/spawn'
     with pytest.raises(CheckoutError):
         prepare(repo, target)
     assert not target.exists()

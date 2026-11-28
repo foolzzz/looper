@@ -21,7 +21,7 @@ from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_c
 from .. import (task_manager_alerts, task_manager_denials, task_manager_dirs, task_manager_edit,
                 task_manager_network, task_manager_project_instructions, task_manager_readback, task_manager_refs,
                 task_manager_safety, task_manager_sandbox, task_manager_settings)
-from .. import task_workspaces
+from .. import git_jail, task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
@@ -365,7 +365,7 @@ class TaskManagerAgent:
                   and reopened.mode is task_workspaces.ReopenMode.WRITE)
         self.mode = "direct" if direct else "orchestrated"
         phase: Literal["launch", "resume"] = "resume" if self.session_id else "launch"
-        if direct and (unsupported := task_manager_sandbox.platform_problem()) is not None:
+        if direct and (unsupported := await asyncio.to_thread(task_manager_sandbox.platform_problem)) is not None:
             task_manager_safety.record_refusal(task_manager_safety.Reason.SANDBOX_UNAVAILABLE, phase)
             raise Refused(RefuseReason.SANDBOX_UNAVAILABLE, unsupported)
         self.project_id, self.allowed_domains = project["id"], ()
@@ -450,6 +450,7 @@ class TaskManagerAgent:
             if direct:
                 self.read_deny = task_manager_sandbox.read_deny_paths(launch.runtime.environment(launch),
                                                                       self.pool.runtime_root, self.pool.config_file)
+                git_jail.add_session_denies(self.read_deny)  # Looper's git is denied what this session is
             return (launch.runtime.operator_resident_command(executable, cwd=reopened.work_dir, prompt_file=prompt_file,
                                                              launch=launch, settings_dir=root / "settings",
                                                              allowed_domains=self.allowed_domains,

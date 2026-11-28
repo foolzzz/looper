@@ -271,8 +271,14 @@ SUPPORTED_PLATFORM = "darwin"
 
 
 def platform_problem() -> str | None:
-    """Why this machine cannot run a direct session, or ``None``: v1 supports macOS only."""
+    """Why this machine cannot run a direct session, or ``None``: v1 supports macOS only, and there only when the
+    jail Looper's own git runs in (``git_jail``) passes its self-check. Blocking."""
     if sys.platform == SUPPORTED_PLATFORM:
+        from . import git_jail
+
+        if git_jail.ENABLED and (problem := git_jail.self_check()) is not None:
+            return ("The task Manager's direct session does not start: the macOS sandbox Looper runs git on project "
+                    f"repositories in failed its self-check ({problem}).")
         return None
     return ("The task Manager's direct session runs only on macOS for now: its boundary is Claude Code's Bash sandbox, "
             f"which is verified there only (this machine: {sys.platform}).")
