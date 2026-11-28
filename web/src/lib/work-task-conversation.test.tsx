@@ -314,7 +314,7 @@ describe("task conversation", () => {
     const good = [
       { kind: "sandbox_notice", notice: "first_enable_in_place", detail: "server detail" },
       { kind: "sandbox_notice", notice: "refs_unreadable", detail: "server detail" },
-      { kind: "sandbox_notice", notice: "project_instructions_skipped", detail: "AGENTS.md: not_utf8; CLAUDE.md: outside_workdir" },
+      { kind: "sandbox_notice", notice: "project_instructions_skipped", detail: "AGENTS.md: not_utf8; CLAUDE.md: outside" },
       { kind: "sandbox_notice", notice: "project_instructions_skipped", detail: "CLAUDE.local.md: some_new_reason; AGENTS.md: hard_linked" },
       { kind: "ref_report", message_id: "turn-1", report_id: 7, own_commits: 2, needs_you: true,
         head: { before: "refs/heads/main", after: null }, info: [change("refs/heads/looper/t2/task", "moved", old, moved, "git update-ref refs/heads/looper/t2/task A B")],

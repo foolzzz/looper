@@ -8,8 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from looper.agents import safe_read
 from looper.agents import task_manager_project_instructions as pi
-from looper.agents.task_manager_project_instructions import Loaded, Skip, Skipped
+from looper.agents.safe_read import Skip
+from looper.agents.task_manager_project_instructions import Loaded, ReaderSkip, Skipped
 
 KIB = 1024
 
@@ -66,7 +68,7 @@ def test_total_budget_used_up_skips_the_next_file_with_a_typed_reason(work: Path
     (work / "AGENTS.md").write_text("c")
     loaded, skipped = pi.read(str(work))
     assert loaded == [Loaded("CLAUDE.md", "a" * (32 * KIB)), Loaded("CLAUDE.local.md", "b" * (32 * KIB))]
-    assert skipped == [Skipped("AGENTS.md", Skip.BUDGET_EXHAUSTED)]
+    assert skipped == [Skipped("AGENTS.md", ReaderSkip.BUDGET_EXHAUSTED)]
 
 
 def test_hidden_characters_count_at_their_written_out_size_so_the_total_cap_holds(work: Path) -> None:
@@ -103,7 +105,7 @@ def test_symlink_outside_is_skipped_and_never_opened(
 
     monkeypatch.setattr(pi.os, "open", recording_open)
     result = pi.read(str(work))
-    assert result == ([], [Skipped("CLAUDE.md", Skip.OUTSIDE_WORKDIR)])
+    assert result == ([], [Skipped("CLAUDE.md", Skip.OUTSIDE)])
     assert "TOP-SECRET-TOKEN" not in repr(result)
     assert not any("secret" in p for p in opened)
 
@@ -111,10 +113,35 @@ def test_symlink_outside_is_skipped_and_never_opened(
 def test_symlink_chain_inside_is_read(work: Path) -> None:
     docs = work / "docs"
     docs.mkdir()
-    (docs / "real.md").write_text("real\n")
-    (docs / "link.md").symlink_to("real.md")
+    (docs / "AGENTS.md").write_text("real\n")
+    (docs / "link.md").symlink_to("AGENTS.md")  # a chain is judged by the file it ends at
     (work / "CLAUDE.md").symlink_to("docs/link.md")
     assert pi.read(str(work)) == ([Loaded("CLAUDE.md", "real\n")], [])
+
+
+def test_a_link_to_a_file_that_is_not_an_instruction_file_is_skipped(work: Path) -> None:
+    (work / ".env").write_text("API_TOKEN=FAKE\n")
+    (work / "CLAUDE.md").symlink_to(".env")
+    assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", Skip.NOT_AN_INSTRUCTION_FILE)])
+
+
+def test_a_link_into_another_repository_inside_the_directory_is_skipped(work: Path) -> None:
+    (work / "vendored" / ".git").mkdir(parents=True)
+    (work / "vendored" / "AGENTS.md").write_text("theirs\n")
+    (work / "CLAUDE.md").symlink_to("vendored/AGENTS.md")
+    assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", Skip.OTHER_REPOSITORY)])
+
+
+def test_after_the_total_is_spent_an_alias_is_still_an_alias_and_a_refused_file_keeps_its_reason(work: Path) -> None:
+    (work / "CLAUDE.md").write_text("a" * (32 * KIB))
+    (work / "CLAUDE.local.md").write_text("b" * (32 * KIB))
+    (work / "AGENTS.md").symlink_to("CLAUDE.md")
+    loaded, skipped = pi.read(str(work))
+    assert [(item.name, item.aliases) for item in loaded] == [("CLAUDE.md", ("AGENTS.md",)), ("CLAUDE.local.md", ())]
+    assert skipped == []
+    (work / "AGENTS.md").unlink()
+    (work / "AGENTS.md").mkdir()
+    assert pi.read(str(work))[1] == [Skipped("AGENTS.md", Skip.NOT_REGULAR)]
 
 
 def test_directory_is_not_regular(work: Path) -> None:
@@ -132,7 +159,7 @@ def test_fifo_is_not_regular_and_does_not_hang(work: Path) -> None:
 
 def test_invalid_utf8(work: Path) -> None:
     (work / "CLAUDE.md").write_bytes(b"ok\xff\xfe")
-    assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", Skip.NOT_UTF8)])
+    assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", ReaderSkip.NOT_UTF8)])
 
 
 def test_cut_inside_multibyte_character(work: Path) -> None:
@@ -193,14 +220,14 @@ def test_unreadable_file(work: Path) -> None:
     p.write_text("x")
     p.chmod(0)
     try:
-        assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", Skip.UNREADABLE)])
+        assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", Skip.IO_ERROR)])
     finally:
         p.chmod(0o600)
 
 
 def test_dangling_symlink_is_unreadable(work: Path) -> None:
-    (work / "CLAUDE.md").symlink_to("missing.md")
-    assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", Skip.UNREADABLE)])
+    (work / "CLAUDE.md").symlink_to("docs/AGENTS.md")
+    assert pi.read(str(work)) == ([], [Skipped("CLAUDE.md", Skip.IO_ERROR)])
 
 
 def test_section_fences_each_file_and_keeps_its_own_tags_escaped(work: Path) -> None:
@@ -295,23 +322,23 @@ def test_a_directory_swapped_for_a_symlink_after_the_check_is_never_followed(
 ) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "key").write_text("SECRET-OUTSIDE-KEY")
     (work / "sub").mkdir()
-    (work / "sub" / "key").write_text("inside\n")
-    (work / "CLAUDE.md").symlink_to("sub/key")  # a legitimate in-tree link whose directory is then swapped
+    (work / "sub" / "AGENTS.md").write_text("inside\n")
+    (outside / "AGENTS.md").write_text("SECRET-OUTSIDE-KEY")
+    (work / "CLAUDE.md").symlink_to("sub/AGENTS.md")  # a legitimate in-tree link whose directory is then swapped
     swapped = _swap_on_first_open(monkeypatch, work / "sub", outside)
     result = pi.read(str(work))
     assert swapped and "SECRET-OUTSIDE-KEY" not in repr(result)
-    assert result[0] == [] and [item.name for item in result[1]] == ["CLAUDE.md"]
+    assert result == ([], [Skipped("CLAUDE.md", Skip.SYMLINK)])
 
 
 def test_a_symlinked_directory_in_the_middle_of_the_path_is_skipped_even_when_it_stays_inside(
     tmp_path: Path, work: Path
 ) -> None:
     (work / "real").mkdir()
-    (work / "real" / "rules").write_text("inside\n")
+    (work / "real" / "AGENTS.md").write_text("inside\n")
     (work / "link").symlink_to("real")
-    (work / "CLAUDE.md").symlink_to("link/rules")  # resolves to real/rules: read by its resolved path
+    (work / "CLAUDE.md").symlink_to("link/AGENTS.md")  # resolves to real/AGENTS.md: read by its resolved path
     assert pi.read(str(work))[0] == [Loaded("CLAUDE.md", "inside\n")]
 
 
@@ -324,8 +351,8 @@ def test_the_in_tree_symlink_alias_still_reads_after_the_directory_walk(work: Pa
 
 def test_every_descriptor_the_reader_opens_is_closed(work: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (work / "sub").mkdir()
-    (work / "sub" / "r").write_text("x\n")
-    (work / "CLAUDE.md").symlink_to("sub/r")
+    (work / "sub" / "CLAUDE.md").write_text("x\n")
+    (work / "CLAUDE.md").symlink_to("sub/CLAUDE.md")
     (work / "AGENTS.md").write_text("a\n")
     opened: list[int] = []
     closed: list[int] = []
@@ -334,6 +361,79 @@ def test_every_descriptor_the_reader_opens_is_closed(work: Path, monkeypatch: py
     monkeypatch.setattr(pi.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
     pi.read(str(work))
     assert opened and sorted(opened) == sorted(closed)
+
+
+def _record_reads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    reads: list[int] = []
+    real_read = os.read
+    monkeypatch.setattr(safe_read.os, "read", lambda fd, size: (reads.append(fd), real_read(fd, size))[1])
+    return reads
+
+
+def test_the_file_itself_swapped_for_a_link_outside_after_it_was_resolved_is_never_read(
+    tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "secret"
+    secret.write_text("SECRET-OUTSIDE-KEY")
+    leaf = work / "CLAUDE.md"
+    leaf.write_text("inside\n")
+    swapped: list[str] = []
+    real_open = os.open
+
+    def racing_open(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if not swapped:  # the first open comes after both paths were resolved
+            swapped.append(os.fspath(path))
+            leaf.unlink()
+            leaf.symlink_to(secret)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(safe_read.os, "open", racing_open)
+    reads = _record_reads(monkeypatch)
+    result = pi.read(str(work))
+    assert swapped and "SECRET-OUTSIDE-KEY" not in repr(result)
+    # ``symlink``: the no-follow open itself refused it, not a later check of an already opened file outside.
+    assert result == ([], [Skipped("CLAUDE.md", Skip.SYMLINK)]) and not reads
+
+
+@pytest.mark.parametrize("then", ["removed", "replaced"])
+def test_a_hard_link_whose_name_is_taken_away_after_the_open_is_never_read(
+    tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch, then: str
+) -> None:
+    secret = tmp_path / "secret"
+    secret.write_text("SECRET-OUTSIDE-KEY")
+    leaf = work / "CLAUDE.md"
+    os.link(secret, leaf)
+    raced: list[str] = []
+    real_open = os.open
+
+    def racing_open(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        fd = real_open(path, *args, **kwargs)
+        if path == "CLAUDE.md" and not raced:  # the descriptor now shows a link count of one
+            raced.append(path)
+            leaf.unlink()
+            if then == "replaced":
+                leaf.write_text("inside\n")
+        return fd
+
+    monkeypatch.setattr(safe_read.os, "open", racing_open)
+    reads = _record_reads(monkeypatch)
+    result = pi.read(str(work))
+    assert raced and "SECRET-OUTSIDE-KEY" not in repr(result)
+    assert result == ([], [Skipped("CLAUDE.md", Skip.IO_ERROR)]) and not reads
+
+
+def test_the_task_directory_swapped_for_a_link_before_it_is_opened_is_never_followed(
+    tmp_path: Path, work: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "CLAUDE.md").write_text("SECRET-OUTSIDE-KEY")
+    (work / "CLAUDE.md").write_text("inside\n")
+    swapped = _swap_on_first_open(monkeypatch, work, outside)  # the first open is the directory's own
+    reads = _record_reads(monkeypatch)
+    result = pi.read(str(work))
+    assert swapped and "SECRET-OUTSIDE-KEY" not in repr(result)
+    assert result == ([], [Skipped("CLAUDE.md", Skip.SYMLINK)]) and not reads
 
 
 @pytest.mark.parametrize("char", ["\x1b", "\x08", "\r", "\x85", "\u180e", "\u3164", "\U000e0041", "\u00ad", "\u200d"])

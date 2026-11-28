@@ -84,7 +84,7 @@ def test_a_skipped_file_is_reported_once_per_change_and_never_reaches_the_model(
         try:
             first = await submit_and_wait(pool, task_id, message_id="m1")
             [notice] = _notices(first)
-            assert notice["detail"] == "CLAUDE.md: outside_workdir"
+            assert notice["detail"] == "CLAUDE.md: outside"
             assert "OUTSIDE-SECRET-TEXT" not in _prompt(native.records("launch")[0]["command"]) + repr(first.events)
             assert "OUTSIDE-SECRET-TEXT" not in repr(native.records("input"))
             second = await submit_and_wait(pool, task_id, message_id="m2")
@@ -92,14 +92,14 @@ def test_a_skipped_file_is_reported_once_per_change_and_never_reaches_the_model(
             (directory / "AGENTS.md").write_bytes(b"bad \xff\xfe")
             third = await submit_and_wait(pool, task_id, message_id="m3")
             [both] = _notices(third)
-            assert both["detail"] == "AGENTS.md: not_utf8; CLAUDE.md: outside_workdir"
+            assert both["detail"] == "AGENTS.md: not_utf8; CLAUDE.md: outside"
             (directory / "CLAUDE.md").unlink()
             (directory / "AGENTS.md").write_text("fine\n")
             fixed = await submit_and_wait(pool, task_id, message_id="m4")
             assert _notices(fixed) == []
             (directory / "CLAUDE.md").symlink_to(secret)
             again = await submit_and_wait(pool, task_id, message_id="m5")
-            assert [n["detail"] for n in _notices(again)] == ["CLAUDE.md: outside_workdir"]
+            assert [n["detail"] for n in _notices(again)] == ["CLAUDE.md: outside"]
         finally:
             await pool.shutdown()
     run_db(check, monkeypatch, timeout=90)

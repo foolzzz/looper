@@ -5,13 +5,17 @@ files as memory. Looper reads ``CLAUDE.md``, ``CLAUDE.local.md`` and ``AGENTS.md
 directory only (never a parent, never a nested directory) and ``section`` puts them, fenced as untrusted, after the
 task brief. Each file is capped at ``MAX_FILE`` bytes and all of them together at ``MAX_TOTAL`` bytes, spent in
 ``FILES`` order, counted on the text as the model sees it; a cut file ends with the ``TRUNCATED`` line, and a file that
-finds the total already spent is skipped (``Skip.BUDGET_EXHAUSTED``). A name that resolves to a file already read (a symlink)
-is an alias of the first name and counts once. A file is skipped, with a typed ``Skip`` reason, when it resolves
-outside the task directory (checked before it is opened, and the open walks the resolved path from a descriptor of
-the directory with ``O_NOFOLLOW`` at every component, so a swap after the check skips the file), is not a regular file, has other hard links (a link made
-inside the directory to a file elsewhere on the same volume has a real path inside it), cannot be read, or is not
-valid UTF-8. control and format characters (NUL, ESC, zero-width, bidirectional, the tag block) in the text are written out as ``\\uXXXX``, CRLF counts as LF. A
-missing file is neither loaded nor skipped. ``@`` imports are never expanded, and ``@`` text is kept as written.
+finds the total already spent is skipped (``ReaderSkip.BUDGET_EXHAUSTED``). A name that resolves to a file already read
+(a symlink) is an alias of the first name and counts once.
+
+Each file is read by ``safe_read.read_inside`` with the task directory as the boundary: only a regular file with no
+other hard link (a link made inside the directory to a file elsewhere on the same volume has a real path inside it),
+whose resolved path is inside the directory with no other repository on the way, opened one component at a time from a
+directory descriptor with ``O_NOFOLLOW``. A symlink is followed only to a file with one of the names in ``FILES``. A
+refused file is skipped with ``safe_read``'s typed ``Skip``; this module adds only ``ReaderSkip`` for the total budget
+and for text that is not valid UTF-8. Control and format characters (NUL, ESC, zero-width, bidirectional, the tag
+block) in the text are written out as ``\\uXXXX``, CRLF counts as LF. A missing file is neither loaded nor skipped.
+``@`` imports are never expanded, and ``@`` text is kept as written.
 
 They are read on every launch and resume, so the prompt's hash (in the launch signature) follows them: an edit in the
 middle of a session takes effect from the next turn. The files are untrusted: anyone who can change the repository
@@ -22,15 +26,15 @@ from __future__ import annotations
 
 import codecs
 import dataclasses
-import errno
 import os
 import re
-import stat
 import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from . import safe_read
+from .safe_read import Skip
 from .untrusted import Source, fence
 
 FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md")
@@ -67,12 +71,10 @@ def _visible(text: str) -> str:
                    for c in text)
 
 
-class Skip(StrEnum):
-    OUTSIDE_WORKDIR = "outside_workdir"
-    NOT_REGULAR = "not_regular"
+class ReaderSkip(StrEnum):
+    """Why a file ``safe_read`` did read is still not loaded; every other reason is a ``safe_read.Skip``."""
+
     BUDGET_EXHAUSTED = "budget_exhausted"  # the files before it already used all of MAX_TOTAL
-    HARD_LINKED = "hard_linked"  # st_nlink > 1: the same inode may also be a file outside the task directory
-    UNREADABLE = "unreadable"
     NOT_UTF8 = "not_utf8"
 
 
@@ -87,113 +89,42 @@ class Loaded:
 @dataclass(frozen=True)
 class Skipped:
     name: str
-    reason: Skip
-
-
-class _LeftTheDirectory(Exception):
-    """A component of the path turned out to be a symlink (or not a directory) while it was walked."""
-
-
-def _open_inside(base: str, relative: str) -> int:
-    """Open ``relative`` (the already resolved path below ``base``) one component at a time from a descriptor of
-    ``base``, refusing any symlink on the way: a check by path followed by an open by path can be raced by a process
-    that swaps an intermediate directory for a symlink, and this read runs outside the sandbox."""
-    parts = [part for part in relative.split(os.sep) if part not in ("", ".")]
-    if not parts:
-        raise OSError(errno.EISDIR, "the instruction file is the task directory itself")
-    flags = os.O_RDONLY | os.O_CLOEXEC
-    held = os.open(base, flags | os.O_DIRECTORY)
-    try:
-        for part in parts[:-1]:
-            try:
-                following = os.open(part, flags | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=held)
-            except OSError as exc:
-                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise _LeftTheDirectory(part) from exc
-                raise
-            os.close(held)
-            held = following
-        try:
-            # O_NONBLOCK: a FIFO must not block the open
-            return os.open(parts[-1], flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=held)
-        except OSError as exc:
-            if exc.errno == errno.ELOOP:
-                raise _LeftTheDirectory(parts[-1]) from exc
-            raise
-    finally:
-        os.close(held)
-
-
-def _read_bytes(fd: int, size: int) -> bytes:
-    chunks: list[bytes] = []
-    got = 0
-    while got < size:
-        chunk = os.read(fd, size - got)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        got += len(chunk)
-    return b"".join(chunks)
+    reason: Skip | ReaderSkip
 
 
 def read(work_dir: str) -> tuple[list[Loaded], list[Skipped]]:
     """The instruction files at the root of ``work_dir``, and the ones that exist but were not read."""
     loaded: list[Loaded] = []
     skipped: list[Skipped] = []
-    seen: dict[tuple[int, int], int] = {}  # (dev, ino) -> index in loaded
+    seen: dict[tuple[int, int], int] = {}  # the file's (dev, ino) -> index in loaded
     spent = 0
-    base = os.path.realpath(work_dir)
     for name in FILES:
         path = os.path.join(work_dir, name)
         try:
-            os.lstat(path)
+            os.lstat(path)  # a missing file is not reported (``safe_read`` would call it an I/O error)
         except FileNotFoundError:
             continue
         except OSError:
-            skipped.append(Skipped(name, Skip.UNREADABLE))
+            skipped.append(Skipped(name, Skip.IO_ERROR))
             continue
-        real = os.path.realpath(path)
-        if real != base and not real.startswith(base + os.sep):
-            skipped.append(Skipped(name, Skip.OUTSIDE_WORKDIR))
+        limit = max(min(MAX_FILE, MAX_TOTAL - spent), 0)  # with nothing left, the file is judged but none of it kept
+        found = safe_read.read_inside(work_dir, path, limit, clip=True, names=FILES)
+        if isinstance(found, safe_read.Skipped):
+            skipped.append(Skipped(name, found.reason))
             continue
-        try:
-            fd = _open_inside(base, os.path.relpath(real, base))
-        except _LeftTheDirectory:
-            skipped.append(Skipped(name, Skip.OUTSIDE_WORKDIR))
+        if found.identity in seen:
+            first = loaded[seen[found.identity]]
+            loaded[seen[found.identity]] = dataclasses.replace(first, aliases=(*first.aliases, name))
             continue
-        except OSError:
-            skipped.append(Skipped(name, Skip.UNREADABLE))
+        if not limit:
+            skipped.append(Skipped(name, ReaderSkip.BUDGET_EXHAUSTED))
             continue
-        try:
-            st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode):
-                skipped.append(Skipped(name, Skip.NOT_REGULAR))
-                continue
-            if st.st_nlink > 1:
-                skipped.append(Skipped(name, Skip.HARD_LINKED))
-                continue
-            key = (st.st_dev, st.st_ino)
-            if key in seen:
-                first = loaded[seen[key]]
-                loaded[seen[key]] = dataclasses.replace(first, aliases=(*first.aliases, name))
-                continue
-            limit = min(MAX_FILE, MAX_TOTAL - spent)
-            if limit <= 0:
-                skipped.append(Skipped(name, Skip.BUDGET_EXHAUSTED))
-                continue
-            data = _read_bytes(fd, limit + 4)
-        except OSError:
-            skipped.append(Skipped(name, Skip.UNREADABLE))
-            continue
-        finally:
-            os.close(fd)
-        cut = len(data) > limit
-        kept = data[:limit] if cut else data
+        cut = found.size > limit
         try:
             # An incomplete character at a cut stays in the decoder's buffer instead of failing.
-            text = codecs.getincrementaldecoder("utf-8")("strict").decode(kept, final=not cut)
+            text = codecs.getincrementaldecoder("utf-8")("strict").decode(found.data, final=not cut)
         except UnicodeDecodeError:
-            skipped.append(Skipped(name, Skip.NOT_UTF8))
+            skipped.append(Skipped(name, ReaderSkip.NOT_UTF8))
             continue
         text = _visible(text)  # the budget counts what the model sees, which hidden characters make larger
         encoded = text.encode("utf-8")
@@ -201,7 +132,7 @@ def read(work_dir: str) -> tuple[list[Loaded], list[Skipped]]:
             text, cut = _ESCAPE_TAIL.sub("", encoded[:limit].decode("utf-8", "ignore")), True
         size = len(text.encode("utf-8"))
         spent += size
-        seen[key] = len(loaded)
+        seen[found.identity] = len(loaded)
         loaded.append(Loaded(name, text + "\n" + TRUNCATED.format(size=size), truncated=size) if cut
                       else Loaded(name, text))
     return loaded, skipped
