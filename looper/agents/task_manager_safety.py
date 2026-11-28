@@ -104,12 +104,17 @@ def record_refusal(reason: Reason, phase: Literal["launch", "resume", "turn"], v
     refusal_counts[(reason.value, phase, version)] += 1
 
 
-def environment(launch: Launch, task_id: str, *, drop: Sequence[str] = ()) -> dict[str, str]:
-    """The task Manager's process environment; ``drop`` names variables a direct session must not carry."""
+def environment(
+    launch: Launch, task_id: str, *, drop: Sequence[str] = (), edit_dir: Path | None = None
+) -> dict[str, str]:
+    """The task Manager's process environment; ``drop`` names variables a direct session must not carry, and a
+    direct session's ``edit_dir`` (``task_manager_edit.edit_bin``) goes first on PATH so its Bash finds ``looper-edit``."""
     env = launch.runtime.environment(launch)
     for key in (*HOOK_ENV, child_env.AGENT_RUN_ENV, *drop):
         env.pop(key, None)
     env[child_env.TASK_MANAGER_ENV] = task_id
+    if edit_dir is not None:
+        env["PATH"] = f"{edit_dir}{os.pathsep}{env['PATH']}" if env.get("PATH") else str(edit_dir)
     return env
 
 
