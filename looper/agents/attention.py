@@ -514,8 +514,10 @@ _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的�
            "deliveries": "可能没送到的消息", "cost": "花费等你决定",
            "failure_holds": "运行失败等你处理", "reminders": "未确认送达的提醒", "vault_commits": "知识库提交受阻",
            "task_manager_refs": "任务管家改了别的分支或标签"}
-# A task Manager turn refused for a link in the repository's git directory, by ``RepositoryRefused`` reason.
+# A task Manager turn refused for the repository's git directory, by ``RepositoryRefused`` reason.
 _REF_REFUSALS = {"ref_symlink": "任务管家这一轮被拒绝：仓库的 git 目录里有符号链接",
+                 "ref_hardlink": "任务管家这一轮被拒绝：仓库的 git 目录里有硬链接文件",
+                 "ref_symref_target": "任务管家这一轮被拒绝：仓库的 git 目录里有指向 refs/ 之外的符号引用",
                  "ref_unchecked": "任务管家这一轮被拒绝：仓库的 git 目录无法完整检查"}
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠",

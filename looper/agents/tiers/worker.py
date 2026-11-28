@@ -341,8 +341,16 @@ def _git_head(work_dir: str | Path) -> str | None:
         return None
 
 
+_REF_PROBLEMS = {
+    "ref_symlink": ("holds a symbolic link at", "Replace it with a real file or directory"),
+    "ref_hardlink": ("holds a hard-linked file at", "Replace it with a copy of its own"),
+    "ref_symref_target": ("holds a symbolic ref pointing outside refs/ at", "Point it at a branch or remove it"),
+    "ref_unchecked": ("could not be checked at", "Replace it with a real file or directory"),
+}
+
+
 async def _git_dir_refusal(work_dir: str | Path) -> str | None:
-    """The full walk at the start and end of a step: why ``work_dir``'s git directory is refused for a symbolic link,
+    """The full walk at the start and end of a step: why ``work_dir``'s git directory is refused (``REF_REASONS``),
     else None. Any other outcome of the check is left to the git commands themselves. A directory with no ``.git`` at
     or above it starts no process."""
     try:
@@ -352,9 +360,8 @@ async def _git_dir_refusal(work_dir: str | Path) -> str | None:
         await git_safe.check_repository_async(work_dir)
     except git_safe.RepositoryRefused as exc:
         if exc.reason in git_safe.REF_REASONS:
-            found = "holds a symbolic link at" if exc.reason == "ref_symlink" else "could not be checked at"
-            return (f"Looper does not run git in the work directory: its git directory {found} {exc.path}. "
-                    "Replace it with a real file or directory, then retry.")
+            found, fix = _REF_PROBLEMS[exc.reason]
+            return f"Looper does not run git in the work directory: its git directory {found} {exc.path}. {fix}, then retry."
     except Exception:
         logger.warning("could not check the work directory's git directory", exc_info=True)
     return None

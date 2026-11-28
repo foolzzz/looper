@@ -26,8 +26,9 @@ Every git command Looper runs in a task, step or worktree directory goes through
 * ``check_repository`` refuses, with ``RepositoryRefused``, a directory whose ``.git`` points somewhere that does
   not point back (another repository, a ``core.worktree`` elsewhere, a ``gitdir:`` link that is not a linked
   worktree's or a submodule's), so the checks above are made on the repository the directory claims to be.
-* A repository (or a checked-out submodule) whose git directory holds a symbolic link where git reads refs or its own
-  files is refused (``ref_links``): git would read, write and delete through it, outside the repository. This part is
+* A repository (or a checked-out submodule) whose git directory holds a symbolic link or a hard link where git reads
+  refs or its own files, or a symbolic ref that points outside ``refs`` (and the root refs), is refused
+  (``ref_links``): git would read, write and delete through it, outside the repository. This part is
   never remembered, inside ``cached()`` either. Before every command ``run`` and ``spawn`` start, a fixed check
   (``ref_links.check``) looks at the git directory and the common directory; a command that writes refs
   (``_WRITING``) also has the reflogs it writes checked. ``check_repository`` without ``args`` walks everything
@@ -37,15 +38,16 @@ Every git command Looper runs in a task, step or worktree directory goes through
 * ``environment`` points ``GIT_GRAFT_FILE`` at ``/dev/null``: a graft file changes no history Looper reads.
 
 **Known race limits.** A check and the command it precedes are not atomic: a process writing the repository at the same
-time can put a link in place after the check, and git follows it. A direct task Manager session checks again before and
-after each turn, while it holds the directory's lock. In orchestrated mode this risk remains: the Worker is not
+time can put a link or such a symbolic ref in place after the check, and git follows it. A direct task Manager
+session checks again before and after each turn, while it holds the directory's lock. In orchestrated mode this risk remains: the Worker is not
 sandboxed and can already read and write such files itself, but what a git command that succeeds then prints could
 still reach Looper's records (a failed command's output does not, ``GitFailure``).
-The check before a command is not the full walk: a link placed deeper under ``logs``, or among another worktree's own
+The check before a command is not the full walk: what is placed deeper under ``logs``, or among another worktree's own
 refs and root pseudo-refs, between two full walks is found at the next full walk, or at the next command that writes
-that reflog. Reading commands in between do not go through it (a command given a reflog walks everything; revisions
-passed on standard input are not looked at for that), and no command Looper runs reads another worktree's root
-pseudo-refs (``ORIG_HEAD``, ...).
+that reflog; another worktree's ``HEAD`` is read for its target only before a command that reads other worktrees
+(``_reads_worktree_heads``). Reading commands in between do not go through these (a command given a reflog walks
+everything; revisions passed on standard input are not looked at for that), and no command Looper runs reads another
+worktree's root pseudo-refs (``ORIG_HEAD``, ...).
 The drivers are found before the command runs, so an agent that writes a definition in between is not stopped
 (the fixed overrides, which do not depend on the repository, are). ``cached`` reuses one check for a directory
 inside a block, for an operation that runs many commands and has no agent running meanwhile.
@@ -90,8 +92,9 @@ OVERRIDES = (
     "advice.graftFileDeprecated=false",
 )
 PREFLIGHT_TIMEOUT_SEC = 10
-# The ``RepositoryRefused`` reasons about links in the git directory; ``path`` names the place inside the repository.
-REF_REASONS = ("ref_symlink", "ref_unchecked")
+# The ``RepositoryRefused`` reasons about the git directory's refs and files; ``path`` names the place inside the
+# repository.
+REF_REASONS = tuple(kind.value for kind in ref_links.Kind)
 logger = logging.getLogger(__name__)
 
 # What reaches git. Where programs and the user's files are (PATH, HOME, USER, LOGNAME), temporary files (TMPDIR),
@@ -126,9 +129,11 @@ class RepositoryRefused(subprocess.SubprocessError):
     ``reason`` is ``attributes_driver`` (``info/attributes`` assigns a driver), ``git_dir_mismatch`` (the ``.git``
     does not belong to this directory), ``outside_worktree`` (the directory is not inside the work tree git
     reports), ``object_alternates`` (``objects/info/alternates`` or ``http-alternates`` is not empty),
-    ``ref_symlink`` (the git directory holds a symbolic link where git reads refs or its own files) or
+    ``ref_symlink`` or ``ref_hardlink`` (the git directory holds a symbolic or a hard link where git reads refs or
+    its own files), ``ref_symref_target`` (a symbolic ref there points outside ``refs`` and the root refs) or
     ``ref_unchecked`` (such a place could not be looked at).
-    For the last two, ``path`` names the place (``.git/refs/heads/x``), never what a link points at.
+    For the ``ref_`` reasons, ``path`` names the place (``.git/refs/heads/x``), never what a link or a symbolic ref
+    points at.
     """
 
     def __init__(self, reason: str, directory: str | Path, detail: str, *, path: str | None = None):
@@ -463,23 +468,36 @@ def _own_directories(directory: str | Path, found: Inspection) -> Iterator[tuple
                 yield place, f"{os.path.relpath(module, found.top or directory)}/.git"
 
 
+_REF_DETAILS = {
+    ref_links.Kind.SYMLINK: "is a symbolic link, which git would follow out of the repository (replace it with a real "
+                            "file or directory)",
+    ref_links.Kind.HARD_LINK: "has another hard link: it is also a file elsewhere (replace it with a copy of its own)",
+    ref_links.Kind.SYMREF_TARGET: "is a symbolic ref that points outside refs/ (point it at a branch, or remove it)",
+    ref_links.Kind.UNCHECKED: "could not be checked for links",
+}
+
+
 def _raise_for(directory: str | Path, finding: ref_links.Finding | None) -> None:
-    if finding is None:
-        return
-    if finding.link:
-        raise RepositoryRefused("ref_symlink", directory,
-                                f"{finding.path} is a symbolic link, which git would follow out of the repository "
-                                "(replace it with a real file or directory)", path=finding.path)
-    raise RepositoryRefused("ref_unchecked", directory,
-                            f"{finding.path} could not be checked for symbolic links", path=finding.path)
+    if finding is not None:
+        raise RepositoryRefused(finding.kind.value, directory, f"{finding.path} {_REF_DETAILS[finding.kind]}",
+                                path=finding.path)
+
+
+def _reads_worktree_heads(args: Sequence[str]) -> bool:
+    """Whether the command can read other worktrees' ``HEAD``: one that writes refs (git asks which branches are
+    checked out), any ``worktree`` command, ``--all``, or an argument naming a worktree's ref."""
+    command = _subcommand(args)[0]
+    return (command in _WRITING or command == "worktree"
+            or any(arg == "--all" or "worktrees/" in arg for arg in args))
 
 
 def _refuse_ref_links(directory: str | Path, found: Inspection, args: Sequence[str] | None) -> None:
-    """Refuse when a git directory holds a symbolic link where git reads refs or its own files, or such a place cannot
-    be checked: the fixed check for the command ``args``, and the full walk without ``args``, for a command that reads
+    """Refuse when a git directory holds a link or a symbolic ref ``ref_links`` refuses, or such a place cannot be
+    checked: the fixed check for the command ``args``, and the full walk without ``args``, for a command that reads
     reflogs and for a repository this process has not walked in full. Reads the file system every time."""
     full = args is None or _reads_reflogs(args) or found.common not in _walked
     writes = None if full or args is None else _written_reflogs(found, args)
+    heads = not full and args is not None and _reads_worktree_heads(args)  # the full walk reads them itself
     try:
         for place, label in _own_directories(directory, found):
             log_tree, reflogs = False, ()
@@ -488,7 +506,8 @@ def _refuse_ref_links(directory: str | Path, found: Inspection, args: Sequence[s
                 # This worktree's own reflogs are all walked; the shared ones, those of the refs named.
                 log_tree = every or place == found.git_dir
                 reflogs = named if place == found.common else ()
-            _raise_for(directory, ref_links.check(place, label, log_tree=log_tree, reflogs=reflogs))
+            _raise_for(directory, ref_links.check(place, label, log_tree=log_tree, reflogs=reflogs,
+                                                  worktree_heads=heads))
         if full:
             for place, label in _ref_directories(directory, found):
                 _raise_for(directory, ref_links.find(place, label))

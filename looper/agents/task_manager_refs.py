@@ -152,8 +152,8 @@ def _refused(exc: git_safe.RepositoryRefused):
 
 async def _refuse_ref_storage(task_id: str, exc: git_safe.RepositoryRefused, *, phase: str, after_turn: bool,
                               message_id: str | None):
-    """The refusal of a turn for a link in the repository's git directory, listed in "needs you". Names the path inside the
-    repository only."""
+    """The refusal of a turn for the repository's git directory (``git_safe.REF_REASONS``), listed in "needs you". Names
+    the path inside the repository only."""
     from .tiers.task_manager import RefuseReason, Refused
 
     reason = RefuseReason.WORKSPACE
@@ -162,6 +162,12 @@ async def _refuse_ref_storage(task_id: str, exc: git_safe.RepositoryRefused, *, 
         task_manager_safety.record_refusal(task_manager_safety.Reason.REF_SYMLINK, phase)
         problem = f"任务目录仓库的 git 目录里有符号链接：{exc.path}。"
         fix = "把它换成普通文件或目录（或删掉）后再发消息。"
+    elif exc.reason == "ref_hardlink":
+        problem = f"任务目录仓库的 git 目录里有硬链接文件：{exc.path}。"
+        fix = "把它换成独立的副本（或删掉）后再发消息。"
+    elif exc.reason == "ref_symref_target":
+        problem = f"任务目录仓库的 git 目录里有指向 refs/ 之外的符号引用：{exc.path}。"
+        fix = "让它指向一个分支（或删掉）后再发消息。"
     else:
         problem = f"任务目录仓库的 git 目录无法完整检查：{exc.path}。"
         fix = "让这个位置可以正常读取（或删掉）后再发消息。"
