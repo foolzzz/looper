@@ -7,6 +7,7 @@ Every "outside" or private file here is a fake one under ``tmp_path``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -16,11 +17,12 @@ import tracemalloc
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from looper.agents import task_manager_sandbox
+from looper.agents import operator_auth, operator_notes, projects, serve, task_manager_sandbox
 from looper.agents.agent_settings import AgentType
 from looper.agents.runtimes import adapter, dsh, dsh_runner, instructions, omp, pi, pi_runner
 from looper.agents.runtimes.instructions import INJECTED_MAX_BYTES, record
@@ -338,3 +340,128 @@ def test_what_the_sandboxed_task_manager_may_not_read_does_not_reach_another_rol
     assert "FAKE-KEY-FIXTURE" not in prompt and "FAKE-OPS-FIXTURE" not in prompt
     assert _entries(runtime, work) == [_skipped("AGENTS.md", "outside")]
     assert all(entry["skipped"] == "outside" for entry in _entries(runtime, work / "pkg"))
+
+
+# --- A repository above the project that is not the project's: the versioned home, the runtime root ---
+
+INJECTORS = [(dsh, "dsh"), (dsh_runner, "dsh"), (pi, "pi"), (pi_runner, "pi")]
+INJECTOR_IDS = ["dsh", "dsh runner", "pi", "pi runner"]
+# Which directory holds .git, as (that repository, the operator's home, the configured runtime root), below tmp_path.
+OUTER = {
+    "the home": ("versioned", "versioned", None),
+    "above the home": ("versioned", "versioned/users/me", None),
+    "the home through a link": ("versioned", "home-link", None),
+    "the runtime root": ("versioned", "home", "versioned"),
+    "above the runtime root": ("versioned", "home", "versioned/state/looper"),
+    "the default runtime root": ("home/.looper", "home", None),
+}
+
+
+def _outer_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, layout: str) -> Path:
+    repository, home, runtime_root = OUTER[layout]
+    outer = tmp_path / repository
+    (outer / ".git").mkdir(parents=True)
+    if home == "home-link":
+        (tmp_path / home).symlink_to(outer)
+    else:
+        (tmp_path / home).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(tmp_path / home))
+    monkeypatch.setattr(instructions, "_runtime_root", None, raising=False)
+    if runtime_root is not None:
+        (tmp_path / runtime_root).mkdir(parents=True, exist_ok=True)
+        instructions.configure_runtime_root(tmp_path / runtime_root)
+    return outer
+
+
+@pytest.mark.parametrize("module, runtime", INJECTORS, ids=INJECTOR_IDS)
+@pytest.mark.parametrize("layout", OUTER)
+def test_a_repository_holding_the_home_or_the_runtime_root_is_not_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module: Any, runtime: str, layout: str,
+) -> None:
+    outer = _outer_repository(tmp_path, monkeypatch, layout)
+    work = outer / "pX"  # no .git of its own
+    (outer / "other-tool").mkdir()
+    (outer / "other-tool" / "CLAUDE.md").write_text("FAKE-OTHER-TOOL-RULES")
+    work.mkdir()
+    (outer / "AGENTS.md").write_text("FAKE-RULES-ABOVE-THE-WORK-DIRECTORY")
+    (work / "AGENTS.md").symlink_to("../other-tool/CLAUDE.md")
+
+    prompt = _prompt(module, runtime, work)
+
+    assert "FAKE-OTHER-TOOL-RULES" not in prompt and "FAKE-RULES-ABOVE-THE-WORK-DIRECTORY" not in prompt
+    assert "# Project instructions" not in prompt and LOOPER_PROMPT in prompt
+    assert _entries(runtime, work) == [_skipped("../AGENTS.md", "outside"), _skipped("AGENTS.md", "outside")]
+
+
+@pytest.mark.parametrize("module, runtime", INJECTORS, ids=INJECTOR_IDS)
+def test_below_a_versioned_home_the_work_directory_still_gives_its_own_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module: Any, runtime: str,
+) -> None:
+    work = _outer_repository(tmp_path, monkeypatch, "the home") / "pX"
+    work.mkdir()
+    (work / "CLAUDE.md").write_text("OWN RULES")
+    (work / "AGENTS.md").symlink_to("CLAUDE.md")
+
+    assert "OWN RULES" in _prompt(module, runtime, work)
+    (entry,) = _entries(runtime, work)
+    assert "skipped" not in entry
+
+
+@pytest.mark.parametrize("module, runtime", INJECTORS, ids=INJECTOR_IDS)
+def test_a_repository_inside_a_versioned_home_is_still_the_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module: Any, runtime: str,
+) -> None:
+    repo = _outer_repository(tmp_path, monkeypatch, "the home") / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "pkg").mkdir()
+    (repo / "AGENTS.md").write_text("REPOSITORY RULES")
+    (repo / "pkg" / "CLAUDE.md").symlink_to("../AGENTS.md")
+
+    assert _prompt(module, runtime, repo / "pkg").count("REPOSITORY RULES") == 2
+    assert all("skipped" not in entry for entry in _entries(runtime, repo / "pkg"))
+
+
+# --- A repository nested in the project is another repository ---
+
+
+@pytest.mark.parametrize("module, runtime, repository", ASSEMBLERS, ids=ASSEMBLER_IDS)
+@pytest.mark.parametrize("marker", ["directory", "file"], ids=["a clone", "a submodule"])
+@pytest.mark.parametrize("target", ["nested/CLAUDE.md", "nested/docs/AGENTS.md"])
+def test_a_link_into_a_nested_repository_is_not_followed(
+    tmp_path: Path, module: Any, runtime: str, repository: bool, marker: str, target: str,
+) -> None:
+    work = _work(tmp_path, repository)
+    (work / target).parent.mkdir(parents=True)
+    (work / target).write_text("FAKE-NESTED-REPOSITORY-RULES")
+    if marker == "directory":
+        (work / "nested" / ".git").mkdir()
+    else:
+        (work / "nested" / ".git").write_text("gitdir: elsewhere")
+    (work / "AGENTS.md").symlink_to(target)
+
+    prompt = _prompt(module, runtime, work)
+    entries = _entries(runtime, work)
+
+    assert "FAKE-NESTED-REPOSITORY-RULES" not in prompt and "# Project instructions" not in prompt
+    assert entries == [_skipped("AGENTS.md", "other_repository")]
+
+
+def test_serve_tells_the_instruction_reader_its_runtime_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(instructions, "_runtime_root", None, raising=False)
+    for module in (operator_notes, projects):
+        monkeypatch.setattr(module, "_root", module._root)
+
+    def stop(_: Path) -> str:  # the first startup step after the process-wide settings
+        raise operator_auth.OperatorTokenError("stop here")
+
+    monkeypatch.setattr(operator_auth, "ensure_token", stop)
+    ops = SimpleNamespace(host="127.0.0.1", port=1, public_url="", operator_notes_root="", projects_root="")
+
+    with pytest.raises(serve.StartupCheckFailed):
+        asyncio.run(serve._run_agent_system_watched(
+            ops=ops, runtime_root=tmp_path, work_dir=tmp_path, claude_bin="claude", skip_backup=True,
+            runner_supervisors=(), ownership=None, exit_now=lambda _: None, loop_watch=None))
+
+    assert instructions._runtime_root == tmp_path

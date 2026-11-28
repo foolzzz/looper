@@ -17,12 +17,13 @@ omp 18.4.3 under Looper's isolation (the multi-runtime RFC, section 9):
   goes into the system prompt Looper gives it instead (``Delivery.INJECTED``,
   ``injected_section``), up to ``INJECTED_MAX_BYTES``.
 
-A file Looper reads itself is read only from inside the project (the repository
-root, or the work directory outside a repository) by ``safe_read``, and a link
-is followed only to a file with one of the two names (``NAMES``): a link that
-leads out of the project or to a file of any other name, a file with other hard
-links and anything but a regular file are left out, and the run's record says
-which and why.
+A file Looper reads itself is read only from inside the project (``boundary``:
+the repository root, or the work directory outside a repository or when that
+root holds the operator's home or Looper's runtime root) by ``safe_read``, and a
+link is followed only to a file with one of the two names (``NAMES``): a link
+that leads out of the project, into another repository inside it or to a file of
+any other name, a file with other hard links and anything but a regular file are
+left out, and the run's record says which and why.
 
 So each runtime sees the file it reads itself, and the other one when the
 project has only that; no file is given twice. Each run's record names the
@@ -33,6 +34,7 @@ at: a ``.claude/CLAUDE.md``, Codex's ``AGENTS.override.md`` or a project's own
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -42,6 +44,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from ...paths import home_runtime_root
 from ..claude_cli import repository_root
 from ..reported_files import prompt_name
 from ..safe_read import Skip, Skipped, read_inside
@@ -56,6 +59,7 @@ INJECTED_MAX_BYTES = 32 * 1024
 # What a run's record says of a file left out; an ``IO_ERROR`` says what failed instead.
 SKIPPED = {
     Skip.OUTSIDE: "it leads outside the project",
+    Skip.OTHER_REPOSITORY: "it is in another repository inside the project",
     Skip.NOT_AN_INSTRUCTION_FILE: "it leads to a file that is not an instruction file",
     Skip.SYMLINK: "its path became a link while it was opened",
     Skip.HARD_LINKED: "it has other hard links",
@@ -65,6 +69,14 @@ SKIPPED = {
 }
 
 logger = logging.getLogger(__name__)
+
+# The runtime root ``looper serve`` runs with (``configure_runtime_root``); None: the default one.
+_runtime_root: Path | None = None
+
+
+def configure_runtime_root(runtime_root: Path) -> None:
+    global _runtime_root
+    _runtime_root = runtime_root
 
 
 class Delivery(str, Enum):
@@ -89,6 +101,26 @@ def project_dirs(cwd: str | Path) -> list[Path]:
     while directories[-1] != root:
         directories.append(directories[-1].parent)
     return directories[::-1]
+
+
+def _is_at_or_below(path: Path, directory: Path) -> bool:
+    """Whether ``path`` is ``directory`` or lies below it, by the files themselves, however either is spelled."""
+    resolved = Path(os.path.realpath(path))
+    for candidate in (resolved, *resolved.parents):
+        with contextlib.suppress(OSError):  # a part that does not exist
+            if os.path.samefile(candidate, directory):
+                return True
+    return False
+
+
+def boundary(cwd: str | Path) -> Path:
+    """The directory a file Looper reads for a run in ``cwd`` must be inside: the repository root, else ``cwd``."""
+    directory = Path(cwd).absolute()
+    root = repository_root(directory)
+    # A repository that holds the operator's home or Looper's runtime root (a versioned home or a directory above
+    # it) is not the project's: inside it a link could reach other tools' and other projects' instruction files.
+    own = (Path.home(), _runtime_root or home_runtime_root())
+    return directory if any(_is_at_or_below(path, root) for path in own) else root
 
 
 def _is_file(path: Path) -> bool:
@@ -126,7 +158,7 @@ class Injected:
 
 def read_injected(path: Path, cwd: str | Path) -> Injected:
     """The part of ``path`` a system prompt carries, read only from inside the project of a run in ``cwd``."""
-    read = read_inside(project_dirs(cwd)[0], path, INJECTED_MAX_BYTES, clip=True, names=NAMES)
+    read = read_inside(boundary(cwd), path, INJECTED_MAX_BYTES, clip=True, names=NAMES)
     if isinstance(read, Skipped):
         return Injected(skipped=read.reason, error=read.detail or SKIPPED[read.reason])
     return Injected(read.data.decode("utf-8", errors="replace"), read.size,
