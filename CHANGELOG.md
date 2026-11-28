@@ -20,20 +20,23 @@ How the agent system works today is described in
 
 ## [2.15.45] - 2026-11-27
 
-Frozen at `98703b682` (the merge of [#1891](https://github.com/foolzzz/looper/pull/1891)): everything merged to main after v2.15.44's freeze `448632f1f`, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. The release body is [docs/releases/v2.15.45.md](docs/releases/v2.15.45.md). Startup adds three migrations: `task_manager_sandbox_policy` (2160), `manager_action_sender` (2170) and `task_manager_refs` (2180). No runtime dependency changes. The task Manager changes apply only while `tasks.conversations.manager_answers` is on; read Before you upgrade in the release body first.
+Frozen at `0399cd8ce` (the merge of [#1903](https://github.com/foolzzz/looper/pull/1903)): everything merged to main after v2.15.44's freeze `448632f1f`, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. The release body is [docs/releases/v2.15.45.md](docs/releases/v2.15.45.md). Startup adds three migrations: `task_manager_sandbox_policy` (2160), `manager_action_sender` (2170) and `task_manager_refs` (2180). No runtime dependency changes. The task Manager changes apply only while `tasks.conversations.manager_answers` is on; read Before you upgrade in the release body first.
 
 ### Security
 
 - **The Manager's action trail records who started each call** ([#1876](https://github.com/foolzzz/looper/pull/1876), [#1885](https://github.com/foolzzz/looper/pull/1885)).
-- **The task Manager's direct session runs inside Claude Code's Bash sandbox** with a fixed tool list ([#1871](https://github.com/foolzzz/looper/pull/1871)), starts only in a checked, unshared in-place directory ([#1872](https://github.com/foolzzz/looper/pull/1872)), reports changed branches and tags ([#1878](https://github.com/foolzzz/looper/pull/1878), [#1879](https://github.com/foolzzz/looper/pull/1879)), runs with a classified process environment ([#1886](https://github.com/foolzzz/looper/pull/1886)) and reaches only the domains the operator allows per project, with explanations of denied commands ([#1873](https://github.com/foolzzz/looper/pull/1873)). Off by default.
+- **The task Manager's direct session runs inside Claude Code's Bash sandbox** with a fixed tool list ([#1871](https://github.com/foolzzz/looper/pull/1871)), starts only in a checked, unshared in-place directory ([#1872](https://github.com/foolzzz/looper/pull/1872), [#1890](https://github.com/foolzzz/looper/pull/1890)), is read back before every turn ([#1870](https://github.com/foolzzz/looper/pull/1870)), reports changed branches and tags ([#1878](https://github.com/foolzzz/looper/pull/1878), [#1879](https://github.com/foolzzz/looper/pull/1879)), runs with a classified process environment ([#1886](https://github.com/foolzzz/looper/pull/1886)) and reaches only the domains the operator allows per project, with explanations of denied commands ([#1873](https://github.com/foolzzz/looper/pull/1873)). Off by default.
 - **`looper leads eval-export` asks git through the hardened helper** ([#1881](https://github.com/foolzzz/looper/pull/1881)).
 - **Lark cards @-mention only a well-formed open_id** ([#1883](https://github.com/foolzzz/looper/pull/1883)); **very long Lark text is neutralized in one linear pass** ([#1875](https://github.com/foolzzz/looper/pull/1875)).
 - **The ACP preflight runs isolated; API responses carry `X-Content-Type-Options: nosniff`** ([#1884](https://github.com/foolzzz/looper/pull/1884)).
+- **Project instruction files that Looper reads itself are read only from inside the repository** ([#1901](https://github.com/foolzzz/looper/pull/1901)); upgrade if you run the DSH or pi runtime, or omp outside a repository.
 
 ### Fixed
 
 - **The profile reader no longer times out on a cold import** ([#1889](https://github.com/foolzzz/looper/pull/1889)).
 - **A runner that answered its health probe is no longer reclaimed after a host stall** ([#1888](https://github.com/foolzzz/looper/pull/1888)).
+- **A task stop survives a failing cleanup step, and a late Planner status no longer overwrites it** ([#1900](https://github.com/foolzzz/looper/pull/1900)).
+- **A Lark channel stop is no longer lost when a send completes as it is cancelled** ([#1903](https://github.com/foolzzz/looper/pull/1903)).
 
 ### Internal
 
