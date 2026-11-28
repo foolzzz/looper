@@ -8,19 +8,24 @@ the operator's checkout is the operator's. A change to a branch or tag other tha
 you"; it is not an invariant violation and raises no alert (RFC 21, 25.10).
 
 The task branch is recorded once, at the first enablement. A turn refuses to start while ``HEAD`` is not on it.
-Every git call goes through ``git_safe`` (no repository code runs); ``refs/remotes`` is never read.
+Every git call goes through ``git_safe`` (no repository code runs). Only ``refs/heads`` and ``refs/tags`` are listed
+and compared; any other ref (``refs/remotes`` too) is read only as a hop of a symbolic ref's chain.
+
+A symbolic ref is recorded hop by hop (``Snapshot.hops``). Refs that such chains tie together are restored by one
+command: a single ``git update-ref`` transaction that checks every hop it reads through and puts back every hop that
+changed, or changes nothing. When the chains cannot be known, the report says so (``NotRestorable``) instead.
 """
 from __future__ import annotations
 
 import asyncio
-import heapq
 import logging
+import os
 import re
 import shlex
 import unicodedata
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -36,6 +41,7 @@ logger = logging.getLogger(__name__)
 GIT_TIMEOUT_SEC = 30
 _LOCKLESS = {"GIT_OPTIONAL_LOCKS": "0"}
 HEADS, TAGS, LOOPER = "refs/heads/", "refs/tags/", "refs/heads/looper/"
+COMPARED = (HEADS, TAGS)
 FINISHED_STATUSES = frozenset({"completed", "failed", "cancelled", "stopped"})
 FIRST_ENABLE_NOTICE = "first_enable_in_place"
 REFS_UNREADABLE_NOTICE = "refs_unreadable"
@@ -47,6 +53,7 @@ _LINE_BREAKS = frozenset("\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 WALK_LIMIT = 20000  # commits read when deciding fast-forward
 OBJECT_LIMIT = 1 << 20  # a commit object larger than this ends the walk undecided
 SYMREF_LIMIT = 200  # symbolic refs asked for their direct target (one git process each) in one snapshot
+SYMREF_GIT = (2, 46)  # the first git whose ``update-ref --stdin`` checks and writes symbolic refs
 _OID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
@@ -72,12 +79,24 @@ class Ancestry(Enum):
     UNDECIDED = "undecided"
 
 
+class NotRestorable(str, Enum):
+    """Why a report lists a change without a restore command."""
+
+    TOO_MANY_SYMREFS = "too_many_symrefs"  # over ``SYMREF_LIMIT``: their direct targets are not read
+    GIT_TOO_OLD = "git_too_old"  # older than ``SYMREF_GIT``: no command can check and write a symbolic ref
+    CHAIN_OUTSIDE_REFS = "chain_outside_refs"  # a hop outside ``refs/``, such as ``HEAD``: Looper never writes those
+    CHAIN_UNREADABLE = "chain_unreadable"  # git could not read a hop of the chain
+
+
 @dataclass(frozen=True)
 class Snapshot:
-    refs: Mapping[str, str]
+    refs: Mapping[str, str]  # branch or tag -> the commit or tag it resolves to; a dangling symbolic ref is not here
     head: str | None  # the full name of the branch HEAD is on; None when detached
-    symrefs: Mapping[str, str] = field(default_factory=dict)  # ref -> the ref its chain ends at, for symbolic refs
-    hops: Mapping[str, str] = field(default_factory=dict)  # ref -> the ref it points to directly, for symbolic refs
+    symrefs: Mapping[str, str] = field(default_factory=dict)  # ref -> the ref its chain ends at, as far as git lists it
+    hops: Mapping[str, str] = field(default_factory=dict)  # any ref read -> the ref it points to directly
+    # Refs outside branches and tags that a chain reads through and that are not symbolic: the value, None when missing.
+    outside: Mapping[str, str | None] = field(default_factory=dict)
+    gap: NotRestorable | None = None  # why symbolic refs here have no direct target in ``hops``
 
 
 @dataclass(frozen=True)
@@ -86,11 +105,15 @@ class RefChange:
     change: Change
     old: str | None
     new: str | None
-    restore: str
+    restore: str | None  # None exactly when ``not_restorable`` says why
+    not_restorable: NotRestorable | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {"ref": self.ref, "change": self.change.value, "old": self.old, "new": self.new,
-                "restore": self.restore}
+        found = {"ref": self.ref, "change": self.change.value, "old": self.old, "new": self.new,
+                 "restore": self.restore}
+        if self.not_restorable is not None:
+            found["not_restorable"] = self.not_restorable.value
+        return found
 
 
 @dataclass(frozen=True)
@@ -129,82 +152,133 @@ def _quote(name: str) -> str:
     return f"$'{body}'"
 
 
-def _restore(ref: str, change: Change, old: str | None, new: str | None,
-             old_target: str | None = None, new_target: str | None = None, linked: str | None = None,
-             direct: str | None = None) -> str:
+# What a ref itself holds: ("oid", id), ("ref", direct target), ("end", chain end: the direct target is unknown), or
+# None when there is no such ref.
+Value = tuple[str, str] | None
+
+
+def _value(snap: Snapshot, name: str) -> Value:
+    if name in snap.hops:
+        return "ref", snap.hops[name]
+    if name in snap.symrefs:
+        return "end", snap.symrefs[name]
+    oid = snap.refs.get(name) or snap.outside.get(name)
+    return ("oid", oid) if oid else None
+
+
+def _differs(before: Snapshot, after: Snapshot, name: str) -> bool:
+    old, new = _value(before, name), _value(after, name)
+    if "end" in ((old or ("",))[0], (new or ("",))[0]) and name in before.symrefs and name in after.symrefs:
+        return before.symrefs[name] != after.symrefs[name]  # one side has no direct target: compare the chain's end
+    return old != new
+
+
+def _chain(snap: Snapshot, name: str) -> list[str]:
+    """``name`` and every ref it reads through, in order, as far as ``snap`` knows the hops."""
+    chain = [name]
+    while (target := snap.hops.get(chain[-1])) is not None and target not in chain:
+        chain.append(target)
+    return chain
+
+
+def _resolved(snap: Snapshot, name: str) -> str | None:
+    end = _chain(snap, name)[-1]
+    return snap.refs.get(end) or snap.outside.get(end)
+
+
+def _gap(before: Snapshot, after: Snapshot, names: Iterable[str]) -> NotRestorable | None:
+    """Why no command can check and restore the refs ``names``, or None."""
+    for name in sorted(names):
+        if not name.startswith("refs/"):
+            return NotRestorable.CHAIN_OUTSIDE_REFS
+        for snap in (before, after):
+            if name in snap.symrefs and name not in snap.hops:
+                return snap.gap or NotRestorable.CHAIN_UNREADABLE
+        if not name.startswith(COMPARED) and name not in after.hops and name not in after.outside:
+            return NotRestorable.CHAIN_UNREADABLE
+    return None
+
+
+def _direct_command(ref: str, old: str | None, new: str | None) -> str:
+    """The command for a ref that no symbolic ref ties to another: it applies only while the ref still reads ``new``.
+    --no-deref: if the name has become a symbolic ref since, only that name changes."""
     name = _quote(ref)
-    if direct is not None:  # the task branch became a link: a direct ref on ``direct`` again, if it still reads ``new``
-        return f"git update-ref --no-deref {name} {direct} {new}"
-    if linked is not None:  # the link is intact: what moved, and what to move back, is its target
-        # --no-deref like every other restore: the name was a direct ref when this was written (%(symref) peels to
-        # the end of the chain); if it has become a symbolic ref since, only that name changes.
-        return f"git update-ref --no-deref {_quote(linked)} {old} {new}"
-    if old_target is not None:  # a symbolic ref goes back to what it pointed at
-        return f"git symbolic-ref {name} {_quote(old_target)}"
-    if new_target is not None:
-        return (f"git symbolic-ref --delete {name}" if old is None
-                else f"git update-ref --no-deref {name} {old} {new}")
-    if change is Change.CREATED:
+    if old is None:
         return f"git update-ref --no-deref -d {name} {new}"
-    if change is Change.DELETED:
+    if new is None:
         return f"git update-ref --no-deref {name} {old}"
     return f"git update-ref --no-deref {name} {old} {new}"
 
 
-def _change(ref: str, old: str | None, new: str | None, *, plain_move: bool = False, unverified: bool = False,
-            old_target: str | None = None, new_target: str | None = None, linked: str | None = None,
-            direct: str | None = None) -> RefChange:
-    kind = (Change.CREATED if old is None else Change.DELETED if new is None
-            else Change.MOVED if plain_move else Change.FAST_FORWARD_UNVERIFIED if unverified
-            else Change.NON_FAST_FORWARD)
-    return RefChange(display(ref), kind, old, new,
-                     _restore(ref, kind, old, new, old_target, new_target, linked, direct))
+def _transaction(before: Snapshot, after: Snapshot, names: Iterable[str], kept: Mapping[str, Value]) -> str:
+    """One ``git update-ref`` transaction over ``names``: each is put back to its value before the turn (``kept`` says
+    otherwise for the task branch), and each one that stays is checked to still hold its value after the turn. git
+    applies all of it or none, so no order between commands matters."""
+    guards, lines = [], []
+    for name in sorted(names):
+        # A name only the end-of-turn chains read has no recorded earlier value: it is checked, never written.
+        known = name.startswith(COMPARED) or name in before.hops or name in before.outside
+        now = _value(after, name)
+        want = kept[name] if name in kept else _value(before, name) if known else now
+        if now is None or now[0] == "oid":
+            # git checks a value through a symbolic ref, so that the name still is none is the shell's to check.
+            guards.append(f"! git symbolic-ref -q --no-recurse {_quote(name)} >/dev/null")
+        if want == now:
+            if now is None:
+                lines.append(("verify", name))
+            else:
+                lines.append(("symref-verify" if now[0] == "ref" else "verify", name, now[1]))
+        elif want is None:
+            lines.append(("symref-delete" if now[0] == "ref" else "delete", name, now[1]))
+        elif want[0] == "ref":
+            if now is None:
+                lines.append(("symref-create", name, want[1]))
+            else:
+                lines.append(("symref-update", name, want[1], "ref" if now[0] == "ref" else "oid", now[1]))
+        elif now is None:
+            lines.append(("create", name, want[1]))
+        elif now[0] == "oid":
+            lines.append(("update", name, want[1], now[1]))
+        else:
+            # A transaction cannot check a link it turns back into a direct ref: the shell checks its direct target,
+            # git the value read through it (a dangling link has none; the rest of its chain is checked below).
+            guards.append(f'[ "$(git symbolic-ref -q --no-recurse {_quote(name)})" = {_quote(now[1])} ]')
+            current = _resolved(after, name)
+            lines.append(("update", name, want[1], *([current] if current else [])))
+    words = " ".join(_quote(" ".join(line)) for line in lines)
+    return " && ".join([*guards, f"printf '%s\\n' {words} | git update-ref --no-deref --stdin"])
 
 
-def _ordered(changes: list[tuple[str, RefChange]], info: list[tuple[str, RefChange]],
-             after: Snapshot) -> tuple[tuple[RefChange, ...], tuple[RefChange, ...]]:
-    """``changes`` and ``info`` (each entry with the ref its command writes) as they are listed, which is the order the
-    commands run in: ``changes`` first.
+def _commands(before: Snapshot, after: Snapshot, scopes: list[set[str]],
+              kept: Mapping[str, Value]) -> list[tuple[str | None, NotRestorable | None]]:
+    """For each reported entry (``scopes``: its ref and every ref it reads through before and after the turn), its
+    restore command or why there is none. Entries whose scopes meet share one command."""
+    root: dict[str, str] = {}
 
-    A command's current-value check reads through whatever its ref points to at the end of the turn, so it has to run
-    before any command that writes a ref further down that chain: outer link before inner link, every link before the
-    delete or move of its target. Otherwise the given order stays. An ``info`` entry that a change has to wait for is
-    listed among the changes. Links that form a cycle give no order: both lists then stay as given."""
-    below: dict[str, set[str]] = {}
-    for targets in (after.hops, after.symrefs):  # the chain's end too: a hop outside the compared refs is not read
-        for ref, target in targets.items():
-            below.setdefault(ref, set()).add(target)
-    entries = changes + info
-    written: dict[str, list[int]] = {}
-    for index, (ref, _) in enumerate(entries):
-        written.setdefault(ref, []).append(index)
-    later: list[set[int]] = []  # per entry, the entries whose commands have to run after its own
-    for ref, _ in entries:
-        seen, queue = {ref}, [ref]
-        while queue:
-            for target in below.get(queue.pop(), set()) - seen:
-                seen.add(target)
-                queue.append(target)
-        later.append({index for target in seen - {ref} for index in written.get(target, ())})
-    waiting = [0] * len(entries)
-    for followers in later:
-        for index in followers:
-            waiting[index] += 1
-    ready = [index for index, count in enumerate(waiting) if not count]  # ascending, so already a heap
-    order: list[int] = []
-    while ready:
-        order.append(heapq.heappop(ready))
-        for follower in later[order[-1]]:
-            waiting[follower] -= 1
-            if not waiting[follower]:
-                heapq.heappush(ready, follower)
-    if len(order) != len(entries):
-        logger.warning("task Manager refs: the symbolic refs form a cycle; the restore commands keep the order by name")
-        return tuple(c for _, c in changes), tuple(c for _, c in info)
-    changed = set(range(len(changes)))
-    listed = changed | {index for index in range(len(entries)) if later[index] & changed}
-    return (tuple(entries[i][1] for i in order if i in listed),
-            tuple(entries[i][1] for i in order if i not in listed))
+    def find(name: str) -> str:
+        while root.setdefault(name, name) != name:
+            name = root[name]
+        return name
+
+    for scope in scopes:
+        first, *rest = sorted(scope)
+        for name in rest:
+            root[find(name)] = find(first)
+    groups: dict[str, set[str]] = {}
+    for scope in scopes:
+        for name in scope:
+            groups.setdefault(find(name), set()).add(name)
+    made: dict[str, tuple[str | None, NotRestorable | None]] = {}
+    for key, names in groups.items():
+        if (why := _gap(before, after, names)) is not None:
+            made[key] = None, why
+        elif any(name in before.symrefs or name in before.hops or name in after.symrefs or name in after.hops
+                 for name in names):
+            made[key] = _transaction(before, after, names, kept), None
+        else:  # direct refs only, and so a single one
+            name, = names
+            made[key] = _direct_command(name, before.refs.get(name), after.refs.get(name)), None
+    return [made[find(next(iter(scope)))] for scope in scopes]
 
 
 def _refused(exc: git_safe.RepositoryRefused):
@@ -239,28 +313,87 @@ def _unreadable(detail: str):
     return Refused(RefuseReason.WORKSPACE, detail)
 
 
-async def _direct_targets(work_dir: str | Path, symrefs: Mapping[str, str]) -> dict[str, str]:
-    """The one-hop target of each symbolic ref (``%(symref)`` and a plain ``symbolic-ref`` both follow the whole
-    chain). It only orders the restore commands, so when it cannot be had (more than ``SYMREF_LIMIT`` symbolic refs,
-    a git without ``--no-recurse``) the snapshot goes without it and says so in the log."""
-    if len(symrefs) > SYMREF_LIMIT:
+async def _loose_symrefs(work_dir: str | Path) -> dict[str, str]:
+    """The names under ``refs/heads`` and ``refs/tags`` whose loose ref file is a symbolic ref, with the target the
+    file spells. git does not list one that dangles, and a symbolic ref is never packed, so the files are the only
+    place to find those (not in a reftable repository). git reads the targets a command is built from; the spelled
+    one only tells changes apart where git is not asked."""
+    code, common = await _git(work_dir, "rev-parse", "--git-common-dir")
+    if code:
+        raise _unreadable(f"{work_dir} is not a git repository Looper can read (git exit {code}).")
+    base = os.path.join(str(work_dir), common.removesuffix("\n"))
+
+    def walk() -> dict[str, str]:
+        found, pending = {}, ["refs/heads", "refs/tags"]
+        while pending:
+            folder = pending.pop()
+            try:
+                entries = list(os.scandir(os.path.join(base, folder)))
+            except FileNotFoundError:
+                continue
+            for entry in entries:
+                name = f"{folder}/{entry.name}"
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(name)
+                elif entry.is_symlink():  # the old spelling of a symbolic ref
+                    if (target := os.readlink(entry.path)).startswith("refs/"):
+                        found[name] = target
+                elif entry.is_file(follow_symlinks=False) and not name.endswith(".lock"):
+                    try:  # the directory is the model's: never follow or block on what appears there
+                        handle = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                        try:
+                            body = os.read(handle, 4096)
+                            if body.startswith(b"ref:"):
+                                found[name] = os.fsdecode(body[4:].strip())
+                        finally:
+                            os.close(handle)
+                    except FileNotFoundError:
+                        continue
+        return dict(sorted(found.items()))
+
+    try:
+        return await asyncio.to_thread(walk)
+    except OSError as exc:
+        raise _unreadable(f"Looper cannot read the branch and tag files ({type(exc).__name__}).") from None
+
+
+async def _symref_gap(work_dir: str | Path, count: int) -> NotRestorable | None:
+    """Why the direct targets of ``count`` symbolic refs are not read, or None."""
+    if count > SYMREF_LIMIT:
         logger.warning("task Manager refs: %d symbolic refs, over the limit of %d; their direct targets are not read",
-                       len(symrefs), SYMREF_LIMIT)
-        return {}
-    hops: dict[str, str] = {}
-    for ref in symrefs:
-        code, target = await _git(work_dir, "symbolic-ref", "-q", "--no-recurse", ref)
-        if code:
-            logger.warning("task Manager refs: git could not read a direct symbolic-ref target (exit %d); restore "
-                           "commands are ordered without direct targets", code)
-            return {}
-        hops[ref] = target.removesuffix("\n")
-    return hops
+                       count, SYMREF_LIMIT)
+        return NotRestorable.TOO_MANY_SYMREFS
+    _, text = await _git(work_dir, "version")
+    found = re.search(r"(\d+)\.(\d+)", text)
+    if found is None or (int(found[1]), int(found[2])) < SYMREF_GIT:
+        logger.warning("task Manager refs: this git cannot restore symbolic refs; their direct targets are not read")
+        return NotRestorable.GIT_TOO_OLD
+    return None
+
+
+async def _follow(work_dir: str | Path, snap: Snapshot, names: Iterable[str]) -> Snapshot:
+    """``snap`` with every ref in ``names`` outside the compared namespaces read, hop by hop: its direct target, or
+    its value. A name outside ``refs/`` is never read, and one git fails on stays unread."""
+    hops, outside, queue = dict(snap.hops), dict(snap.outside), deque(names)
+    while queue:
+        name = queue.popleft()
+        if name.startswith(COMPARED) or not name.startswith("refs/") or name in hops or name in outside:
+            continue
+        code, target = await _git(work_dir, "symbolic-ref", "-q", "--no-recurse", name)
+        if code == 0:
+            hops[name] = target.removesuffix("\n")
+            queue.append(hops[name])
+        elif code == 1:  # not a symbolic ref
+            code, value = await _git(work_dir, "show-ref", "--verify", "--hash", name)
+            outside[name] = value.strip() if code == 0 else None
+        else:
+            logger.warning("task Manager refs: git could not read a ref a symbolic ref goes through (exit %d)", code)
+    return replace(snap, hops=hops, outside=outside)
 
 
 async def snapshot(work_dir: str | Path) -> Snapshot:
-    """The logical value of every branch and tag (and the targets of a symbolic ref), and where ``HEAD`` points.
-    Packed refs, ``gc``, reflogs and index changes do not show in these values.
+    """The logical value of every branch and tag, every hop of each symbolic ref's chain (dangling ones included),
+    and where ``HEAD`` points. Packed refs, ``gc``, reflogs and index changes do not show in these values.
 
     A listing that cannot be told apart from another (a ref name holding a character ``str.splitlines`` breaks
     lines on, or two records of one name) is a read failure, never a last-write-wins value."""
@@ -283,11 +416,30 @@ async def snapshot(work_dir: str | Path) -> Snapshot:
         refs[ref] = sha
         if target:
             symrefs[ref] = target
+    dangling = {name: target for name, target in (await _loose_symrefs(work_dir)).items() if name not in refs}
+    if any((_LINE_BREAKS | {"\n"}) & set(name) for name in dangling):
+        raise _unreadable("A branch or tag name holds a line-break character; Looper cannot read the refs safely.")
     code, head = await _git(work_dir, "symbolic-ref", "-q", "HEAD")
     # Only the trailing newline goes: ref names may end in (or hold) Unicode whitespace.
     head = head.removesuffix("\n") if code == 0 else ""
-    return Snapshot(refs, head if head.startswith(HEADS) else None, symrefs,
-                    await _direct_targets(work_dir, symrefs))
+    found = Snapshot(refs, head if head.startswith(HEADS) else None, symrefs)
+    links = [*symrefs, *dangling]
+    if not links:
+        return found
+    gap = await _symref_gap(work_dir, len(links))
+    hops: dict[str, str] = {}
+    if gap is None:
+        for ref in links:
+            code, target = await _git(work_dir, "symbolic-ref", "-q", "--no-recurse", ref)
+            if code == 0:
+                hops[ref] = target.removesuffix("\n")
+            elif ref in symrefs:  # a file git does not take for a symbolic ref is no ref at all
+                logger.warning("task Manager refs: git could not read a direct symbolic-ref target (exit %d)", code)
+                gap, hops = NotRestorable.CHAIN_UNREADABLE, {}
+                break
+    if gap is not None:  # still notice a dangling link, without a git process for each
+        return replace(found, symrefs={**symrefs, **dangling}, gap=gap)
+    return await _follow(work_dir, replace(found, hops=hops), hops.values())
 
 
 async def branch_problem(work_dir: str | Path, branch: str) -> str | None:
@@ -423,57 +575,62 @@ async def _active_task(task_id: str) -> bool:
 
 async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, task_branch: str, task_id: str,
                   active_task: Callable[[str], Awaitable[bool]] = _active_task) -> Report:
-    """What changed between two snapshots, with no side effect."""
-    # Each entry with the ref its command writes (an intact link's command writes the link's target).
-    changes: list[tuple[str, RefChange]] = []
-    info: list[tuple[str, RefChange]] = []
+    """What changed between two snapshots, with no side effect (it may read more refs: the ones a chain read through
+    before the turn and no chain does now)."""
+    after = await _follow(work_dir, after, [*before.hops.values(), *before.outside])
+    # (entry without its command, the refs the command concerns, whether it is information only)
+    entries: list[tuple[RefChange, set[str], bool]] = []
     task_ref, own_commits, needs_you = HEADS + task_branch, 0, False
-    for ref in sorted(before.refs.keys() | after.refs.keys()):
+    kept: dict[str, Value] = {}  # the task branch, where a command leaves other than its value before the turn
+    names = {name for snap in (before, after) for name in (*snap.refs, *snap.symrefs, *snap.hops)
+             if name.startswith(COMPARED)}
+    for ref in sorted(names, key=lambda name: (name != task_ref, name)):  # the task branch first
+        was, now = _value(before, ref), _value(after, ref)
         old, new = before.refs.get(ref), after.refs.get(ref)
-        old_target, new_target = before.symrefs.get(ref), after.symrefs.get(ref)
-        if old == new and old_target == new_target:
+        changed = _differs(before, after, ref)
+        path = _chain(before, ref)
+        linked = ref in before.symrefs or ref in before.hops
+        # A hop outside branches and tags has no entry of its own: its move shows only through a link that reads it.
+        moved_outside = any(not name.startswith(COMPARED) and _differs(before, after, name) for name in path[1:])
+        end = before.symrefs.get(ref)
+        if linked and ref not in before.hops:  # no direct targets: only the end of the chain can be judged
+            moved_outside = old != new and not (end in before.refs or end in after.refs)
+        if not changed and not (linked and (moved_outside or (ref == task_ref and old != new))):
             continue
-        pointers = {"old_target": old_target, "new_target": new_target}
-        compared = old_target in before.refs or old_target in after.refs
-        if old_target is not None and old_target == new_target:
-            # An intact link follows its target, and the target's own change is reported under its own name, but
-            # only when the target is itself compared (``refs/heads``, ``refs/tags``). A target outside them
-            # (``refs/remotes/*`` is deliberately never read, RFC 25.4; anything else is not listed) would
-            # otherwise hide the link's value change, so it is reported: erring toward reporting. The task branch
-            # is judged below either way; undoing what it reads through an intact link means moving the target.
-            if compared and ref != task_ref:
-                continue
-            pointers = {"linked": old_target}
         if ref == task_ref:
             # Ancestry is decided from the two commits whatever the task branch is linked to.
             verdict, count = ((await fast_forward(work_dir, old, new))
                               if old is not None and new is not None else (Ancestry.DIVERGES, 0))
-            retargeted = old_target != new_target
-            if retargeted and new_target is not None and old is not None:
-                # Its commits stay when they descend; otherwise it goes back to where it was.
-                pointers["direct"] = new if verdict is Ancestry.DESCENDS else old
+            relinked = changed or path != _chain(after, ref)
+            if not linked and now is not None and now[0] != "oid" and was is not None:
+                # It became a link: direct again, on the new commit when its commits descend, else where it was.
+                kept[ref] = ("oid", new) if verdict is Ancestry.DESCENDS else was
             if verdict is Ancestry.DESCENDS:
                 own_commits = count
-                # A changed link is always its own report; an intact one only into a namespace not compared.
-                if not (retargeted or (old_target is not None and not compared)):
+                if now is not None and now[0] == "oid" and not linked:
+                    kept[ref] = now  # its own commits stay, also when a command checks this branch
+                # A changed chain is always its own report; an intact one only when it moved outside.
+                if not (moved_outside or (relinked and (linked or ref in after.symrefs or ref in after.hops))):
                     continue
-            # Ahead of the other entries: its command may have to run before one that deletes or moves its target.
-            changes.insert(0, (pointers.get("linked", ref), _change(
-                ref, old, new, plain_move=verdict is Ancestry.DESCENDS, unverified=verdict is Ancestry.UNDECIDED,
-                **pointers)))
-            continue
-        entry = (pointers.get("linked", ref), _change(ref, old, new, plain_move=True, **pointers))
+        kind = (Change.CREATED if was is None
+                else Change.DELETED if now is None or (new is None and old is not None)
+                else Change.MOVED if ref != task_ref or verdict is Ancestry.DESCENDS
+                else Change.FAST_FORWARD_UNVERIFIED if verdict is Ancestry.UNDECIDED
+                else Change.NON_FAST_FORWARD)
         owner = ref.removeprefix(LOOPER).split("/", 1) if ref.startswith(LOOPER) else None
-        if owner and len(owner) == 2 and owner[0] != task_id and await active_task(owner[0]):
-            info.append(entry)
-            continue
-        changes.append(entry)
-        needs_you = True
-    # The order to start from: names that became or changed as links first, the task branch first among them.
-    # ``_ordered`` then moves only what a link's current-value check needs. Stable.
-    links = {display(ref) for ref, target in after.symrefs.items() if before.symrefs.get(ref) != target}
-    changes.sort(key=lambda entry: entry[1].ref not in links)
-    return Report(*_ordered(changes, info, after), before.head, after.head, own_commits, needs_you)
+        informs = bool(ref != task_ref and owner and len(owner) == 2 and owner[0] != task_id
+                       and await active_task(owner[0]))
+        needs_you = needs_you or (ref != task_ref and not informs)
+        entries.append((RefChange(display(ref), kind, old, new, None), {*path, *_chain(after, ref)}, informs))
+    commands = _commands(before, after, [scope for _, scope, _ in entries], kept)
+    done = [replace(entry, restore=command, not_restorable=why)
+            for (entry, _, _), (command, why) in zip(entries, commands)]
+    # An information entry whose command also restores a change is listed with the changes.
+    shared = {change.restore for change, (_, _, informs) in zip(done, entries) if not informs and change.restore}
+    changes, info = [], []
+    for change, (_, _, informs) in zip(done, entries):
+        (info if informs and change.restore not in shared else changes).append(change)
+    return Report(tuple(changes), tuple(info), before.head, after.head, own_commits, needs_you)
 
 
 def payload(report: Report, report_id: int | None, message_id: str | None = None) -> dict[str, Any]:

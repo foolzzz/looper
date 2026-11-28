@@ -232,10 +232,10 @@ def test_a_symbolic_ref_is_restored_without_touching_its_target(repo):
     report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/link", "refs/heads/main"))
     change, = report.changes
     assert change.ref == "refs/heads/link" and change.change is Change.CREATED
-    assert change.restore == "git symbolic-ref --delete refs/heads/link"
-    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    assert "symref-delete refs/heads/link refs/heads/main" in change.restore
+    _apply_in_order(repo, report)
     assert git(repo, "rev-parse", "--verify", "refs/heads/main")  # the target is still there
-    assert asyncio.run(refs.snapshot(repo)).refs == before.refs
+    assert asyncio.run(refs.snapshot(repo)) == before
 
 
 def test_retargeting_a_symbolic_ref_to_the_same_commit_is_a_change_and_restores(repo):
@@ -243,16 +243,18 @@ def test_retargeting_a_symbolic_ref_to_the_same_commit_is_a_change_and_restores(
     report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/link", "refs/heads/main"))
     change, = report.changes
     assert change.change is Change.MOVED and change.old == change.new
-    assert change.restore == "git symbolic-ref refs/heads/link refs/heads/other"
-    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    _apply_in_order(repo, report)
     assert git(repo, "symbolic-ref", "refs/heads/link") == "refs/heads/other"
 
 
 def test_deleting_a_symbolic_ref_restores_the_link_not_a_copy(repo):
     git(repo, "symbolic-ref", "refs/heads/link", "refs/heads/other")
+    before = asyncio.run(refs.snapshot(repo))
     report = run(repo, lambda: git(repo, "symbolic-ref", "--delete", "refs/heads/link"))
     change, = report.changes
-    assert change.change is Change.DELETED and change.restore == "git symbolic-ref refs/heads/link refs/heads/other"
+    assert change.change is Change.DELETED and "symref-create refs/heads/link refs/heads/other" in change.restore
+    _apply_in_order(repo, report)
+    assert asyncio.run(refs.snapshot(repo)) == before
 
 
 def test_bidirectional_controls_are_escaped_in_the_name_and_the_restore_command_still_works(repo):
@@ -388,7 +390,7 @@ def test_a_link_into_a_namespace_that_is_not_compared_still_reports_when_its_tar
     change, = report.changes
     assert change.ref == "refs/heads/up" and change.change is Change.MOVED and report.needs_you
     assert (change.old, change.new) == (tip, first)
-    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    _apply_in_order(repo, report)
     assert git(repo, "rev-parse", target) == tip and git(repo, "symbolic-ref", "refs/heads/up") == target
 
 
@@ -425,21 +427,23 @@ def test_a_real_reset_behind_a_link_on_the_task_branch_is_still_a_rewrite(repo):
     assert change.change is Change.NON_FAST_FORWARD and report.own_commits == 0
 
 
-def test_the_restore_of_a_link_into_an_uncompared_namespace_does_not_follow_a_symbolic_ref(repo):
+def test_the_restore_of_a_link_into_an_uncompared_namespace_refuses_once_a_hop_changed(repo):
     commit(repo, "b.txt")
     tip, first = git(repo, "rev-parse", "HEAD"), git(repo, "rev-parse", "HEAD~1")
     git(repo, "update-ref", "refs/hidden/x", tip)
     git(repo, "symbolic-ref", "refs/heads/up", "refs/hidden/x")
     report = run(repo, lambda: git(repo, "update-ref", "refs/hidden/x", first))
     change, = report.changes
-    assert "--no-deref" in shlex.split(change.restore)
-    git(repo, "symbolic-ref", "refs/hidden/y", "refs/heads/other")  # the name has since become a symbolic ref
-    other = git(repo, "rev-parse", "other")
-    git_safe.run(repo, *shlex.split(change.restore.replace("refs/hidden/x", "refs/hidden/y"))[1:],
-                 capture_output=True)
-    assert git(repo, "rev-parse", "other") == other  # nothing it points at moved
-    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
-    assert git(repo, "rev-parse", "refs/hidden/x") == tip and git(repo, "rev-parse", "other") == other
+    # The hop has since become a symbolic ref that resolves to the very commit the report names.
+    git(repo, "update-ref", "refs/hidden/y", first)
+    git(repo, "symbolic-ref", "refs/hidden/x", "refs/hidden/y")
+    assert _run(repo, change.restore).returncode != 0
+    assert git(repo, "rev-parse", "refs/hidden/y") == first
+    assert git(repo, "symbolic-ref", "refs/hidden/x") == "refs/hidden/y"
+    git(repo, "symbolic-ref", "--delete", "refs/hidden/x")
+    git(repo, "update-ref", "refs/hidden/x", first)  # as reported again: the command applies
+    _apply_in_order(repo, report)
+    assert git(repo, "rev-parse", "refs/hidden/x") == tip
 
 
 def _sha_of(repo, *args, stdin=None):
@@ -490,11 +494,10 @@ def test_a_new_tip_that_is_missing_is_undecided_not_a_fast_forward(repo):
     assert verdict is refs.Ancestry.UNDECIDED
 
 
-def _run_restores(repo, report) -> None:
-    """Every restore command in the order the report lists them; the task branch resolves after each one."""
-    for change in (*report.changes, *report.info):
-        git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
-        git(repo, "rev-parse", "--verify", "refs/heads/main")  # never a dangling symbolic ref
+def _run(repo, command: str) -> subprocess.CompletedProcess:
+    """One restore command, run the way the operator runs it."""
+    return subprocess.run(["bash", "--noprofile", "--norc", "-c", command], cwd=repo, env=_shell_env(),
+                          capture_output=True, text=True, timeout=30)
 
 
 @pytest.mark.parametrize("target", ["refs/heads/a-fresh", "refs/heads/z-fresh", "refs/heads/other",
@@ -512,12 +515,13 @@ def test_a_task_branch_turned_into_a_link_to_a_compared_branch_is_reported_and_r
 
     report = run(repo, go, active=active)
     tip = git(repo, "rev-parse", target)
-    link = report.changes[0]  # ahead of every command that deletes or moves the target
+    link = report.changes[0]
     assert link.ref == "refs/heads/main" and link.change is Change.MOVED and link.new == tip
-    assert link.restore == f"git update-ref --no-deref refs/heads/main {tip} {tip}"
-    assert [c.ref for c in (*report.changes, *report.info)] == ["refs/heads/main", target]
+    # Both entries are tied by the link: one command, listed under each, so none is left as information.
+    assert [c.ref for c in report.changes] == ["refs/heads/main", target] and report.info == ()
+    assert len({c.restore for c in report.changes}) == 1
     assert report.own_commits == 1
-    _run_restores(repo, report)
+    _apply_in_order(repo, report)
     after = asyncio.run(refs.snapshot(repo))
     assert after.symrefs == {} and after.refs["refs/heads/main"] == tip
     assert after.refs.get(target, "") == existed and after.head == "refs/heads/main"
@@ -529,9 +533,8 @@ def test_a_task_branch_retargeted_at_the_same_commit_is_reported_and_restorable(
     report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/main", "refs/heads/other"))
     change, = report.changes
     assert change.ref == "refs/heads/main" and change.change is Change.MOVED and change.old == change.new == head
-    assert change.restore == f"git update-ref --no-deref refs/heads/main {head} {head}"
     assert report.own_commits == 0 and not report.needs_you
-    _run_restores(repo, report)
+    _apply_in_order(repo, report)
     assert asyncio.run(refs.snapshot(repo)) == before
 
 
@@ -547,8 +550,7 @@ def test_a_task_branch_reset_and_then_linked_to_a_new_branch_goes_back_before_th
     report = run(repo, go)
     link = report.changes[0]
     assert link.ref == "refs/heads/main" and link.change is Change.NON_FAST_FORWARD
-    assert link.restore == f"git update-ref --no-deref refs/heads/main {tip} {first}"
-    _run_restores(repo, report)
+    _apply_in_order(repo, report)
     assert asyncio.run(refs.snapshot(repo)) == before
 
 
@@ -574,12 +576,10 @@ def test_the_restore_of_a_branch_turned_into_a_link_refuses_after_a_later_commit
     later = git(repo, "commit-tree", "-p", change.new, "-m", "later", "HEAD^{tree}")
     git(repo, "update-ref", ref, later)  # through the link, after the report was written
     assert git(repo, "rev-parse", "refs/hidden/x") == later
-    refused = git_safe.run(repo, *shlex.split(change.restore)[1:], capture_output=True)
-    assert refused.returncode != 0
+    assert _run(repo, change.restore).returncode != 0
     assert git(repo, "rev-parse", ref) == later and git(repo, "symbolic-ref", ref) == "refs/hidden/x"
-    assert shlex.split(change.restore)[-1] == change.new
     git(repo, "update-ref", ref, change.new)  # still on the reported commit: the command applies
-    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    _apply_in_order(repo, report)
     assert ref not in asyncio.run(refs.snapshot(repo)).symrefs
 
 
@@ -596,7 +596,7 @@ def test_a_new_link_is_restored_before_the_command_that_moves_or_removes_its_tar
         git(repo, "symbolic-ref", "refs/heads/other", target)
 
     report = run(repo, go)
-    _run_restores(repo, report)
+    _apply_in_order(repo, report)
     assert asyncio.run(refs.snapshot(repo)) == before
 
 
@@ -620,9 +620,8 @@ def test_a_reset_on_a_task_branch_already_linked_to_a_compared_ref_is_a_rewrite(
     change = report.changes[0]
     assert change.ref == "refs/heads/main" and change.change is Change.NON_FAST_FORWARD
     assert (change.old, change.new) == (tip, first) and report.own_commits == 0
-    assert change.restore == f"git update-ref --no-deref {target} {tip} {first}"
     assert [c.ref for c in (*report.changes, *report.info)] == ["refs/heads/main", target]  # the target once
-    git_safe.run(repo, *shlex.split(change.restore)[1:], check=True, capture_output=True)
+    _apply_in_order(repo, report)
     assert asyncio.run(refs.snapshot(repo)) == before
 
 
@@ -642,28 +641,48 @@ def test_an_undecided_move_on_a_task_branch_already_linked_to_a_compared_ref_is_
 
 
 def _apply_in_order(repo, report) -> None:
-    """Every command, in the order the report lists them, run the way the operator runs it: each one succeeds."""
+    """Every command in the order the report lists them: each one succeeds. Entries that share a command need it
+    once; running it again is refused."""
+    ran = set()
     for change in (*report.changes, *report.info):
-        done = subprocess.run(["bash", "--noprofile", "--norc", "-c", change.restore], cwd=repo, env=_shell_env(),
-                              capture_output=True, text=True, timeout=30)
-        assert done.returncode == 0, f"{change.restore}: {done.stderr}"
+        done = _run(repo, change.restore)
+        assert (done.returncode != 0) == (change.restore in ran), f"{change.restore}: {done.stderr}"
+        ran.add(change.restore)
 
 
 def _shell_env() -> dict[str, str]:
     return {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
 
 
+def _stored(repo: Path) -> dict:
+    """What every ref holds, read from the files and ``packed-refs`` without the code under test: a commit id, or
+    ``("ref", target)`` for a symbolic ref."""
+    found = {}
+    packed = repo / ".git" / "packed-refs"
+    if packed.exists():
+        for line in packed.read_text().splitlines():
+            if line[0] not in "#^":
+                oid, name = line.split(" ", 1)
+                found[name] = oid
+    for path in (repo / ".git" / "refs").rglob("*"):
+        if path.is_file():
+            body = path.read_text().rstrip("\n")
+            found[path.relative_to(repo / ".git").as_posix()] = (
+                ("ref", body.removeprefix("ref: ")) if body.startswith("ref: ") else body)
+    return found
+
+
 @pytest.mark.parametrize("chain", [
-    ("m-inner", "z-outer"),  # innermost first; the inner name sorts first
+    ("m-inner", "z-outer"),  # innermost first
     ("m-inner", "a-outer"),
     ("z-inner", "a-mid", "m-outer"),
 ])
-def test_nested_new_links_are_restored_outermost_first_when_the_commit_moved(repo, chain):
+def test_nested_new_links_and_the_moved_commit_are_restored_by_one_command(repo, chain):
     commit(repo, "b.txt")
     git(repo, "checkout", "-q", "other")  # leaf and the links are ordinary branches
     for name in ("leaf", *chain):
         git(repo, "branch", name, "main")
-    before = asyncio.run(refs.snapshot(repo))
+    before = _stored(repo)
 
     def go():
         git(repo, "update-ref", "refs/heads/leaf", "refs/heads/main~1")
@@ -671,18 +690,129 @@ def test_nested_new_links_are_restored_outermost_first_when_the_commit_moved(rep
             git(repo, "symbolic-ref", f"refs/heads/{name}", f"refs/heads/{target}")
 
     report = run(repo, go, branch="other")
-    order = [change.ref.removeprefix("refs/heads/") for change in report.changes]
-    assert order == [*reversed(chain), "leaf"]
+    assert sorted(c.ref.removeprefix("refs/heads/") for c in report.changes) == sorted([*chain, "leaf"])
+    assert len({c.restore for c in report.changes}) == 1
     _apply_in_order(repo, report)
-    assert asyncio.run(refs.snapshot(repo)) == before
+    assert _stored(repo) == before
 
 
-@pytest.mark.parametrize("outer", ["a-outer", "z-outer"])  # sorts before and after the task branch
-def test_a_link_to_the_task_branch_turned_link_is_restored_before_the_task_branch(repo, outer):
+@pytest.mark.parametrize("hidden", [False, True])  # the chain goes through compared names only, or leaves them
+@pytest.mark.parametrize("what", ["retarget", "commit", "unlink", "delete"])
+def test_a_chain_is_restored_hop_by_hop_not_to_its_end(repo, hidden, what):
+    commit(repo, "b.txt")
+    git(repo, "branch", "-f", "other", "main")
+    git(repo, "checkout", "-q", "other")
+    mid = "refs/hidden/mid" if hidden else "refs/heads/mid"
+    outer, leaf = "refs/heads/outer", "refs/heads/leaf"
+    git(repo, "update-ref", leaf, "refs/heads/main")
+    git(repo, "symbolic-ref", mid, leaf)
+    git(repo, "symbolic-ref", outer, mid)
+    before = _stored(repo)
+
+    def go():
+        if what == "retarget":  # the same commit, so only the hop differs
+            git(repo, "symbolic-ref", mid, "refs/heads/main")
+        elif what == "commit":
+            git(repo, "update-ref", leaf, "refs/heads/main~1")
+        elif what == "unlink":
+            git(repo, "update-ref", "--no-deref", mid, "refs/heads/main~1")
+        else:
+            git(repo, "symbolic-ref", "--delete", mid)
+
+    report = run(repo, go, branch="other")
+    assert report.changes and all(c.restore for c in report.changes)
+    _apply_in_order(repo, report)
+    assert _stored(repo) == before
+
+
+def test_the_command_of_a_chain_checks_every_hop_it_reads_through(repo):
+    git(repo, "checkout", "-q", "other")
+    mid, leaf, outer = "refs/heads/mid", "refs/heads/leaf", "refs/heads/outer"
+    git(repo, "update-ref", leaf, "refs/heads/main")
+    git(repo, "symbolic-ref", mid, leaf)
+    report = run(repo, lambda: git(repo, "symbolic-ref", outer, mid), branch="other")
+    change, = report.changes
+    git(repo, "symbolic-ref", mid, "refs/heads/main")  # an inner hop moved after the report, to the same commit
+    refused = _stored(repo)
+    assert _run(repo, change.restore).returncode != 0 and _stored(repo) == refused
+    git(repo, "symbolic-ref", mid, leaf)
+    git(repo, "update-ref", leaf, git(repo, "commit-tree", "-p", leaf, "-m", "later", "HEAD^{tree}"))
+    refused = _stored(repo)
+    assert _run(repo, change.restore).returncode != 0 and _stored(repo) == refused
+
+
+def test_a_branch_turned_link_is_not_made_direct_when_its_target_changed_since_the_report(repo):
+    git(repo, "branch", "twin")
+    report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/other", "refs/heads/main"))
+    change = by_ref(report)["refs/heads/other"]
+    git(repo, "symbolic-ref", "refs/heads/other", "refs/heads/twin")  # it still reads the same commit
+    refused = _stored(repo)
+    assert _run(repo, change.restore).returncode != 0 and _stored(repo) == refused
+
+
+@pytest.mark.parametrize("existed", [False, True])
+def test_a_link_that_dangles_after_the_turn_is_reported_and_restored(repo, existed):
+    link = "refs/heads/dang"
+    if existed:
+        git(repo, "update-ref", link, "HEAD")
+    before = _stored(repo)
+    report = run(repo, lambda: git(repo, "symbolic-ref", link, "refs/heads/nothing"))
+    change, = report.changes
+    assert change.ref == link and change.change is (Change.DELETED if existed else Change.CREATED)
+    assert change.new is None and report.needs_you
+    _apply_in_order(repo, report)
+    assert _stored(repo) == before
+
+
+def test_a_dangling_link_from_before_the_turn_that_does_not_change_is_not_reported(repo):
+    git(repo, "symbolic-ref", "refs/heads/dang", "refs/heads/nothing")
+    assert not run(repo, lambda: None).worth_saying
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_a_link_whose_direct_target_changed_while_its_chain_end_did_not_is_reported(repo, hidden):
+    mid = "refs/hidden/mid" if hidden else "refs/heads/mid"
+    git(repo, "symbolic-ref", mid, "refs/heads/other")
+    git(repo, "symbolic-ref", "refs/heads/outer", mid)
+    before = _stored(repo)
+    report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/outer", "refs/heads/other"))
+    change, = report.changes
+    assert change.ref == "refs/heads/outer" and change.change is Change.MOVED
+    _apply_in_order(repo, report)
+    assert _stored(repo) == before
+
+
+def test_a_deleted_ref_outside_branches_and_tags_that_a_link_read_through_is_created_again(repo):
+    git(repo, "update-ref", "refs/hidden/x", "HEAD")
+    git(repo, "symbolic-ref", "refs/heads/up", "refs/hidden/x")
+    before = _stored(repo)
+    report = run(repo, lambda: git(repo, "update-ref", "-d", "refs/hidden/x"))
+    change, = report.changes
+    assert change.ref == "refs/heads/up" and change.change is Change.DELETED
+    _apply_in_order(repo, report)
+    assert _stored(repo) == before
+
+
+def test_a_ref_outside_that_the_link_no_longer_reads_is_still_put_back(repo):
+    commit(repo, "b.txt")
+    git(repo, "update-ref", "refs/hidden/x", "HEAD")
+    git(repo, "symbolic-ref", "refs/heads/up", "refs/hidden/x")
+    before = _stored(repo)
+
+    def go():
+        git(repo, "symbolic-ref", "refs/heads/up", "refs/heads/other")
+        git(repo, "update-ref", "refs/hidden/x", "HEAD~1")
+
+    _apply_in_order(repo, run(repo, go))
+    assert _stored(repo) == before
+
+
+@pytest.mark.parametrize("outer", ["a-outer", "z-outer"])
+def test_a_link_to_the_task_branch_turned_link_is_restored_with_it(repo, outer):
     commit(repo, "b.txt")
     git(repo, "branch", "leaf")
     git(repo, "branch", outer)
-    before = asyncio.run(refs.snapshot(repo))
+    before = _stored(repo)
 
     def go():
         git(repo, "update-ref", "refs/heads/leaf", "refs/heads/main~1")
@@ -690,18 +820,29 @@ def test_a_link_to_the_task_branch_turned_link_is_restored_before_the_task_branc
         git(repo, "symbolic-ref", f"refs/heads/{outer}", "refs/heads/main")
 
     report = run(repo, go)
-    assert [change.ref for change in report.changes] == [f"refs/heads/{outer}", "refs/heads/main", "refs/heads/leaf"]
-    assert report.changes[1].change is Change.NON_FAST_FORWARD and report.own_commits == 0
+    assert [c.ref for c in report.changes] == ["refs/heads/main", *sorted(["refs/heads/leaf", f"refs/heads/{outer}"])]
+    assert report.changes[0].change is Change.NON_FAST_FORWARD and report.own_commits == 0
     _apply_in_order(repo, report)
-    assert asyncio.run(refs.snapshot(repo)) == before
+    assert _stored(repo) == before
+
+
+def test_a_command_that_checks_the_task_branch_keeps_the_commits_of_the_turn(repo):
+    def go():
+        commit(repo, "b.txt")
+        git(repo, "symbolic-ref", "refs/heads/other", "refs/heads/main")
+
+    report = run(repo, go)
+    tip = git(repo, "rev-parse", "main")
+    _apply_in_order(repo, report)
+    assert git(repo, "rev-parse", "main") == tip and report.own_commits == 1
 
 
 @pytest.mark.parametrize("leaf_existed, through", [
-    (False, "refs/heads/leaf"),  # the command on the leaf deletes it
+    (False, "refs/heads/leaf"),  # the command deletes the leaf
     (True, "refs/heads/leaf"),  # or moves it back
-    (False, "refs/hidden/mid"),  # a hop outside the compared refs: only the chain's end says what lies below
+    (False, "refs/hidden/mid"),  # a hop outside the compared refs
 ])
-def test_another_tasks_new_link_is_restored_before_its_target_is_deleted_or_moved(repo, leaf_existed, through):
+def test_another_tasks_link_that_shares_a_command_with_a_change_is_listed_with_the_changes(repo, leaf_existed, through):
     commit(repo, "b.txt")
     git(repo, "checkout", "-q", "other")
     step = "refs/heads/looper/task-two/step"
@@ -709,7 +850,7 @@ def test_another_tasks_new_link_is_restored_before_its_target_is_deleted_or_move
         git(repo, "update-ref", ref, "refs/heads/main")
     if leaf_existed:
         git(repo, "update-ref", "refs/heads/leaf", "refs/heads/main")
-    before = asyncio.run(refs.snapshot(repo))
+    before = _stored(repo)
 
     def go():
         git(repo, "update-ref", "refs/heads/leaf", "refs/heads/main~1")
@@ -723,20 +864,20 @@ def test_another_tasks_new_link_is_restored_before_its_target_is_deleted_or_move
         return True
 
     report = run(repo, go, active=active, branch="other")
-    # The other task's link has to run before a change, so it is listed among the changes, ahead of that one; an
-    # entry that no change has to wait for stays information.
-    assert [change.ref for change in report.changes] == ["refs/heads/a-outer", step, "refs/heads/leaf"]
-    assert [change.ref for change in report.info] == ["refs/heads/looper/task-two/bystander"]
+    assert [c.ref for c in report.changes] == ["refs/heads/a-outer", "refs/heads/leaf", step]
+    assert [c.ref for c in report.info] == ["refs/heads/looper/task-two/bystander"]
     assert report.needs_you
     _apply_in_order(repo, report)
-    assert asyncio.run(refs.snapshot(repo)) == before
+    if through != "refs/heads/leaf":  # the turn made this ref outside: it is checked, not removed
+        assert _stored(repo).pop(through) == ("ref", "refs/heads/leaf")
+    assert {k: v for k, v in _stored(repo).items() if k != "refs/hidden/mid"} == before
 
 
 def test_moving_the_commit_in_another_tasks_link_alone_does_not_need_you(repo):
     commit(repo, "b.txt")
     step, leaf = "refs/heads/looper/task-two/step", "refs/heads/looper/task-two/leaf"
     git(repo, "update-ref", step, "refs/heads/main")
-    before = asyncio.run(refs.snapshot(repo))
+    before = _stored(repo)
 
     def go():
         git(repo, "update-ref", leaf, "refs/heads/main~1")
@@ -746,54 +887,97 @@ def test_moving_the_commit_in_another_tasks_link_alone_does_not_need_you(repo):
         return True
 
     report = run(repo, go, active=active)
-    assert report.changes == () and [change.ref for change in report.info] == [step, leaf]
+    assert report.changes == () and [c.ref for c in report.info] == [leaf, step]
     assert not report.needs_you
     _apply_in_order(repo, report)
-    assert asyncio.run(refs.snapshot(repo)) == before
+    assert _stored(repo) == before
 
 
-def test_the_snapshot_records_the_direct_target_of_a_symbolic_ref(repo):
+def test_the_snapshot_records_every_hop_of_a_chain_dangling_ones_and_those_outside_included(repo):
     git(repo, "symbolic-ref", "refs/heads/inner", "refs/heads/other")
     git(repo, "symbolic-ref", "refs/heads/outer", "refs/heads/inner")
+    git(repo, "symbolic-ref", "refs/hidden/far", "refs/hidden/gone")
+    git(repo, "symbolic-ref", "refs/tags/dang", "refs/hidden/far")
     found = asyncio.run(refs.snapshot(repo))
     assert found.symrefs == {"refs/heads/inner": "refs/heads/other", "refs/heads/outer": "refs/heads/other"}
-    assert found.hops == {"refs/heads/inner": "refs/heads/other", "refs/heads/outer": "refs/heads/inner"}
+    assert found.hops == {"refs/heads/inner": "refs/heads/other", "refs/heads/outer": "refs/heads/inner",
+                          "refs/tags/dang": "refs/hidden/far", "refs/hidden/far": "refs/hidden/gone"}
+    assert found.outside == {"refs/hidden/gone": None} and found.gap is None
 
 
-@pytest.mark.parametrize("why", ["no_option", "too_many"])
-def test_without_direct_targets_the_snapshot_still_reads_and_says_so_once(repo, monkeypatch, caplog, why):
-    git(repo, "symbolic-ref", "refs/heads/inner", "refs/heads/other")
-    git(repo, "symbolic-ref", "refs/heads/outer", "refs/heads/inner")
-    real, asked = refs._git, []
+def test_the_walk_for_dangling_links_reads_no_fifo_and_follows_no_directory_link(repo, tmp_path):
+    os.mkfifo(repo / ".git" / "refs" / "heads" / "pipe")
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "x").write_text("ref: refs/heads/main\n")
+    (repo / ".git" / "refs" / "heads" / "far").symlink_to(tmp_path / "elsewhere")
+    (repo / ".git" / "refs" / "tags" / "dang").write_text("ref: refs/heads/nothing\n")
+    found = asyncio.run(asyncio.wait_for(refs._loose_symrefs(repo), 20))
+    assert found == {"refs/tags/dang": "refs/heads/nothing"}  # a link to a path outside refs/ is no symbolic ref
 
-    async def counted(work_dir, *args):
-        if "--no-recurse" in args:
-            asked.append(args)
-            return 129, ""  # a git that does not know the option
+
+# --- Chains Looper cannot know: the report says why instead of offering a command
+
+
+def _without_direct_targets(monkeypatch, why: str) -> None:
+    real = refs._git
+
+    async def older(work_dir, *args):
+        if args == ("version",):
+            return 0, "git version 2.45.2\n"
         return await real(work_dir, *args)
 
-    monkeypatch.setattr(refs, "_git", counted)
-    if why == "too_many":
-        monkeypatch.setattr(refs, "SYMREF_LIMIT", 1)
+    if why == "git_too_old":
+        monkeypatch.setattr(refs, "_git", older)
+    else:
+        monkeypatch.setattr(refs, "SYMREF_LIMIT", 0)
+
+
+@pytest.mark.parametrize("why", ["git_too_old", "too_many_symrefs"])
+def test_without_direct_targets_a_symbolic_ref_is_listed_as_not_restorable(repo, monkeypatch, caplog, why):
+    commit(repo, "b.txt")
+    git(repo, "symbolic-ref", "refs/heads/inner", "refs/heads/other")
+    git(repo, "symbolic-ref", "refs/heads/outer", "refs/heads/inner")
+    _without_direct_targets(monkeypatch, why)
     with caplog.at_level("WARNING", logger=refs.__name__):
         found = asyncio.run(refs.snapshot(repo))
-    assert found.hops == {} and len(found.symrefs) == 2
-    assert len(asked) == (0 if why == "too_many" else 1) and len(caplog.records) == 1
+    assert found.hops == {} and len(found.symrefs) == 2 and found.gap.value == why and len(caplog.records) == 1
+
+    def go():
+        git(repo, "symbolic-ref", "refs/heads/inner", "refs/heads/main")
+        git(repo, "symbolic-ref", "refs/heads/dang", "refs/heads/nothing")
+        git(repo, "branch", "plain", "main")
+
+    entries = by_ref(run(repo, go))
+    for ref in ("refs/heads/inner", "refs/heads/outer", "refs/heads/dang"):
+        assert entries[ref].restore is None and entries[ref].not_restorable.value == why
+        assert entries[ref].to_json()["not_restorable"] == why
+    plain = entries["refs/heads/plain"]  # a ref no chain ties keeps its command
+    assert plain.not_restorable is None and "not_restorable" not in plain.to_json()
+    assert _run(repo, plain.restore).returncode == 0
 
 
-def test_an_order_that_cannot_be_built_falls_back_and_logs_one_line(repo, caplog):
-    head = git(repo, "rev-parse", "HEAD")
-    a, b = "refs/heads/a", "refs/heads/b"
-    before = refs.Snapshot({a: head, b: head}, "refs/heads/main")
-    # git never lists mutually pointing refs; a snapshot that claims them must not end the turn's report.
-    after = refs.Snapshot({a: head, b: head}, "refs/heads/main", {a: b, b: a}, {a: b, b: a})
-    with caplog.at_level("WARNING", logger=refs.__name__):
-        report = asyncio.run(refs.compare(repo, before, after, task_branch="main", task_id=TASK,
-                                          active_task=inactive))
-    assert [change.ref for change in report.changes] == [a, b] and len(caplog.records) == 1
+def test_a_chain_through_head_is_listed_as_not_restorable(repo):
+    report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/via", "HEAD"))
+    change, = report.changes
+    assert change.restore is None and change.not_restorable is refs.NotRestorable.CHAIN_OUTSIDE_REFS
 
 
-# --- Generated ref layouts: every command the report lists succeeds in order and puts the refs back ---
+def test_a_hop_git_cannot_read_is_listed_as_not_restorable(repo, monkeypatch):
+    git(repo, "update-ref", "refs/hidden/x", "HEAD")
+    real = refs._git
+
+    async def failing(work_dir, *args):
+        if args[0] == "symbolic-ref" and args[-1] == "refs/hidden/x":
+            return 128, ""
+        return await real(work_dir, *args)
+
+    monkeypatch.setattr(refs, "_git", failing)
+    report = run(repo, lambda: git(repo, "symbolic-ref", "refs/heads/up", "refs/hidden/x"))
+    change, = report.changes
+    assert change.restore is None and change.not_restorable is refs.NotRestorable.CHAIN_UNREADABLE
+
+
+# --- Generated ref layouts: the listed commands succeed in order and put back every hop of every chain ---
 
 OTHER_TASK = "refs/heads/looper/task-two/"
 MAIN = "refs/heads/main"
@@ -826,7 +1010,7 @@ class Layout:
 
     def name(self) -> str:
         self.count += 1
-        prefix = self.rng.choices(["refs/heads/", OTHER_TASK, "refs/tags/"], [7, 3, 1])[0]
+        prefix = self.rng.choices(["refs/heads/", OTHER_TASK, "refs/tags/", "refs/hidden/"], [7, 3, 1, 1])[0]
         return f"{prefix}{self.rng.choice(string.ascii_lowercase)}{self.count}"
 
     def build(self) -> None:
@@ -840,13 +1024,7 @@ class Layout:
         for chain in chains:  # outermost first
             for outer, inner in zip(chain, chain[1:]):
                 self.refs[outer] = ("ref", inner)
-            end = self.rng.random()
-            if chain[-1] != MAIN and end < 0.15:  # the chain ends outside the compared namespaces
-                hidden = f"refs/hidden/{chain[-1].rsplit('/', 1)[1]}"
-                if len(chain) > 1:
-                    self.refs[chain[-2]] = ("ref", hidden)
-                    chain[-1] = hidden
-            if chain[-1] != MAIN and len(chain) > 1 and 0.15 <= end < 0.25:
+            if chain[-1] != MAIN and len(chain) > 1 and self.rng.random() < 0.1:
                 continue  # a dangling chain: its end does not exist
             self.refs[chain[-1]] = self.commits["tip"]
 
@@ -869,9 +1047,7 @@ class Layout:
         return steps
 
     def link(self, name: str, target: str) -> bool:
-        # Symbolic refs are only made among the compared names: Looper never reads another namespace, so a chain
-        # that leaves refs/heads and refs/tags and comes back through a symbolic ref there has hops it cannot know.
-        if name.startswith("refs/hidden/") or self.reaches(target, name):
+        if self.reaches(target, name):
             return False
         old = self.refs.get(name)
         self.refs[name] = ("ref", target)
@@ -887,7 +1063,7 @@ class Layout:
         rng, commits = self.rng, self.commits
         direct = sorted(n for n, v in self.refs.items() if not isinstance(v, tuple))
         links = sorted(n for n, v in self.refs.items() if isinstance(v, tuple))
-        compared = sorted(n for n in self.refs if not n.startswith("refs/hidden/"))
+        every = sorted(self.refs)
         targets = sorted({v[1] for v in self.refs.values() if isinstance(v, tuple) and v[1] in self.refs})
         kind = rng.choices(["reset", "ff", "rewrite", "create_link", "create", "delete_link", "retarget",
                             "delete_target", "unlink", "nest"], [4, 2, 1, 2, 2, 1, 4, 2, 1, 4])[0]
@@ -900,14 +1076,14 @@ class Layout:
             self.refs[name] = commits[rng.choice(sorted(commits))]
             return f"create {name}"
         if kind == "create_link" and self.refs:
-            name, target = self.name(), rng.choice(sorted(self.refs) + ["refs/heads/nothing"])
+            name, target = self.name(), rng.choice(every + ["refs/heads/nothing"])
             return f"create link {name} -> {target}" if self.link(name, target) else "none"
         if kind == "delete_link" and links:
             name = rng.choice(links)
             del self.refs[name]
             return f"delete link {name}"
-        if kind == "retarget" and compared:
-            name, target = rng.choice(compared), rng.choice(sorted(self.refs))
+        if kind == "retarget" and every:
+            name, target = rng.choice(every), rng.choice(every + ["refs/heads/nothing"])
             return f"link {name} -> {target}" if self.link(name, target) else "none"
         if kind == "delete_target" and targets:
             name = rng.choice(targets)
@@ -917,11 +1093,11 @@ class Layout:
             name = rng.choice(links)
             self.refs[name] = commits[rng.choice(sorted(commits))]
             return f"direct {name}"
-        if kind == "nest" and len(compared) > 1:  # several names become a chain onto an end that moves
+        if kind == "nest" and len(every) > 1:  # several names become a chain onto an end that moves
             end = rng.choice(direct) if direct else None
             if end is None:
                 return "none"
-            others = [n for n in compared if n != end]
+            others = [n for n in every if n != end]
             chain = [end, *rng.sample(others, min(len(others), rng.randint(1, 3)))]
             made = [f"{name} -> {target}" for target, name in zip(chain, chain[1:]) if self.link(name, target)]
             if rng.random() < 0.8:
@@ -940,87 +1116,63 @@ class Layout:
             path.write_text(f"ref: {value[1]}\n" if isinstance(value, tuple) else value + "\n")
 
 
-def _hidden(repo: Path) -> dict[str, str]:
-    root = repo / ".git" / "refs" / "hidden"
-    return {f"refs/hidden/{path.name}": path.read_text().strip() for path in root.glob("*")}
+def _path(stored: dict, name: str) -> list[str]:
+    """``name`` and every ref it reads through."""
+    path = [name]
+    while isinstance(stored.get(path[-1]), tuple):
+        path.append(stored[path[-1]][1])
+    return path
 
 
-def _unrestorable(initial: dict, final: dict, before: refs.Snapshot, after: refs.Snapshot) -> str | None:
-    """Why no order of the listed commands can put every ref of this layout back, or None."""
-    link = before.symrefs.get(MAIN)
-    if link is not None and MAIN in after.refs and after.symrefs.get(MAIN) != link:
-        # A turn does not start while the task branch is a symbolic ref (HEAD then reads as its target), and the
-        # command for a task branch whose link changed makes it a direct ref on purpose.
-        return "task branch was a link and changed"
-    if any(not target.startswith(("refs/heads/", "refs/tags/")) and target not in final
-           for target in before.symrefs.values()):
-        # The turn deleted a ref outside the compared namespaces that a link read through. Looper never reads or
-        # restores those, so no command can bring the link's value back.
-        return "an uncompared target was deleted"
-    for name, value in final.items():
-        if not isinstance(value, tuple) or initial.get(name) == value:
-            continue
-        if name not in before.refs and name not in after.refs:
-            # git does not list a dangling symbolic ref, so a link this turn made (or changed) that dangles at its
-            # end has no entry and no command, and it starts to resolve again when its target is put back.
-            return "a new dangling link is not listed"
-        if isinstance(initial.get(name), tuple) and before.symrefs.get(name) == after.symrefs.get(name) is not None:
-            # The link points somewhere else but its chain ends at the same ref: a change is decided from
-            # %(symref), the chain's end, so the name has no command, and restoring the ref it now goes through
-            # takes it along.
-            return "a link changed only its direct target"
-    return None
-
-
-async def _generated_case(repo: Path, commits: dict[str, str], seed: int) -> tuple[str, int]:
-    """One seeded case. Every listed command must succeed in order. The answer is "restored" once the refs are
-    compared too, or why the listed commands cannot put every ref back (``_unrestorable``), with their number."""
+async def _generated_case(repo: Path, commits: dict[str, str], seed: int) -> tuple[int, int, int]:
+    """One seeded case: every listed command succeeds in order, then every hop of every chain, before and after the
+    turn, is compared. The answer: the number of commands, of hops compared, and of links compared."""
     layout = Layout(random.Random(seed), commits)
     layout.build()
-    initial = dict(layout.refs)
     layout.write(repo)
-    before, hidden_before = await refs.snapshot(repo), _hidden(repo)
+    initial = _stored(repo)
+    before = await refs.snapshot(repo)
     steps = [layout.mutate() for _ in range(layout.rng.randint(1, 5))]
     layout.write(repo)
+    final = _stored(repo)
     after = await refs.snapshot(repo)
     report = await refs.compare(repo, before, after, task_branch="main", task_id=TASK, active_task=_only_task_two)
-    commands = [change.restore for change in (*report.changes, *report.info)]
-    context = (f"seed={seed}\nbefore={initial}\nturn={steps}\nafter={layout.refs}\ncommits={commits}\n"
-               "commands:\n  " + "\n  ".join(commands))
-    # An intact link's command is its target's: it is listed under each name that reads through it. The first run
-    # applies it; a repeat must be refused by its current-value check.
+    entries = (*report.changes, *report.info)
+    context = (f"seed={seed}\nbefore={initial}\nturn={steps}\nafter={final}\ncommits={commits}\n"
+               "commands:\n  " + "\n  ".join(str(change.restore) for change in entries))
+    assert all(change.restore for change in entries), context  # nothing here is beyond a command
     script, ran = [], set()
-    for index, command in enumerate(commands):
-        script.append(f"if {command} 2>/dev/null; then echo 'repeat {index} applied'; exit 1; fi"
-                      if command in ran else f"{command} || {{ echo 'command {index} exit '$?; exit 1; }}")
+    for index, change in enumerate(entries):
+        command = f"{{ {change.restore}; }} 2>/dev/null"
+        script.append(f"if {command}; then echo 'repeat {index} applied'; exit 1; fi" if command in ran
+                      else f"{command} || {{ echo 'command {index} exit '$?; exit 1; }}")
         ran.add(command)
     done = subprocess.run(["bash", "--noprofile", "--norc", "-c", "\n".join(script) or "true"], cwd=repo,
                           env=_shell_env(), capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, f"{done.stdout}{done.stderr}{context}"
-    if reason := _unrestorable(initial, layout.refs, before, after):
-        return reason, len(commands)
-    restored, hidden_after = await refs.snapshot(repo), _hidden(repo)
+    restored = _stored(repo)
     # The task branch keeps the commits the turn made on it: a fast-forward is the Manager's own work.
     descends = {(commits["base"], commits["tip"]), (commits["base"], commits["next"]),
                 (commits["tip"], commits["next"]), (commits["base"], commits["side"])}
-    old, new = before.refs.get(MAIN), after.refs.get(MAIN)
-    kept = MAIN not in before.symrefs and (old, new) in descends
+    expected = dict(initial)
+    old, end = initial.get(MAIN), final.get(_path(final, MAIN)[-1])
+    if isinstance(old, str) and (old, end) in descends:
+        expected[MAIN] = end
+    # Every compared name before or after, and every hop of every chain either snapshot of the turn had: the hops of
+    # the chains before the turn hold their old values again. A ref outside branches and tags that only chains after
+    # the turn read has no recorded earlier value: it must be as the turn left it.
+    names = {name for stored in (initial, final) for ref in stored if ref.startswith(("refs/heads/", "refs/tags/"))
+             for name in _path(stored, ref)}
+    read_before = {name for ref in initial if ref.startswith(("refs/heads/", "refs/tags/"))
+                   for name in _path(initial, ref)}
     wrong = []
-    for name in sorted(before.refs.keys() | after.refs.keys() | restored.refs.keys()):
-        if name in before.symrefs:
-            want, got = ("ref", before.symrefs[name]), ("ref", restored.symrefs.get(name))
-        else:
-            want = new if name == MAIN and kept else before.refs.get(name)
-            got = ("ref", restored.symrefs[name]) if name in restored.symrefs else restored.refs.get(name)
-        if want != got:
-            wrong.append(f"{name}: want {want}, got {got}")
-    for change in (*report.changes, *report.info):  # a command on an uncompared target puts that target back
-        written = shlex.split(change.restore)
-        if written[:2] == ["git", "update-ref"] and written[-3].startswith("refs/hidden/"):
-            if hidden_after.get(written[-3]) != hidden_before.get(written[-3]):
-                wrong.append(f"{written[-3]}: want {hidden_before.get(written[-3])}, got {hidden_after.get(written[-3])}")
+    for name in sorted(names):
+        compared = name.startswith(("refs/heads/", "refs/tags/"))
+        want = expected.get(name) if compared or name in read_before else final.get(name)
+        if restored.get(name) != want:
+            wrong.append(f"{name}: want {want}, got {restored.get(name)}")
     assert not wrong, "\n".join(wrong) + "\n" + context
-    return "restored", len(commands)
+    return len(entries), len(names), sum(isinstance(initial.get(n) or final.get(n), tuple) for n in names)
 
 
 async def _only_task_two(task_id: str) -> bool:
@@ -1028,7 +1180,7 @@ async def _only_task_two(task_id: str) -> bool:
 
 
 @pytest.mark.parametrize("first", range(0, CASES, CHUNK))
-def test_the_listed_commands_restore_generated_ref_layouts_in_order(tmp_path, first):
+def test_the_listed_commands_restore_every_hop_of_generated_ref_layouts(tmp_path, first):
     repo = tmp_path / "generated"
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
@@ -1038,6 +1190,7 @@ def test_the_listed_commands_restore_generated_ref_layouts_in_order(tmp_path, fi
         return [await _generated_case(repo, commits, seed) for seed in range(first, first + CHUNK)]
 
     outcomes = asyncio.run(go())
-    restored = [count for outcome, count in outcomes if outcome == "restored"]
-    # The generator must keep exercising the restore: most layouts compared ref by ref, many with several commands.
-    assert len(restored) >= CHUNK * 3 // 4 and sum(count >= 3 for count in restored) >= CHUNK // 4, outcomes
+    print(f"seeds {first}-{first + CHUNK - 1}: {len(outcomes)} layouts compared, "
+          f"{sum(o[1] for o in outcomes)} refs, {sum(o[2] for o in outcomes)} of them links")
+    # The generator must keep exercising the restore: several commands in many layouts, and chains in most.
+    assert sum(o[0] >= 2 for o in outcomes) >= CHUNK // 2 and sum(o[2] >= 2 for o in outcomes) >= CHUNK // 2

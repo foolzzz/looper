@@ -351,6 +351,30 @@ describe("task conversation", () => {
     for (const index of [3, 4, 5]) expect(container.querySelector(`[data-feed-key="task-event:r${index}"]`)?.textContent).toContain("无法读取这条事件");
   });
 
+  it("shows a shared restore command once and says why a change has none", async () => {
+    const shared = "printf '%s\\n' 'symref-delete refs/heads/a refs/heads/b' | git update-ref --no-deref --stdin";
+    const entry = (ref: string, restore: string | null, extra: object = {}) =>
+      ({ ref, change: "moved", old: null, new: null, restore, ...extra });
+    const report = (changes: object[]) => ({ kind: "ref_report", message_id: "turn-1", report_id: 8, own_commits: 0,
+      needs_you: true, head: null, info: [], changes });
+    const good = report([entry("refs/heads/a", shared), entry("refs/heads/b", shared),
+      entry("refs/heads/via", null, { not_restorable: "chain_outside_refs" })]);
+    const bad = [report([entry("refs/heads/x", null)]),
+      report([entry("refs/heads/x", "x", { not_restorable: "git_too_old" })]),
+      report([entry("refs/heads/x", null, { not_restorable: "other" })])];
+    api.fetchChatHistory.mockResolvedValue(idle([good, ...bad].map((event, index) =>
+      row(`s${index}`, "event", JSON.stringify(event), `2026-11-25T00:00:0${index}Z`))));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    const shown = container.querySelector('[data-feed-key="task-event:s0"]')!;
+    expect(Array.from(shown.querySelectorAll("code"), (node) => node.textContent)).toEqual([shared]);
+    expect(shown.textContent).toContain("执行一次即可");
+    expect(shown.textContent).toContain("不能给出恢复命令：引用链经过 refs/ 之外的名字");
+    for (const index of [1, 2, 3]) {
+      expect(container.querySelector(`[data-feed-key="task-event:s${index}"]`)?.textContent).toContain("无法读取这条事件");
+    }
+  });
+
   it("keeps repeated identical sandbox notices of different turns apart, and folds one turn's copy", async () => {
     const notice = (messageId: string) => ({ kind: "sandbox_notice", notice: "refs_unreadable", detail: "d", message_id: messageId });
     api.fetchChatHistory.mockResolvedValue(idle([

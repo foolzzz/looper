@@ -5,6 +5,7 @@ import jsonschema
 
 from looper.agents.api_v1 import document
 from looper.agents.runtimes import StopMethod
+from looper.agents.task_manager_refs import NotRestorable
 from looper.agents.task_commands import TaskCommand
 from looper.agents.tiers.task_manager import RefuseReason
 from looper.agents.task_manager_settings import ModelSwitchRejection
@@ -52,6 +53,9 @@ def _payloads():
         {"kind": "ref_report", "message_id": "m2", "report_id": None, "own_commits": 0, "needs_you": False, "head": None,
          "info": [], "changes": [{"ref": "refs/heads/main", "change": "fast_forward_unverified", "old": "a" * 40,
                                   "new": "b" * 40, "restore": "git update-ref refs/heads/main " + "a" * 40 + " " + "b" * 40}]},
+        *({"kind": "ref_report", "message_id": "m3", "report_id": None, "own_commits": 0, "needs_you": True, "head": None,
+           "info": [], "changes": [{"ref": "refs/heads/via", "change": "created", "old": None, "new": None,
+                                    "restore": None, "not_restorable": reason.value}]} for reason in NotRestorable),
         {"kind": "sandbox_notice", "notice": "first_enable_in_place", "detail": "text"},
         {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text"},
         {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text", "message_id": "m2"},
@@ -89,6 +93,11 @@ def _payloads():
         {"kind": "ref_report", "report_id": None, "own_commits": 0, "needs_you": False, "info": [], "head": None,
          "changes": [{"ref": "refs/heads/x", "change": "created", "old": None, "new": "a", "restore": "x",
                       "extra": 1}]},
+        *({"kind": "ref_report", "message_id": None, "report_id": None, "own_commits": 0, "needs_you": False,
+           "info": [], "head": None,
+           "changes": [{"ref": "refs/heads/x", "change": "created", "old": None, "new": None, **entry}]}
+          for entry in ({"restore": None}, {"restore": "x", "not_restorable": "git_too_old"},
+                        {"restore": None, "not_restorable": "other"})),
     ]
     return emitted, rejected
 
