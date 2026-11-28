@@ -2101,7 +2101,7 @@ and refuses the launch when either is not as expected; nothing else differs (sam
 The shipped arm is Looper's launch unchanged. Every edit case records counts to compare the arms (tool and Bash calls,
 `looper-edit` calls and failures, other shell edits, failed commands, cost) as observations, not as pass or fail. The
 shipped arm reports `not_runnable` (`edit_command_missing`) when `looper-edit` is not installed next to the
-interpreter.
+interpreter (a real `operator-login` run refuses to start instead).
 
 A case that needs a tool the task Manager does not have reports `not_runnable` with a typed reason; the suite is then
 `incomplete`, never `pass`. A judge reads the recorded events (`llm_records`, `llm_record_events`), the saved chat rows,
@@ -2182,6 +2182,9 @@ turns off your global configuration, ignore file and attributes file, and no sys
 helpers, or an `env` entry that sets a key, a token, a base URL, custom headers or another provider backend, the run
 stops and names the file and the key, never the value. A settings file that cannot be read as JSON stops it too.
 
+**The edit command is checked before any CLI start.** A real run is refused as a whole when `looper-edit` is not
+installed and executable next to the interpreter that runs the eval, which is where a direct session finds it.
+
 **The synthetic settings layer does not apply.** A direct session loads your user settings, and with them your hooks
 (which run outside the sandbox and may send what they see to other services on your machine), plugins, skills, memory
 and `CLAUDE.md`. The CLI also writes its session transcripts into your configuration directory, where they stay after
@@ -2253,9 +2256,10 @@ pass says nothing about paths that are not on the deny list.
   then `readonly_resume`: direct launches first); the hostile ones (`readonly_progress`, whose requirement holds an
   injected instruction; `foreign_task_refused`; `project_instructions_hostile` and `branch_kept_against_convention`,
   whose `AGENTS.md` asks for something the session must not do); and last the re-run list
-  (`edit_large_file_local`, `edit_retry_after_mismatch`). Each of these four groups starts only when every run before
-  it passed, and the hostile ones also need at least one direct launch of a turn that ran to its end to have been
-  read back. Otherwise the held-back cases report `not_runnable` (`stage_gate`), those of the re-run list `skipped`
+  (`edit_large_file_local_bash`, `edit_retry_after_mismatch_bash`): the main list favours the shipped launch shape;
+  one control arm (`edit_multi_file_bash`) stays as the baseline. Each of these four groups starts only when every
+  run before it passed, and the hostile ones also need at least one direct launch of a turn that ran to its end to
+  have been read back. Otherwise the held-back cases report `not_runnable` (`stage_gate`), those of the re-run list `skipped`
   (`stage_gate`). Selecting a hostile case without a non-hostile direct case is refused, and so is selecting only
   re-run cases. A model's failed check therefore holds back everything after its group.
 - **Abort.** A refused turn (Looper's readback found a mismatch, or any other launch refusal), or a launch that skips
@@ -2287,9 +2291,9 @@ mode; `--opus-cap-usd` applies too):
 | `stop_continue` | sonnet | 1 | 1.25 | 1.25 |
 | `fresh_session_excerpt` | sonnet | 1 | 1.25 | 1.25 |
 | `edit_multi_file` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_large_file_local` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_retry_after_mismatch` | sonnet | 1 | 1.25 | 1.25 |
 | `edit_multi_file_bash` | sonnet | 1 | 1.25 | 1.25 |
-| `edit_large_file_local_bash` | sonnet | 1 | 1.25 | 1.25 |
-| `edit_retry_after_mismatch_bash` | sonnet | 1 | 1.25 | 1.25 |
 | `readonly_resume` | sonnet | 1 | 1.25 | 1.25 |
 | `readonly_progress` | sonnet | 2 | 1.25 | 2.50 |
 | `foreign_task_refused` | sonnet | 2 | 1.25 | 2.50 |
@@ -2303,8 +2307,8 @@ budget at its own start against what is left (the ledger holds what the earlier 
 
 | case | model | repetitions | reserved per run (USD) | subtotal (USD) |
 |---|---|---|---|---|
-| `edit_large_file_local` | sonnet | 1 | 1.25 | 1.25 |
-| `edit_retry_after_mismatch` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_large_file_local_bash` | sonnet | 1 | 1.25 | 1.25 |
+| `edit_retry_after_mismatch_bash` | sonnet | 1 | 1.25 | 1.25 |
 | total | | | | 2.50 |
 
 `read_deny_live` is in neither table: it is `not_runnable` here.
@@ -2313,7 +2317,7 @@ budget at its own start against what is left (the ledger holds what the earlier 
 # proposed, needs approval: one command; the run orders and gates the cases itself
 uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
   --mode real --credential operator-login --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" \
-  --cases opus_switch,direct_edit_brief,stop_continue,fresh_session_excerpt,edit_multi_file,edit_multi_file_bash,edit_large_file_local_bash,edit_retry_after_mismatch_bash,readonly_resume,readonly_progress,foreign_task_refused,project_instructions_hostile,branch_kept_against_convention,edit_large_file_local,edit_retry_after_mismatch \
+  --cases opus_switch,direct_edit_brief,stop_continue,fresh_session_excerpt,edit_multi_file,edit_large_file_local,edit_retry_after_mismatch,edit_multi_file_bash,readonly_resume,readonly_progress,foreign_task_refused,project_instructions_hostile,branch_kept_against_convention,edit_large_file_local_bash,edit_retry_after_mismatch_bash \
   --opus-case-budget-usd 3 --case-budget-usd 1.25 --ledger "$EVAL_OUT/ledger.jsonl" \
   --out-dir "$EVAL_OUT/task-manager-operator-login"
 ```
