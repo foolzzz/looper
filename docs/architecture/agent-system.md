@@ -1081,15 +1081,18 @@ them.
   no recorded earlier value: it is checked, never written. When no such command can be built, the entry has no
   command but `not_restorable`: `too_many_symrefs` (more than 200 symbolic refs), `git_too_old` (older than
   git 2.46), `chain_outside_refs` (a chain through a name such as `HEAD`), `chain_unreadable` (git could not
-  read a hop), `ref_file_unreadable` (below) or `overlapping_turn` (below); the conversation says why in text the
-  dashboard writes. A missing command never hides a change: where git is not asked for direct targets or cannot read
+  read a hop), `ref_file_unreadable` (below), `overlapping_turn` (below) or `other_task_branch` (an `info` entry,
+  below); the conversation says why in text the dashboard writes. The command that creates a deleted ref again
+  names the zero object id as the expected value, so it refuses once the name exists again. A missing command never hides a change: where git is not asked for direct targets or cannot read
   one, a link whose own file, or the file of a hop outside branches and tags, spells another target is still listed
   (a reftable repository has no such files, so there a retarget that leaves the end of the chain is not seen in
   that state). Two in-place turns of different tasks on one repository (linked worktrees included) that run at the
   same time cannot be told apart by comparing values, so each of their reports lists its changes with no command
   (`overlapping_turn`, unless another reason already applies), also for refs the other turn never touched; the
   windows are kept in the server's memory. Not covered: a ref changed during a turn by anything else (a Worker, a
-  worktree session, the operator) is still reported, with a command, as part of that turn. The 2.46
+  worktree session, the operator, a background process) is still reported, with a command, as part of that turn. When
+  only one of a turn's two snapshots has direct targets, an unchanged dangling link that reads through a link outside
+  branches and tags may be listed (without a command). The 2.46
   floor is for the transaction's symbolic-ref lines; Looper runs the `git` on the server's `PATH`, and with an
   older one each such entry reads, in the conversation,
   `<ref> <change>（<old> → <new>） 不能给出恢复命令：本机的 git 版本低于 2.46，无法核对并改写符号引用；请自己检查这个引用。`
@@ -1101,7 +1104,9 @@ them.
   counts only when the link text is a ref name). git itself does follow links there, so the files are read before
   and again after git, and a refused ref, directory or file, with every link that reads through it, is dropped from
   what git said: its entry is `unreadable` with no new value, no command and `ref_file_unreadable`, in every report
-  while it stays so, and "needs you" like any change. A `HEAD` or `packed-refs` that is not a file of its own
+  while it stays so, and "needs you" like any change. git also opens a symbolic ref's target outside `refs/`
+  (`x/y`, a single word, `worktrees/<name>/y`). Looper reads none of those but `HEAD` and the other root refs
+  (upper-case names), so every other such target is refused the same way, whether or not such a file exists. A `HEAD` or `packed-refs` that is not a file of its own
   refuses the whole snapshot, and where the chain from `HEAD` is refused, the branch named is the one `HEAD` itself
   holds. Not covered: a link put in place after Looper's first read and removed again before its second one, while
   git runs between them.
@@ -1115,8 +1120,10 @@ them.
   after a fast-forward, else on the old one). A change to any other branch or tag is stored in
   `task_manager_ref_reports` and listed in the needs-you section `task_manager_refs` until the
   operator resolves it (`tasks.task_manager_ref_report_resolve`, which changes nothing in git); a change
-  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only (listed
-  among `changes`, still without "needs you", when it shares its command with a change). The
+  under `refs/heads/looper/<other task>/` while that task exists and is unfinished is `info` only, with no
+  command (`other_task_branch`, unless another reason applies): it would undo that task's work. When chains tie
+  it to a change, it is listed among `changes` instead, still without "needs you", with the shared command, which
+  then also puts it back. The
   task branch is recorded once, at the first enablement (`task_manager_branches`, with a
   `sandbox_notice` event that the real checkout is edited directly); a detached `HEAD` then refuses the
   first turn (`head_detached`), and every later turn refuses while `HEAD` is not on that branch
