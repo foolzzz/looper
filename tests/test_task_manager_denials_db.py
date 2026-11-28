@@ -13,6 +13,7 @@ from looper.agents.tiers import task_manager as tm
 from looper.db import chat, task_chat, task_manager_sandbox_policy as policy
 from tests.db_support import run_db
 from tests.fake_claude import fake_claude
+from evals.prompt_regression.fake_readback import SOURCE as READBACK_SOURCE
 from tests.task_manager_support import NativeTaskManager, Sink, submit_and_wait
 
 BLOCK = ("curl: (56) CONNECT tunnel failed, response 403\nrc=56\n<sandbox_violations>\n"
@@ -25,17 +26,24 @@ def native(monkeypatch, tmp_path):
     support = NativeTaskManager(monkeypatch, tmp_path)
     support.executable = fake_claude(tmp_path / "denying-claude", f'''
 import sys, json
+exec({READBACK_SOURCE!r})
 if '--version' in sys.argv:
     print('2.1.332 (Claude Code)'); sys.exit()
 def emit(value):
     print(json.dumps(value), flush=True)
 for line in sys.stdin:
     data = json.loads(line)
+    if data.get('type') == 'control_request' and data['request']['subtype'] in READBACK_SUBTYPES:
+        kind, body = readback_answer(data['request'], '/nonexistent-readback-override.json')
+        emit({{'type':'control_response','response':{{'subtype':kind,'request_id':data['request_id'],
+              **({{'response':body}} if kind == 'success' else {{'error':body}})}}}})
+        continue
     if data.get('type') == 'control_request':
         emit({{'type':'control_response','response':{{'subtype':'success','request_id':data['request_id']}}}})
         continue
     host = data.get('message', {{}}).get('content', '')
-    emit({{'type':'system','subtype':'init','session_id':'denying-session'}})
+    emit({{'type':'system','subtype':'init','session_id':'denying-session',
+          **init_fields('/nonexistent-readback-override.json')}})
     for index in range(3):
         emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':f'tool-{{index}}','name':'Bash',
             'input':{{'command':{COMMAND!r}.format(host=host)}}}}]}}}})

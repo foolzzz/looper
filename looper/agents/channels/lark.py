@@ -40,6 +40,7 @@ from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from .. import task_notice_delivery
 from ..ops.leads import for_group
 from .. import chat_settings
+from ..supervisor import RECANCEL_SEC, cancel_and_wait
 from .allowlist import SenderAllowlist
 from .base import ChannelAdapter, DeliveryFailure, DeliveryReceipt, PostOutcome, PostReceipt
 from .chat_history import record_reply
@@ -47,7 +48,9 @@ from .proactive import record_delivery, store_envelope_body
 from .chat_routing import ChatResolver, RouteAction, RouteDecision, SenderPolicy, observe_chat, log_route
 from . import lark_content, lark_quote
 from .lark_cli import MESSAGE_GONE_CODES, RECEIVE_EVENT, LarkCliError, LarkCliOutputError, mention
-from .lark_transport import CliTransport, LarkTransport, LarkTransportKind, GatedLarkTransport
+from .lark_transport import (
+    _CONSUMER_STOP_GRACE_SEC, CliTransport, LarkTransport, LarkTransportKind, GatedLarkTransport,
+)
 from .lark_inbox import CatchupDropReason, LarkInbox, history_event
 from .lark_quote import QuoteKind, QuoteRead, QuoteRef
 from .status_line import Reactions, StatusKind, StatusLines, status_kind
@@ -333,11 +336,12 @@ class LarkChannelAdapter(ChannelAdapter):
         for task in (self._bot_poll_task, self._heartbeat_task, self._catchup_task, self._catchup_retry_task,
                      self._outbound_task, self._collector_task):
             if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+                # A loop can lose a cancel (see ``cancel_and_wait``). The collector's own end takes up to two stop
+                # graces of its consumer: cancelled again sooner, it would leave the lark-cli process behind.
+                await cancel_and_wait(task, again_after=2 * _CONSUMER_STOP_GRACE_SEC + RECANCEL_SEC
+                                      if task is self._collector_task else RECANCEL_SEC)
+                if not task.cancelled():
+                    task.result()  # a loop that had failed still raises here
         await self._reactions.stop()
         if self._transport.kind is LarkTransportKind.CLI:
             self._transport.inner.on_thread_activity = None

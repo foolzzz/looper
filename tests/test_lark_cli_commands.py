@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -24,7 +25,8 @@ from looper.agents.channels.lark_cli import (
     LarkCliError, bot_info_command, consume_command, reaction_command, reply_command, search_command, send_command,
     whoami_command, resource_command,
 )
-from looper.agents.message import MessageEnvelope, MessageType, channel_address
+from looper.agents.message import MANAGER_ADDRESS, MessageEnvelope, MessageType, channel_address
+from looper.agents.supervisor import RECANCEL_SEC
 
 
 def _calls(log: Path) -> list[list[str]]:
@@ -500,6 +502,109 @@ def test_a_cancelled_call_leaves_no_lark_cli_behind(tmp_path: Path) -> None:
     asyncio.run(asyncio.wait_for(main(), timeout=20))
     with pytest.raises(ProcessLookupError):
         os.kill(int(pid_file.read_text()), 0)
+
+
+def test_a_stop_arriving_as_a_send_finishes_ends_and_records_the_delivery_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lark_cli_stand_in: Path,
+) -> None:
+    real_start = asyncio.create_subprocess_exec
+
+    async def main() -> None:
+        sent, release = asyncio.Event(), asyncio.Event()
+
+        async def start(*argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
+            process = await real_start(*argv, **kwargs)
+            if "+messages-send" in argv:
+                communicate = process.communicate
+
+                async def held() -> tuple[bytes, bytes]:
+                    result = await communicate()
+                    sent.set()
+                    await release.wait()
+                    return result
+
+                monkeypatch.setattr(process, "communicate", held)
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", start)
+        bus = MessageBus(runtime_root=tmp_path)
+        adapter = _adapter(tmp_path)
+        recorded: list[bool] = []
+        adapter.delivery_observer = recorded.append
+        envelope = MessageEnvelope.create(
+            source=MANAGER_ADDRESS, target=channel_address("lark"), message_type=MessageType.AGENT_REPLY,
+            payload={"text": "synthetic reply"}, metadata={"reply_route": {"chat_id": "oc_synthetic"}})
+        await bus.publish(envelope)
+        adapter._bus, adapter._running = bus, True
+        adapter._outbound_task = outbound = asyncio.create_task(adapter._outbound_loop())
+        stopping = None
+        try:
+            await asyncio.wait_for(sent.wait(), 10)
+            # The call finishes and stop() cancels the outbound loop in the same turn of the event loop.
+            release.set()
+            stopping = asyncio.create_task(adapter.stop())
+            done, _ = await asyncio.wait({stopping}, timeout=RECANCEL_SEC + 2)
+            assert done, "stop() is still waiting for the outbound loop"
+            stopping.result()
+            assert outbound.done()
+            assert sum("+messages-send" in call for call in _calls(lark_cli_stand_in)) == 1
+            assert recorded == [True]
+            assert bus.journal.undelivered() == []  # a restart does not send it again
+            delivered = (tmp_path / ".local" / "agent-bus" / "delivered.txt").read_text().splitlines()
+            assert delivered == [envelope.message_id]
+            if sys.version_info < (3, 12):  # the first cancellation was lost, so the injection did happen
+                assert outbound.cancelling() == 2
+        finally:
+            for task in (stopping, outbound):
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.wait({task}, timeout=5)
+            await bus.shutdown()
+
+    asyncio.run(main())
+
+
+def test_stop_leaves_the_event_consumer_time_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from fake_claude import fake_claude
+
+    pid_file = tmp_path / "pid"
+    deaf = tmp_path / "lark-cli"
+    # Ignores the end of its input, so only the SIGTERM that follows the stop grace ends it.
+    fake_claude(deaf, f"import os, time\nopen({str(pid_file)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+    monkeypatch.setattr(lark_cli, "consume_command", lambda profile=None: [str(deaf)])
+
+    async def main() -> None:
+        adapter = _adapter(tmp_path)
+        adapter._running = True
+        adapter._collector_task = asyncio.create_task(adapter._event_collector_loop())
+        while not pid_file.exists() or not pid_file.read_text():
+            await asyncio.sleep(0.02)
+        await adapter.stop()
+
+    try:
+        asyncio.run(asyncio.wait_for(main(), timeout=30))
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
+    finally:
+        if pid_file.exists() and pid_file.read_text():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_a_stop_still_raises_what_a_loop_failed_with(tmp_path: Path) -> None:
+    async def fail() -> None:
+        raise RuntimeError("synthetic loop failure")
+
+    async def main() -> None:
+        adapter = _adapter(tmp_path)
+        adapter._outbound_task = asyncio.create_task(fail())
+        await asyncio.wait({adapter._outbound_task})
+        with pytest.raises(RuntimeError, match="synthetic loop failure"):
+            await adapter.stop()
+
+    asyncio.run(main())
 
 
 @pytest.mark.parametrize("key", ["app_id_env", "app_secret_env"])
