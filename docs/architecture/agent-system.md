@@ -1080,8 +1080,22 @@ them.
   command turns back into a direct ref. A ref outside branches and tags that only the chains after the turn read has
   no recorded earlier value: it is checked, never written. When no such command can be built, the entry has no
   command but `not_restorable`: `too_many_symrefs` (more than 200 symbolic refs), `git_too_old` (older than
-  git 2.46), `chain_outside_refs` (a chain through a name such as `HEAD`) or `chain_unreadable` (git could not
-  read a hop); the conversation says why in text the dashboard writes. Names are shown with control and format
+  git 2.46), `chain_outside_refs` (a chain through a name such as `HEAD`), `chain_unreadable` (git could not
+  read a hop) or `ref_file_unreadable` (below); the conversation says why in text the dashboard writes. The 2.46
+  floor is for the transaction's symbolic-ref lines; Looper runs the `git` on the server's `PATH`, and with an
+  older one each such entry reads, in the conversation,
+  `<ref> <change>（<old> → <new>） 不能给出恢复命令：本机的 git 版本低于 2.46，无法核对并改写符号引用；请自己检查这个引用。`
+  (the server logs `task Manager refs: this git cannot restore symbolic refs; their direct targets are not read`);
+  direct refs that no chain ties keep their commands.
+  Looper's own reading of ref files goes through descriptors under the git directory (`safe_read`): each directory
+  is opened one component at a time and listed through its descriptor, never through a link, and a file is read only
+  when it is a regular one with a single hard link and at most 4 KiB (the old symlink spelling of a symbolic ref
+  counts only when the link text is a ref name). git itself does follow links there, so the files are read before
+  and again after git, and a refused ref, directory or file, with every link that reads through it, is dropped from
+  what git said: its entry is `unreadable` with no new value, no command and `ref_file_unreadable`, in every report
+  while it stays so, and "needs you" like any change. A `HEAD` or `packed-refs` that is not a file of its own
+  refuses the whole snapshot. Not covered: a link put in place and removed again while one git command runs.
+  Names are shown with control and format
   characters written as `\uXXXX`. Looper never restores anything and
   raises no alert: a ref change is not an invariant violation. The `ref_report` event carries
   `report_id`, `changes`, `info`, `head`, `own_commits` and `needs_you`. A fast-forward of the task
