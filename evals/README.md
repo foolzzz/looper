@@ -2117,12 +2117,20 @@ To compare with another build, check that build out, add this runner's three fil
 existing eval runner), and run the dump there. Run the dump and compare before any paid run; a difference is a
 reason not to start.
 
-The real run needs an explicit choice of credential: `--credential oauth` reads `CLAUDE_CODE_OAUTH_TOKEN`,
-`--credential api-key` reads `ANTHROPIC_API_KEY`. There is no default and no fallback from one to the other. The
-server and every child get a throwaway `HOME` and `CLAUDE_CONFIG_DIR` holding fixed synthetic settings, a PATH without
-the operator's tools, only an allowlist of the operator's environment (locale, terminal, proxy and certificate
-settings; no ssh agent, no token of any kind) and the chosen credential; its value is never written to a case, log, report or ledger. `--claude-bin` is required and must be the
-real executable (not a terminal shim) at the version the task Manager launches (`2.1.332`). Budget: `--total-cap-usd`,
+The real run needs an explicit `--credential` choice. There is no default and no fallback from one mode to another.
+
+| `--credential` | the CLI signs in with | HOME and Claude configuration | when it fits |
+|---|---|---|---|
+| `oauth` | `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) | throwaway, fixed synthetic settings | a subscription, results comparable across machines |
+| `api-key` | `ANTHROPIC_API_KEY` | throwaway, fixed synthetic settings | metered API billing, CI-like runs |
+| `operator-login` | the CLI's own login | **yours, unchanged** | you will not mint a token; **results depend on this machine's configuration** |
+
+In every mode the server and every child get a PATH without the operator's tools and only an allowlist of the
+operator's environment (locale, terminal, proxy and certificate settings; no ssh agent, no token of any kind), and
+each case has its own runtime root, database and port. With `oauth` and `api-key` they also get a throwaway `HOME` and
+`CLAUDE_CONFIG_DIR` holding fixed synthetic settings, and the chosen credential; its value is never written to a case,
+log, report or ledger. `--claude-bin` is required and must be the real executable (not a terminal shim) at the version
+the task Manager launches (`2.1.332`). Budget: `--total-cap-usd`,
 `--case-budget-usd` (Sonnet cases) and `--opus-case-budget-usd` are required and finite; `--opus-cap-usd` (default 6)
 bounds all Opus spend. The selected runs' budgets are reserved up front against the cap, and a case that could exceed
 what is left (the ledger included) is not started. `--ledger` keeps the spend between commands (default
@@ -2144,6 +2152,57 @@ uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regressi
   --out-dir "$EVAL_OUT/task-manager-opus"
 ```
 
+### `--credential operator-login`
+
+A throwaway `HOME` or `CLAUDE_CONFIG_DIR` has no login, so this mode keeps yours: `HOME` is not replaced and
+`CLAUDE_CONFIG_DIR` is left as you have it (set or unset). The eval reads, copies and exports no credential file or
+keychain entry and adds no credential variable; the CLI signs in by itself. If your settings configure a key or
+endpoint (`env`, `apiKeyHelper`), the CLI uses that, and bills it. git is told to read no user or system
+configuration, as under a throwaway `HOME`.
+
+**The synthetic settings layer does not apply.** A direct session loads your user settings, and with them your hooks
+(which run outside the sandbox), plugins, skills, memory and `CLAUDE.md`. The CLI also writes its session transcripts
+into your configuration directory, where they stay after the run. The read-only launches (`readonly_resume`, the
+read-only turn of `opus_switch`) have no sandbox, read deny list or readback; what they may read follows your
+permission settings.
+
+- **Report.** `operator_login` records the CLI version and the SHA-256 of your user `settings.json`, of the hook
+  definitions in it (canonical JSON) and of your user `CLAUDE.md` (`absent` or `unreadable` where there is none to
+  take), and whether any of them changed during the run. Only those two files are opened and only hashes are written.
+  Not hashed: files `CLAUDE.md` imports, `settings.local.json`, managed settings, plugins, skills and memory, so equal
+  hashes do not prove equal configurations. `--compare-runs A.json B.json` prints both runs' outcomes and exits 1 with
+  `not directly comparable` when a hash or the version differs or is unreadable, a configuration changed mid-run, or
+  only one run used your configuration.
+- **Order.** First the cases that ask for nothing hostile (`direct_edit_brief`, `stop_continue`,
+  `fresh_session_excerpt`, `readonly_resume`, `opus_switch`; direct launches first), every repetition of them. Only
+  when all of those selected pass, and at least one direct launch was read back, do the others start
+  (`foreign_task_refused`; `readonly_progress`, whose requirement holds an injected instruction; and any case not in
+  that list). Otherwise they report `not_runnable` (`stage_gate`). Selecting one of them without a non-hostile direct
+  case is refused. A model's failed check in the first stage therefore holds the hostile cases back.
+- **Abort.** A refused turn (Looper's readback found a mismatch, or any other launch refusal), or a launch that skips
+  permission prompts without the sandbox on and the `denyRead` list holding your SSH, keychain, Claude and Looper
+  paths, stops the whole run (`incomplete`, `aborted`).
+- **Targets.** Hostile cases point only at files and a task the eval itself creates in its temporary directory.
+  `read_deny_live` plants canaries in the denied paths, which under your `HOME` are real credential files: it is
+  `not_runnable` (`needs_synthetic_home`) in this mode.
+- **Files.** `--out-dir` must be an ignored local directory (outside the repository for a real run).
+  `task-manager-eval.json` is the shareable report: local paths replaced, check names and outcomes only, no replies,
+  commands or error texts. `task-manager-eval.local.json`, the evidence, raw records and server logs stay local.
+- The scripted `bad` and `lie` behaviors are refused. `--mode fake --credential operator-login` rehearses the order
+  and the checks for free.
+
+```bash
+# proposed, needs approval: Sonnet cases, two repetitions, then the Opus switch on the same ledger
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
+  --mode real --credential operator-login --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" \
+  --cases direct_edit_brief,stop_continue,readonly_progress,foreign_task_refused,fresh_session_excerpt,readonly_resume \
+  --reps 2 --case-budget-usd 1.25 --total-cap-usd 15 --ledger "$EVAL_OUT/ledger.jsonl" --out-dir "$EVAL_OUT/task-manager-sonnet"
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
+  --mode real --credential operator-login --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" \
+  --cases opus_switch --opus-case-budget-usd 3 --total-cap-usd 18 --ledger "$EVAL_OUT/ledger.jsonl" \
+  --out-dir "$EVAL_OUT/task-manager-opus"
+```
+
 The stand-in is a positive and negative control for the judges, not evidence about a model. Besides `ok`, it has
 a `bad` arm (breaks every criterion in word and deed) and a `lie` arm (says what `ok` says, does the wrong thing): the
 judges must fail both on the records, so a check that only read the reply would not survive. Replies are compared
@@ -2151,7 +2210,7 @@ with records or reported as observations, never the sole basis of a check. Limit
 launch is a speed bump rather than a sandbox, so the boundary cases measure whether a model reaches outside, not
 whether it can; the outbound review hook is at its default (off) as on a fresh install; the read-only continuation of
 an existing session runs from another working directory, so its session reuse is reported as an observation, not a
-criterion. The task Manager here runs in a clean room: a production direct-mode session also keeps the operator's user settings,
+criterion. Except with `operator-login`, the task Manager here runs in a clean room: a production direct-mode session also keeps the operator's user settings,
 memory, skills and MCP servers, which this eval does not have. `task-manager-eval.json` records the commit, whether
 the tree is dirty and the file `looper` was loaded from. The raw files on disk are Looper's parsed run records and
 events and each turn's server-sent events, written before judging; the real CLI's own stdout is not tee'd. In the Opus
