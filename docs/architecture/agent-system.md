@@ -1103,19 +1103,24 @@ under the runtime root, the task directory or `$TMPDIR`; a missing console scrip
 launch). The orchestrated session's instructions are unchanged. Because a direct session loads
 user settings only, Claude Code no longer reads the project's `CLAUDE.md` files as memory;
 Looper reads `CLAUDE.md`, `CLAUDE.local.md` and `AGENTS.md` from the task directory's root
-(`task_manager_project_instructions`: never parents or nested directories, a symlink must stay
-inside the directory and a file with other hard links is skipped, 32 KiB per file and 64 KiB in
-all with a truncation line (the caps count the written-out size), strict UTF-8, control and format
-characters (NUL, ESC, zero-width, bidirectional, the tag block) written out as `\uXXXX`, the file
-opened by walking its resolved path from a directory descriptor with no symlink at any component, `@` text and imports kept as written) and appends them after the brief, each in an `untrusted` fence with
+(`task_manager_project_instructions`: never parents or nested directories; each file is read through
+`safe_read` with the task directory as the boundary, so only a regular file with no other hard link,
+inside the directory and in no other repository below it, opened from a directory descriptor with no
+symlink at any component; a symlink is followed only to a file with one of those three names; 32 KiB
+per file and 64 KiB in all with a truncation line (the caps count the written-out size), strict
+UTF-8, control and format characters (NUL, ESC, zero-width, bidirectional, the tag block) written
+out as `\uXXXX`, `@` text and imports kept as written) and appends them after the brief, each in an
+`untrusted` fence with
 source `project_instructions`, between a lead and a closing line that say they are not the
 user's requests. They are read on every launch and resume, so an edit takes effect from the
 next turn (the prompt hash in the launch signature changes and the session resumes). Project
 skills, commands and nested `CLAUDE.md` files are not available to a direct session. A file that
-exists but was not read (outside the directory, not a regular file, hard-linked, unreadable, not
-UTF-8, or the 64 KiB total already spent: `budget_exhausted`) is reported to the user as a `sandbox_notice` with notice `project_instructions_skipped`
-and a code-written `detail` (`<file>: <reason>`, sorted), once for each change of the skipped
-set; the notice is a stored conversation event and never part of a model's input.
+exists but was not read is reported to the user as a `sandbox_notice` with notice
+`project_instructions_skipped` and a code-written `detail` (`<file>: <reason>`, sorted), once for
+each change of the skipped set. The reason is a `safe_read.Skip` (`outside`, `other_repository`,
+`not_an_instruction_file`, `symlink`, `hard_linked`, `not_regular`, `io_error`), `not_utf8`, or
+`budget_exhausted` (the 64 KiB total is already spent);
+the notice is a stored conversation event and never part of a model's input.
 
 Directory checks. A direct session starts only for an in-place task whose directory is the root of its own non-bare git repository. A worktree task (`workspace_mode` worktree), a linked worktree, or a submodule (`.git` is a file or a symlink) is refused with `worktree_unsupported`: v1 has no direct mode for a worktree task, and orchestrated mode is unchanged, so the commit-per-turn of worktree tasks (#1848) is not reached in direct mode. The operator's home is `workspace_is_home`. A system directory (`/`, or `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/dev`, `/Applications`, `/cores`, and anything under those) is `workspace_in_system_dir`. A directory that is, or contains, trusted configuration (credentials, the operator's configuration, the Claude configuration directory, the runtime root, and the ops file) is `workspace_contains_trusted_config`. A subdirectory, a bare repository, or a directory that is not a git repository is `workspace_not_repo_root`. A directory that equals, contains, or is inside another live direct session is `workspace_overlaps_session`. Comparisons use the device and inode of the resolved directory, so two spellings of one directory are the same directory. One directory has one lock, `task-manager-locks/<device>-<inode>.lock` under the runtime root (the directory is mode 0700, the file mode 0600, and the file is never deleted). A second session that finds the lock held gets the same refusal and names the holder. The resident's stop releases the lock. After that lock is taken, still inside admission and before the resident starts, the directory that was opened by path must have the same device and inode as both the checked directory and the directory the lock was actually taken on, and the whole check, including the overlap check, runs again. So a parent directory and a child directory that both passed the earlier check cannot both start, and a directory renamed or replaced in between is refused with `workspace_unavailable` (`kind` `changed_after_check`). An OS error during the checks or the lock (the directory is gone, a permission or I/O error) is the same typed refusal. At `inspect`, a path with no repository (missing, a plain file, an empty directory) is `workspace_not_repo_root` / `not_git` (a subdirectory of a repository stays `subdirectory`, a bare repository `bare`); `not_a_directory` is used only when, at lock time, the directory is gone or no longer a directory, and `io_error` covers a symlink loop, a permission or I/O error, or a runtime root that cannot hold the lock directory), never a generic turn failure, and admission does not report started. The refusal result carries `kind` as a typed field. The checks and the lock run in a worker thread. The session is started from the path, so a same-user writer swapping the path or its `.git` from the identity comparison inside admission until the spawn is not detected (a documented residual risk, outside the v1 threat model). The lock is per runtime root and per exact directory: two Looper processes with different runtime roots, or a parent and a child directory across processes, are not serialized, and a machine-wide lock is not built. The runtime root must be on a local filesystem. The lock descriptor is close-on-exec. If the Looper process dies while the Claude process is still alive, the kernel releases the lock when the Looper process exits, which can be before that Claude process exits. That early release is accepted for v1. These checks run only while `tasks.conversations.manager_answers` is on, which defaults off.
 
