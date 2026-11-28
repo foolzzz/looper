@@ -712,7 +712,8 @@ class RunnerSupervisor:
     async def _stop(self) -> None:
         # Initialization holds the kind lock. Interrupt it before waiting for that
         # lock, and keep every spawn/cleanup owned until its process has been reaped.
-        # A start still spawning is cancelled again after the reap grace, so a swallowed cancel cannot leave it.
+        # A start already cancelling is left to receive its process handle; it is cancelled again only after
+        # the reap interval, so a second cancel cannot drop that handle while spawn is still returning it.
         await cancel_tasks(list(self._starts), again_after=RECANCEL_SEC)
 
         async def close_kind(state):

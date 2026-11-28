@@ -667,11 +667,17 @@ async def _cancel_ticker(task: asyncio.Task[Any] | None) -> None:
     A task can lose a cancellation when ``asyncio.wait_for`` returns as the cancel arrives
     (Python 3.11). A failure other than cancellation is retrieved and not raised. The caller's
     own cancellation still propagates: ``asyncio.wait`` does not treat it as the ticker's.
+    A ticker that is already cancelling is waited out for one interval before another cancel,
+    the same as ``supervisor.cancel_and_wait``: a second cancel at once would cut its cleanup.
+    The loop is copied here so the per-run keeper does not import the supervisor.
     """
     if task is None:
         return
+    first = True
     while not task.done():
-        task.cancel()
+        if not (first and task.cancelling()):
+            task.cancel()
+        first = False
         await asyncio.wait({task}, timeout=_TICKER_STOP_AGAIN_SEC)
     if not task.cancelled():
         task.exception()

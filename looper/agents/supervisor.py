@@ -47,6 +47,13 @@ RECANCEL_SEC = 5.0
 # half a second) without spending the process-reap grace. A task still running after that is cancelled again,
 # including an idle check or a backup that has not finished its own cleanup.
 SERVICE_STOP_AGAIN_SEC = 1.0
+# One shutdown runs these waits in series, and serve exits at SHUTDOWN_DEADLINE_SEC (15s) if they are still going.
+# When every task loses one cancel, one runner kind spends eight process-class intervals: task-manager runs,
+# consults, wait checks, scheduler background jobs, the fleet idle close, the task-router loop, worker runs, and
+# that runner. 8 × RECANCEL_SEC is 40s, or 45s when a second runner kind stops in the same loop. About twenty-five
+# service stops add a second each, and a worker's SIGTERM grace adds proc_tree.TERM_GRACE_SEC (3s). The sum is past
+# 15s: the deadline exits and the next start reaps what is left. Wait checks and the idle close sit in the 40s
+# because a second cancel at 1s kills a command still inside its 3s grace and cuts an idle close longer than a second.
 
 
 async def cancel_and_wait(task: asyncio.Task[Any], *, again_after: float = RECANCEL_SEC) -> None:
@@ -57,9 +64,15 @@ async def cancel_and_wait(task: asyncio.Task[Any], *, again_after: float = RECAN
     message loop then waits for its next message for good. ``asyncio.wait``
     does not take the task's cancellation for the caller's own: a cancelled
     caller still propagates.
+
+    A task that is already cancelling has a cleanup await in progress. Another
+    ``cancel`` now would interrupt that await, so the first round only waits.
     """
+    first = True
     while not task.done():
-        task.cancel()
+        if not (first and task.cancelling()):
+            task.cancel()
+        first = False
         await asyncio.wait({task}, timeout=again_after)
 
 

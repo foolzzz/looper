@@ -425,14 +425,14 @@ class StreamStats:
     dropped: int = 0
 
 
-async def _cancel_remaining(tasks: list[asyncio.Task[Any]]) -> bool:
+async def _cancel_remaining(tasks: list[asyncio.Task[Any]]) -> None:
     """Cancel ``tasks`` and wait them out, even if this task is cancelled again while it waits.
 
     Cleanup of the connection runs on a task that is already being cancelled, and the caller cancels it
     again while the children are still ending. That second cancel lands on the next await and would leave
     a child running after it dropped the first one. The wait therefore runs on its own task; cancellation
-    of this one is held back until the wait has finished. Returns whether a cancel arrived, so a cancelled
-    connection does not also publish the end-of-stream sentinel.
+    of this one is held back until the wait has finished. A cancel that arrived is then raised again, so
+    this task stays cancelled and does not also publish the end-of-stream sentinel.
     """
     current = asyncio.current_task()
     finishing = asyncio.ensure_future(cancel_tasks(tasks))
@@ -451,7 +451,8 @@ async def _cancel_remaining(tasks: list[asyncio.Task[Any]]) -> bool:
     finally:
         if not finishing.done():
             finishing.cancel()
-    return cancelled
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
@@ -583,9 +584,11 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
         except (OSError, WebSocketException, TimeoutError) as exc:
             raise ConnectionError(f"the Lark stream connection failed: {type(exc).__name__}") from None
         finally:
-            cancelled = await _cancel_remaining([*tasks, *answering])
-            logger.info("Lark stream disconnected")
-            if not cancelled and not asyncio.current_task().cancelling():
+            try:
+                await _cancel_remaining([*tasks, *answering])
+            finally:
+                logger.info("Lark stream disconnected")
+            if not asyncio.current_task().cancelling():
                 await events.put(None)
 
     connection = asyncio.create_task(run())

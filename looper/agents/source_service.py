@@ -427,6 +427,11 @@ def health(source: Mapping[str, Any], last_status: str | None, now: datetime) ->
     return "degraded" if last_status in ("partial", "failed") else "healthy"
 
 
+async def cancel_collect_task(task: asyncio.Task[Any] | None) -> None:
+    """Cancel one collection the manual start handshake launched."""
+    await cancel_tasks([task])
+
+
 class SourceService:
     """Every ``interval`` seconds, run a pass for each bridged source whose time rule has fired."""
 
@@ -460,9 +465,12 @@ class SourceService:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
+        # The loop can start a collection after a dropped cancel. Wait until the loop has ended, then cancel
+        # whatever it left in ``_collect_tasks``.
+        await cancel_tasks([task])
         collecting = list(self._collect_tasks.values())
         alert, self._alert_task = self._alert_task, None
-        await cancel_tasks([task, *collecting, alert])
+        await cancel_tasks([*collecting, alert])
         self._collect_tasks.clear()
         if self._alerts is not None:
             await self._alerts.stop()
@@ -642,7 +650,7 @@ class SourceService:
         try:
             return await asyncio.wait_for(asyncio.shield(started), 5)
         except BaseException:
-            await cancel_tasks([task])
+            await cancel_collect_task(task)
             if not started.done():
                 started.cancel()
             elif not started.cancelled():

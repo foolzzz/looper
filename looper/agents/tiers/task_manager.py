@@ -926,8 +926,7 @@ class TaskManagerPool:
         for request in queued:
             await self._refuse(request, RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
         await cancel_tasks([self._ticker])
-        for task in running:
-            task.cancel()
+        # The runs are cancelled in the gather. A cancel here as well would land while that turn's cleanup runs.
         await asyncio.gather(
             cancel_tasks(running, again_after=RECANCEL_SEC),
             *(a.resident.stop(kill=True) for a in list(self.agents.values())),

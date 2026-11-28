@@ -25,7 +25,7 @@ from .drain import DrainState
 from .managers_api import DEFAULT_MANAGER_ID, MAX_ENABLED_MANAGERS, ManagerDefinition
 from .message import MANAGER_ADDRESS, MessageEnvelope, MessageType, manager_address
 from .ops.service import ManagerOps, Platform, scope_for
-from .supervisor import AgentSupervisor, cancel_tasks
+from .supervisor import RECANCEL_SEC, AgentSupervisor, cancel_tasks
 from .tiers.manager import (
     STOP_DONE_REPLY, STOP_IDLE_REPLY, STOP_UNSUPPORTED_REPLY, TURNED_OFF_REPLY, ManagerAgent, ManagerConfig,
     ReplyOutcome, StopResult, default_definition, reply_envelope, stopped_reply,
@@ -215,8 +215,12 @@ class ManagerFleet:
         """The service shuts down: no retry goes on."""
         idle, self._idle_task = self._idle_task, None
         retries = list(self._retries.values())
-        # An idle check still running after one second is cancelled again, including the shielded read it awaits.
-        await cancel_tasks([idle, *retries])
+        # The idle close can take longer than a second and may be reaping a session, so it uses the process-class
+        # interval. Retries are ordinary service tasks. They run at the same time, so the two waits overlap.
+        await asyncio.gather(
+            cancel_tasks([idle], again_after=RECANCEL_SEC),
+            cancel_tasks(retries),
+        )
         self._retries.clear()
 
     # --- Lookup ---

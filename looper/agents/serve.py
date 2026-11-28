@@ -689,6 +689,16 @@ async def shut_down_within(shutdown: Awaitable[None], *, deadline: float = SHUTD
     stopping.result()
 
 
+async def stop_recording_and_channel_checks(*tasks: asyncio.Task[Any] | None) -> None:
+    """Stop the recording-proxy and channel-health loops. They end before the shutdown budget starts."""
+    await cancel_tasks(tasks)
+
+
+async def stop_advisory_checks(task: asyncio.Task[Any] | None) -> None:
+    """Stop the advisory check loop. A failure other than cancellation still surfaces."""
+    await cancel_tasks([task], raise_errors=True)
+
+
 def _local_url(host: str, port: int) -> str:
     """This server's address for a client on the same machine: loopback when it listens on every address."""
     if host in ("", "0.0.0.0"):
@@ -1319,13 +1329,13 @@ async def _run_agent_system_watched(
         try:
             await stop_event.wait()
         finally:
-            await cancel_tasks([proxy_checks, channel_checks])
+            await stop_recording_and_channel_checks(proxy_checks, channel_checks)
 
         # --- Shutdown ---
 
         async def shut_down() -> None:
             await task_managers.shutdown()
-            await cancel_tasks([advisory_checks], raise_errors=True)
+            await stop_advisory_checks(advisory_checks)
             if mode is ShutdownMode.DETACH_KEPT:
                 await worker_pool.detach_kept(epoch=lease.epoch)
                 await explorers.stop(epoch=lease.epoch)
@@ -1389,7 +1399,7 @@ async def _run_agent_system_watched(
             except Exception:
                 logger.warning("request recording proxy shutdown failed", exc_info=True)
         if advisory_checks is not None:
-            await cancel_tasks([advisory_checks], raise_errors=True)
+            await stop_advisory_checks(advisory_checks)
         try:
             if recognition_service is not None:
                 await recognition_service.stop()
