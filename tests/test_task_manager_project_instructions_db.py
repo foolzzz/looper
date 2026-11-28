@@ -1,11 +1,19 @@
 """The task directory's instruction files reach a direct session's prompt, fenced after the brief, every turn."""
+import json
+import subprocess
 from pathlib import Path
+from unittest.mock import AsyncMock
 
+from looper.agents import task_manager_alerts
 from looper.agents import task_manager_project_instructions as project_instructions
 from looper.agents.tiers import task_manager as tm
 from looper.db import tasks
-from tests.db_support import run_db
+from tests.db_support import run_db, until
 from tests.task_manager_support import NativeTaskManager, Sink, submit_and_wait
+
+
+def _git(directory: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(directory), *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
 def _prompt(command: list[str]) -> str:
@@ -120,9 +128,93 @@ def test_orchestrated_mode_never_reports_a_skipped_file(monkeypatch, tmp_path):
     run_db(check, monkeypatch, timeout=60)
 
 
-def test_a_refused_directory_never_has_its_instruction_files_opened(monkeypatch, tmp_path):
-    import subprocess
+def _refuse_readback(native, content) -> None:
+    """Make the stand-in CLI report ``content`` over its effective settings ({} restores a clean readback)."""
+    native.transcript.with_name("readback-override.json").write_text(json.dumps(content))
 
+
+WIDER = {"get_settings": {"effective": {"sandbox": {"excludedCommands": ["git"]}}}}
+
+
+def test_a_turn_the_readback_refuses_reports_no_skipped_file_and_the_next_turn_does(monkeypatch, tmp_path):
+    native = NativeTaskManager(monkeypatch, tmp_path)
+    monkeypatch.setattr(task_manager_alerts, "invariant_violation", AsyncMock())
+
+    async def check(db):
+        task_id, _, directory = await native.create(db)
+        (directory / "CLAUDE.md").symlink_to(tmp_path / "nowhere" / "CLAUDE.md")
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        try:
+            _refuse_readback(native, WIDER)
+            refused = Sink()
+            await pool.submit(task_id, "reply", message_id="m1", sink=refused)
+            await refused.done()
+            assert refused.finals[-1][1] == "refused" and "sandbox.excludedCommands" in refused.finals[-1][0]
+            assert _notices(refused) == []  # the notice comes after the readback
+            await until(lambda: not pool.in_turn(task_id), "the refused turn's cleanup")
+            _refuse_readback(native, {})
+            admitted = await submit_and_wait(pool, task_id, message_id="m2")
+            assert [n["message_id"] for n in _notices(admitted)] == ["m2"]
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_the_fresh_process_after_a_failed_resume_reports_nothing_before_its_readback(monkeypatch, tmp_path):
+    native = NativeTaskManager(monkeypatch, tmp_path)
+    monkeypatch.setattr(task_manager_alerts, "invariant_violation", AsyncMock())
+
+    async def check(db):
+        task_id, _, directory = await native.create(db)
+
+        class ChangeBeforeTheFreshLaunch(Sink):
+            async def event(self, kind, payload):
+                await super().event(kind, payload)
+                if kind.value == "session_fresh":  # sent before the fresh launch reads the files again
+                    (directory / "CLAUDE.md").symlink_to(tmp_path / "nowhere" / "CLAUDE.md")
+                    _refuse_readback(native, WIDER)
+
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        try:
+            await submit_and_wait(pool, task_id, message_id="m1")
+            await pool.close(task_id)
+            (directory / "reject-resume").touch()  # the resumed process exits before init
+            sink = ChangeBeforeTheFreshLaunch()
+            await pool.submit(task_id, "two", message_id="m2", sink=sink)
+            await sink.done()
+            assert sink.finals[-1][1] == "refused" and len(native.records("launch")) == 3
+            assert _notices(sink) == []
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_a_turn_refused_for_a_moved_head_does_not_use_up_the_skip_notice(monkeypatch, tmp_path):
+    native = NativeTaskManager(monkeypatch, tmp_path)
+
+    async def check(db):
+        task_id, _, directory = await native.create(db)
+        pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 1)
+        try:
+            await submit_and_wait(pool, task_id, message_id="m1")  # records the task branch
+            branch = _git(directory, "symbolic-ref", "HEAD")
+            _git(directory, "symbolic-ref", "HEAD", "refs/heads/elsewhere")
+            (directory / "CLAUDE.md").symlink_to(tmp_path / "nowhere" / "CLAUDE.md")
+            refused = Sink()
+            result = await pool.submit(task_id, "reply", message_id="m2", sink=refused)
+            assert result.state == "refused" and result.reason is tm.RefuseReason.HEAD_MOVED
+            await refused.done()
+            assert _notices(refused) == []
+            await until(lambda: not pool.in_turn(task_id), "the refused turn's cleanup")
+            _git(directory, "symbolic-ref", "HEAD", branch)
+            admitted = await submit_and_wait(pool, task_id, message_id="m3")
+            assert [n["message_id"] for n in _notices(admitted)] == ["m3"]
+        finally:
+            await pool.shutdown()
+    run_db(check, monkeypatch, timeout=60)
+
+
+def test_a_refused_directory_never_has_its_instruction_files_opened(monkeypatch, tmp_path):
     native = NativeTaskManager(monkeypatch, tmp_path)
     opened: list[str] = []
     real_read = project_instructions.read

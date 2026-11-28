@@ -577,13 +577,14 @@ class TaskManagerAgent:
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
         await self._verify(launch, reopened)
-        await self._notice_skipped(request.sink, request.message_id)
         # An in-place direct session writes the real checkout: record its branches and tags and settle the task branch
         # (a detached or moved HEAD refuses here, before the message is admitted).
         refs_before, task_branch = ((await task_manager_refs.begin_turn(task, reopened.work_dir, sink=request.sink, phase="turn"))
                                     if self.mode == "direct" and task.get("workspace_mode") != "worktree" else (None, ""))
         if not request.admitted.done():
             request.admitted.set_result(Submitted("started"))
+        # After the readback and every gate that can refuse the turn: a refused turn does not use up the notice.
+        await self._notice_skipped(request.sink, request.message_id)
         rotating = self.context_rotation_pending
         if rotating:
             await request.sink.event(TaskManagerEvent.SESSION_FRESH,

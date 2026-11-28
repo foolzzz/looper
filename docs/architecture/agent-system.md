@@ -1119,7 +1119,9 @@ next turn (the prompt hash in the launch signature changes and the session resum
 skills, commands and nested `CLAUDE.md` files are not available to a direct session. A file that
 exists but was not read is reported to the user as a `sandbox_notice` with notice
 `project_instructions_skipped` and a code-written `detail` (`<file>: <reason>`, sorted), once for
-each change of the skipped set. The reason is a `safe_read.Skip` (`outside`, `other_repository`,
+each change of the skipped set. It is sent once the turn is admitted, after the readback and the
+task-branch check, so a turn either of them refuses does not use it up. The reason is a
+`safe_read.Skip` (`outside`, `other_repository`,
 `not_an_instruction_file`, `symlink`, `hard_linked`, `not_regular`, `io_error`), `not_utf8`, or
 `budget_exhausted` (the 64 KiB total is already spent);
 the notice is a stored conversation event and never part of a model's input.
