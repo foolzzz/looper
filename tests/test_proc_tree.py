@@ -1119,15 +1119,20 @@ def test_end_owned_starts_all_agents_concurrently_and_keeps_unfinished_records(
             proc_tree._recorded[pid] = (record, "original")
         # 5 s only turns a hang into a failure. The pass condition is that end_owned has
         # returned while both end tasks are still waiting on reap, not an elapsed bound.
-        await asyncio.wait_for(proc_tree.end_owned(deadline=0.05), 5)
-        assert started == {101: "original", 102: "original"}
-        assert all(path.exists() for path, _ in proc_tree._recorded.values())
-        await asyncio.sleep(0)  # cancellation is delivered on the next loop turn
-        assert cancelled == {101, 102}
-        assert len(still_reaping) == 2
-        assert all(not task.done() for task in still_reaping)
-        assert reap is not None
-        reap.set()
+        async def end_then_snapshot() -> set[int]:
+            await proc_tree.end_owned(deadline=0.05)
+            return set(cancelled)  # no loop turn since end_owned returned
+
+        assert await asyncio.wait_for(end_then_snapshot(), 5) == set()
+        try:
+            assert started == {101: "original", 102: "original"}
+            assert all(path.exists() for path, _ in proc_tree._recorded.values())
+            await asyncio.sleep(0)  # cancellation is delivered on the next loop turn
+            assert cancelled == {101, 102}
+            assert len(still_reaping) == 2
+            assert all(not task.done() for task in still_reaping)
+        finally:
+            reap.set()  # also on failure, so asyncio.run can finish
         await asyncio.sleep(0)
         assert not still_reaping
 
