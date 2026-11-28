@@ -779,12 +779,14 @@ async def _run_agent_system_watched(
     from ..db import init_pool, ensure_schema, close_pool
 
     from . import chat_settings, links, operator_notes, persona, projects, scheduler_settings, waits
+    from . import git_jail
     from .runtimes import instructions
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
     projects.configure_root(ops.projects_root)
     instructions.configure_runtime_root(runtime_root)
+    git_jail.configure(runtime_root, ops.path, ops.projects_root)
     from .. import _PROCESS_STARTED_AT
     startup = _StartupSteps(_PROCESS_STARTED_AT)
     if ops.projects_root:

@@ -56,7 +56,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .run_usage import CostStatus, cost_status
-from . import git_safe
+from . import git_jail, git_safe
 from .llmrec import control as llmrec
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
 from ..db import tasks as db_tasks
@@ -358,6 +358,7 @@ class ConsultService:
             cwd = str(task.get("work_dir") or "")
         if not cwd or not Path(cwd).is_dir():
             raise _Failed(FallbackReason.NO_SNAPSHOT, "the directory its step ran in, and its task's, are gone")
+        git_jail.add_workspace_root(self.runtime_root)
         fork_dir = self.runtime_root.absolute() / ".local" / runtime.type / "consult-sessions" / task_id / run_id
         try:
             read_only = "runtime"
@@ -672,6 +673,7 @@ def _cleanup(snapshot: tuple[Path, Path, Path] | None, fork_dir: Path) -> None:
 
 def _sweep(runtime_root: Path) -> None:
     """Remove leftover consult checkouts and forks; no consult runs yet when startup calls this."""
+    git_jail.add_workspace_root(runtime_root)
     for target in (runtime_root / ".local" / "consults").glob("*"):
         if target.is_dir():
             try:

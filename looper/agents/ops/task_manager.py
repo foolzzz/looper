@@ -234,7 +234,10 @@ async def _workspace(task: dict[str, Any]) -> dict[str, Any]:
             process.kill()
             await process.wait()
             raise
-        await git_safe.recheck_async(process)
+        try:
+            await git_safe.recheck_async(process)
+        except git_safe.RepositoryRefused as error:
+            raise ValueError("not a git checkout") from error
         if process.returncode:
             raise ValueError("not a git checkout")
         return stdout.decode("utf-8", errors="replace")

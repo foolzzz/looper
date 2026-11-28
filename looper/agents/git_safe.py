@@ -27,6 +27,11 @@ Every git command Looper runs in a task, step or worktree directory goes through
   not point back (another repository, a ``core.worktree`` elsewhere, a ``gitdir:`` link that is not a linked
   worktree's or a submodule's), so the checks above are made on the repository the directory claims to be.
 
+On macOS every command, the probes included, also runs under a Seatbelt profile (``git_jail``): the direct
+session's read deny list, writes only to the repository's own directories and the write targets derived from the
+command, no network. A command the profile kills, or a profile that cannot be applied, is a ``RepositoryRefused``
+with no output. Other platforms are unchanged.
+
 The drivers are found before the command runs, so an agent that writes a definition in between is not stopped
 (the fixed overrides, which do not depend on the repository, are). ``cached`` reuses one check for a directory
 inside a block, for an operation that runs many commands and has no agent running meanwhile.
@@ -53,6 +58,8 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from . import git_jail
 
 # Each setting names a program or a place one is read from; the command line beats every configuration file,
 # so the repository's value never applies.
@@ -100,7 +107,9 @@ class RepositoryRefused(subprocess.SubprocessError):
 
     ``reason`` is ``attributes_driver`` (``info/attributes`` assigns a driver), ``git_dir_mismatch`` (the ``.git``
     does not belong to this directory), ``outside_worktree`` (the directory is not inside the work tree git
-    reports) or ``object_alternates`` (``objects/info/alternates`` or ``http-alternates`` is not empty).
+    reports), ``object_alternates`` (``objects/info/alternates`` or ``http-alternates`` is not empty),
+    ``sandbox_denied`` (the macOS jail killed git, or a path may not be part of its profile) or
+    ``sandbox_unavailable`` (the jail could not be applied).
     """
 
     def __init__(self, reason: str, directory: str | Path, detail: str):
@@ -172,9 +181,155 @@ def _config_probe(directory: str | Path) -> list[str]:
 MAX_SUBMODULE_DEPTH = 8
 
 
+# --- The macOS jail ---
+
+
+def _jailed(command: list[str], directory: str | Path | None, **profile: Any) -> list[str]:
+    """``command`` under the jail's profile (``git_jail.profile``'s arguments); unchanged where there is no jail."""
+    if not git_jail.ENABLED:
+        return command
+    try:
+        return git_jail.wrap(command, git_jail.profile(**profile))
+    except git_jail.JailRefused as error:
+        raise RepositoryRefused(error.reason, directory or ".", str(error)) from None
+
+
+def _refuse_jailed(directory: str | Path | None, exit_code: int | None, stderr: Any = None) -> None:
+    """Raise when the jail ended the command: it killed git (the caller knows Looper did not), or could not be
+    applied. Nothing the command printed is carried."""
+    if not git_jail.ENABLED or exit_code is None or exit_code == 0:
+        return
+    if exit_code == git_jail.KILLED:
+        raise RepositoryRefused("sandbox_denied", directory or ".",
+                                "git was killed for reaching outside what it may read or write")
+    marker = "sandbox-exec:" if isinstance(stderr, str) else b"sandbox-exec:"
+    if exit_code in git_jail.UNAVAILABLE_EXIT_CODES or (isinstance(stderr, (str, bytes)) and stderr.startswith(marker)):
+        raise RepositoryRefused("sandbox_unavailable", directory or ".", "the macOS sandbox could not be applied")
+
+
+def _subcommand(args: Sequence[str]) -> tuple[str, list[str]]:
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        index += 2 if args[index] in ("-c", "-C") else 1
+    return (args[index], list(args[index + 1:])) if index < len(args) else ("", [])
+
+
+def _positionals(args: Sequence[str], valued: tuple[str, ...] = ()) -> list[str]:
+    found, index = [], 0
+    while index < len(args):
+        if args[index] == "--":
+            return found + list(args[index + 1:])
+        if not args[index].startswith("-"):
+            found.append(args[index])
+        index += 2 if args[index] in valued else 1
+    return found
+
+
+def _write_targets(directory: str | Path | None, args: Sequence[str], extra_env: Mapping[str, str] | None,
+                   common: str | None) -> list[git_jail.WriteTarget]:
+    """What this command writes outside the repository's own directories, as the jail's typed targets. Derived here,
+    from the commands Looper uses; any other write is killed."""
+    def path(value: str) -> str:
+        return os.path.join(os.path.abspath(directory) if directory is not None else os.getcwd(), value)
+
+    targets: list[git_jail.WriteTarget] = []
+    command, rest = _subcommand(args)
+    if command == "worktree" and rest:
+        places = _positionals(rest[1:], ("-b", "-B", "--reason"))
+        if rest[0] == "add" and places:
+            targets.append(git_jail.WorktreeTarget(path(places[0])))
+        elif rest[0] == "remove" and places and os.path.lexists(path(places[0])):
+            # A checkout that is gone leaves only the repository's record to write.
+            targets.append(git_jail.RemoveTarget(path(places[0])))
+        elif rest[0] == "repair":
+            targets += [git_jail.RepairTarget(path(place)) for place in places]
+    elif command == "checkout-index":
+        targets += [git_jail.CheckoutPrefix(path(arg.removeprefix("--prefix=")))
+                    for arg in rest if arg.startswith("--prefix=")]
+    elif command == "clone" and len(places := _positionals(rest)) == 2:
+        targets.append(git_jail.CloneDestination(path(places[1])))
+    elif command == "remote" and rest[:1] == ["remove"] and directory is not None:
+        # Only a clone of Looper's own may have its configuration edited; anywhere else the write is killed.
+        if any(os.path.realpath(directory).startswith(area + os.sep) for area in git_jail.workspace_areas()):
+            targets.append(git_jail.OwnClone(os.path.realpath(directory)))
+    elif command == "branch" and rest[:1] in (["-d"], ["-D"]) and common is not None:
+        targets.append(git_jail.BranchSections(common))
+    if index := (extra_env or {}).get("GIT_INDEX_FILE"):
+        targets.append(git_jail.PrivateIndex(index))
+    return targets
+
+
+def _confined(directory: str | Path | None, args: Sequence[str], extra_env: Mapping[str, str] | None,
+              inspection: Inspection | None) -> list[str]:
+    command = argv(*args, directory=directory, overrides=inspection.overrides if inspection else ())
+    if not git_jail.ENABLED:
+        return command
+    # A clone reads its source, which the caller has checked.
+    subcommand, rest = _subcommand(args)
+    reads = _positionals(rest)[:-1] if subcommand == "clone" else [str(directory)] if directory is not None else []
+    return _jailed(command, directory, roots=inspection.roots if inspection else (),
+                   common=inspection.common if inspection else None,
+                   targets=_write_targets(directory, args, extra_env, inspection.common if inspection else None),
+                   reads=reads)
+
+
+def _roots(directory: str | Path, top: str | None, git_dir: str, common: str,
+           layout: bool) -> tuple[str, ...]:
+    """The repository directories a command in ``directory`` may write. The repository's own pointers are the
+    agent's, so a directory outside the work tree counts only when something the agent cannot write vouches for it:
+    a linked worktree's entry that points back (``_judge``), or a submodule's directory inside an enclosing
+    checkout's repository."""
+    here = _real(directory)
+
+    def within(path: str, parent: str) -> bool:
+        return os.path.commonpath([path, parent]) == parent
+
+    if not layout:  # a directory being relocated: its pointers are stale, so little outside it
+        roots = (here, *(path for path in (git_dir, common) if within(path, here)))
+        if not within(git_dir, here) and _moved_worktree(Path(git_dir), common, here):
+            roots += (git_dir,)  # the entry ``git worktree repair`` rewrites, nothing else of that repository
+        return roots
+    if top is None:  # a bare repository, or a directory inside a git directory
+        if not within(here, git_dir) and not within(here, common):
+            raise RepositoryRefused("git_dir_mismatch", directory, "the repository is not around this directory")
+        return (git_dir, common) if within(here, common) else (git_dir,)
+    submodule = git_dir == common and Path(git_dir).parent.name == "modules" and not within(common, top)
+    if submodule:
+        enclosing = []
+        for ancestor in Path(top).parents:
+            if (ancestor / ".git").exists():
+                found = _git_dir_of(ancestor)
+                enclosing += [_real(found), str(_common_dir_of(found))]
+        if not any(within(common, parent) for parent in enclosing):
+            raise RepositoryRefused("git_dir_mismatch", directory,
+                                    "the submodule's repository is not inside an enclosing checkout's")
+    return (top, git_dir, common)
+
+
+def _moved_worktree(entry: Path, common: str, here: str) -> bool:
+    """Whether ``entry`` is the linked worktree entry of the repository ``common`` for a checkout now at ``here``: it
+    records this directory, or a place that is gone (where the checkout was before the move)."""
+    if entry.parent.name != "worktrees" or str(entry.parent.parent) != common:
+        return False
+    try:
+        recorded = Path(entry / "gitdir").read_text().strip()
+    except (OSError, UnicodeError):
+        return False
+    return not os.path.exists(recorded) or _real(recorded) == _real(Path(here, ".git"))
+
+
 def _run_probe(command: list[str]) -> str:
-    return subprocess.run(command, capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT_SEC,
-                          env=_probe_environment(), stdin=subprocess.DEVNULL).stdout
+    directory = command[command.index("-C") + 1]
+    jailed = _jailed(command, directory, reads=[directory])
+    try:
+        done = subprocess.run(jailed, capture_output=True, text=True, timeout=PREFLIGHT_TIMEOUT_SEC,
+                              env=_probe_environment(), stdin=subprocess.DEVNULL, errors="surrogateescape")
+    except FileNotFoundError:
+        if jailed[0] != git_jail.SANDBOX_EXEC:
+            raise
+        raise RepositoryRefused("sandbox_unavailable", directory, "the macOS sandbox is missing") from None
+    _refuse_jailed(directory, done.returncode, done.stderr)
+    return done.stdout
 
 
 def _drivers(checkout: str | Path, depth: int = 0) -> tuple[str, list[Path]]:
@@ -338,6 +493,8 @@ class Inspection:
     """What ``check_repository`` found: the ``-c`` settings that replace the repository's own driver definitions."""
 
     overrides: tuple[str, ...] = ()
+    roots: tuple[str, ...] = ()  # what the jail lets a command write (``_roots``); empty without a jail
+    common: str | None = None  # the common git directory, whose protected parts stay unwritable
 
 
 def _overrides(output: str) -> tuple[str, ...]:
@@ -482,9 +639,10 @@ def check_repository(directory: str | Path, *, layout: bool = True) -> Inspectio
         output = _run_probe(_probe(directory))
         top, inside, git_dir, common = _judge(directory, output, layout)
         if inside:
+            roots = _roots(directory, top, git_dir, common, layout) if git_jail.ENABLED else ()
             before = _signature(directory, top, git_dir, common, None)
             text, links = _drivers(top if top is not None else directory)
-            found = Inspection(_overrides(text))
+            found = Inspection(_overrides(text), roots, common if git_jail.ENABLED else None)
             args = (top, git_dir, common, tuple(links))
             # Only what was read unchanged since before the probes is remembered.
             if before is not None and _signature(directory, top, git_dir, common, None) == before:
@@ -563,10 +721,24 @@ def recheck(directory: str | Path, before: Inspection | None) -> None:
                        directory, task_id, step_id, ", ".join(appeared))
 
 
+def _record_kills(process: asyncio.subprocess.Process) -> None:
+    """Remember that Looper itself killed ``process`` (a time limit), so that is not read as the jail's SIGKILL."""
+    kill = process.kill
+
+    def recorded() -> None:
+        process.looper_killed = True
+        kill()
+
+    process.looper_killed, process.kill = False, recorded
+
+
 async def recheck_async(process: asyncio.subprocess.Process) -> None:
-    """``recheck`` for a process ``spawn`` started, once it has finished."""
+    """``recheck`` for a process ``spawn`` started, once it has finished. Raises ``RepositoryRefused`` when the
+    jail ended it; the caller drops its output."""
     target = getattr(process, "git_safe", None)
     if target is not None:
+        if not process.looper_killed:
+            _refuse_jailed(target[0], process.returncode)
         await asyncio.to_thread(recheck, *target)
 
 
@@ -580,8 +752,18 @@ def run(directory: str | Path | None, *args: str, extra_env: Mapping[str, str] |
     if {"env", "cwd", "shell"} & kwargs.keys():
         raise ValueError("git_safe.run: env, cwd and shell are not accepted")
     inspection = check_repository(directory) if directory is not None else None
-    done = subprocess.run(argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()),
-                          env=environment(extra_env), **kwargs)
+    command = _confined(directory, args, extra_env, inspection)
+    check = kwargs.pop("check", False)
+    try:
+        done = subprocess.run(command, env=environment(extra_env), **kwargs)
+    except FileNotFoundError:
+        if command[0] != git_jail.SANDBOX_EXEC:
+            raise
+        raise RepositoryRefused("sandbox_unavailable", directory or ".", "the macOS sandbox is missing") from None
+    # ``subprocess.run``'s own timeout raises, so a SIGKILL seen here is not Looper's.
+    _refuse_jailed(directory, done.returncode, done.stderr)
+    if check:
+        done.check_returncode()
     if directory is not None:
         recheck(directory, inspection)
     return done
@@ -594,8 +776,13 @@ async def spawn(directory: str | Path, *args: str, extra_env: Mapping[str, str] 
     if {"env", "cwd", "shell"} & kwargs.keys():
         raise ValueError("git_safe.spawn: env, cwd and shell are not accepted")
     inspection = await check_repository_async(directory, layout=layout)
-    process = await asyncio.create_subprocess_exec(
-        *argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()),
-        env=environment(extra_env), **kwargs)
+    command = _confined(directory, args, extra_env, inspection)
+    try:
+        process = await asyncio.create_subprocess_exec(*command, env=environment(extra_env), **kwargs)
+    except FileNotFoundError:
+        if command[0] != git_jail.SANDBOX_EXEC:
+            raise
+        raise RepositoryRefused("sandbox_unavailable", directory, "the macOS sandbox is missing") from None
+    _record_kills(process)
     process.git_safe = (directory, inspection)  # for recheck_async, once the caller has the command's result
     return process

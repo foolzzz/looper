@@ -58,7 +58,7 @@ from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
 from .. import admission, attempts, cost_guard, cost_dispatch, failures, outbound_hook, proc_tree, reported_files, vault
-from .. import git_safe
+from .. import git_jail, git_safe
 from ...db import tasks as db_tasks
 from ...db import memory_lesson_injection as db_lesson_injection
 from .. import memory_lesson_injection as lesson_injection
@@ -928,6 +928,7 @@ def _verification_checkout(work_dir: str, backup: Path, runtime_paths: Collectio
         def clone(source: Path, target: Path, saved: Path) -> None:
             # Copy even uncommitted index objects, without hardlinks or inherited alternates.
             git_safe.check_repository(source)  # the clone reads the source: refuse a layout that could run its code
+            target.parent.mkdir(parents=True, exist_ok=True)  # the clone may write only the target itself
             git_safe.run(None, "clone", "--no-hardlinks", "--dissociate", "--no-checkout", "--",
                          str(source), str(target), check=True, capture_output=True, timeout=30)
             git_safe.run(target, "remote", "remove", "origin", check=True, capture_output=True, timeout=5)
@@ -3538,6 +3539,7 @@ class WorkerPool:
         return {**result, "verification": details}
 
     def _verification_backup(self, task_id: str, step_id: str | None, work_dir: str) -> Path:
+        git_jail.add_workspace_root(self._runtime_root)
         key = hashlib.sha256(json.dumps([task_id, step_id, str(Path(work_dir).resolve())]).encode()).hexdigest()
         return self._runtime_root / ".local" / "verification" / key
 

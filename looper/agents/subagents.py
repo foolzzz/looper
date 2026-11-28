@@ -23,7 +23,7 @@ from ..db import agent_spawns, llm_records, role_configs
 from ..db.connection import get_pool
 from ..db.agent_spawns import FINISHED, CancelReason, SpawnState
 from ..db.tasks import ACTIVE_STATUSES
-from . import admission, spawn
+from . import admission, git_jail, spawn
 from .agent_settings import Access, AgentType, Launch, load_agent_settings
 from .run_usage import CostStatus, cost_status
 from .runtimes import ReadOnly
@@ -292,6 +292,7 @@ class SpawnService:
                                              notes=ProjectExecution.from_row(project).notes_on)
             launch = Launch(settings, role=AgentType.EXPLORER, access=Access.EXPLORE)
             if launch.read_only_mode is ReadOnly.TOOLS:
+                git_jail.add_workspace_root(self.runtime_root)
                 checkout = await asyncio.to_thread(explorer_checkout.prepare, directory,
                     self.runtime_root / ".local" / "explorers" / str(spawn_id))
                 directory = checkout.cwd
