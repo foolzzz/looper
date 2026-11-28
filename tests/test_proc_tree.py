@@ -904,35 +904,79 @@ def test_end_owned_shares_its_deadline_between_spawning_and_ending(
         created, release = asyncio.Event(), asyncio.Event()
         processes = []
         real_create = asyncio.create_subprocess_exec
+        real_wait = asyncio.wait
+        real_end = proc_tree._end
+        real_loop = asyncio.get_running_loop()
+        # Charged to the spawn wait on the loop clock end_owned reads. Both are
+        # binary-exact, so the armed timeouts equal the deadline and its remainder
+        # with ==. The old wall-clock window (0.25 s .. 0.55 s, then a 2 s reap)
+        # moved under load; this does not.
+        deadline = 4.0
+        consumed = 1.0
+        clock = {"now": 1000.0}
+        wait_timeouts: list[float] = []
+        end_tasks: list[asyncio.Task[Any]] = []
+
+        class _SharedDeadline:
+            """The loop end_owned asked for. Only its clock is scripted."""
+
+            def time(self) -> float:
+                return clock["now"]
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_loop, name)
+
+        shared_deadline = _SharedDeadline()
 
         async def create(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
             process = await real_create(*args, **kwargs)
             processes.append(process)
             assert await process.stdout.readline() == b"ready\n"
             created.set()
-            await release.wait()
+            await release.wait()  # A real process exists, but spawn has not recorded it yet.
             return process
 
+        async def record_wait(waited: Any, *args: Any, **kwargs: Any) -> Any:
+            # Recorded before the jump, so the spawn wait is the full deadline and
+            # the end wait, armed after the jump, is the remainder of that same one.
+            wait_timeouts.append(float(kwargs["timeout"]))
+            if len(wait_timeouts) == 1:
+                clock["now"] += consumed
+                release.set()
+            return await real_wait(waited, *args, **kwargs)
+
+        async def record_end(process: Any, *args: Any, **kwargs: Any) -> Any:
+            assert release.is_set(), "end_owned must await the in-flight spawn before ending its process"
+            end_tasks.append(asyncio.current_task())  # type: ignore[arg-type]
+            return await real_end(process, *args, **kwargs)
+
+        def get_running_loop() -> _SharedDeadline:
+            return shared_deadline
+
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+        monkeypatch.setattr(proc_tree, "_end", record_end)
         spawning = asyncio.create_task(proc_tree.spawn(
             sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
             "print('ready', flush=True); time.sleep(60)", stdout=asyncio.subprocess.PIPE))
-        timer = None
         try:
             await asyncio.wait_for(created.wait(), 5)
             proc_tree.fence_spawns()
-            timer = asyncio.get_running_loop().call_later(0.25, release.set)
-            began = time.monotonic()
-            await proc_tree.end_owned(deadline=0.4)
-            elapsed = time.monotonic() - began
-            assert 0.25 <= elapsed < 0.55  # Giving the end a fresh 0.4 s would take at least 0.65 s.
+            # Patched once the spawn is held, so the spawn itself still uses the real loop.
+            monkeypatch.setattr(asyncio, "get_running_loop", get_running_loop)
+            monkeypatch.setattr(asyncio, "wait", record_wait)
+            await proc_tree.end_owned(deadline=deadline)
+            # A fresh deadline on the end wait would arm 4.0 again, not the 3.0 remainder.
+            assert wait_timeouts == [deadline, deadline - consumed]
+            assert len(end_tasks) == 1
             process = await spawning
-            await asyncio.wait_for(process.wait(), 2)
+            # end_owned does not await an end task that is still running when the shared deadline
+            # expires. Waiting for it here, instead of a fixed 2 s reap, lets the SIGKILL land
+            # before the assertion; the outer guard below is the backstop.
+            await asyncio.gather(*end_tasks, return_exceptions=True)
+            await process.wait()
             assert process.returncode == -signal.SIGKILL
             assert _running([process.pid], settle=0) == []
         finally:
-            if timer is not None:
-                timer.cancel()
             release.set()
             await asyncio.gather(spawning, return_exceptions=True)
             for process in processes:
