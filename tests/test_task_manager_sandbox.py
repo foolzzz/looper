@@ -46,7 +46,9 @@ def test_git_deny_write_is_absolute_under_the_real_path(tmp_path):
 
 def test_settings_content_holds_every_pinned_value_and_nothing_else(tmp_path):
     deny = ("/x/.ssh", "/x/.aws")
-    content = sandbox.settings_content(tmp_path, allowed_domains=("example.com",), read_deny=deny)
+    content = sandbox.settings_content(tmp_path, allowed_domains=("example.com",), read_deny=deny,
+                                       write_deny=("/shared",))
+    assert content["sandbox"]["filesystem"]["denyWrite"] == [*sandbox.git_deny_write(tmp_path), "/shared"]
     sb = content["sandbox"]
     assert content["crossSessionInbound"] == "refuse" and content["disableSkillShellExecution"] is True
     assert content["env"] == {"ENABLE_TOOL_SEARCH": "false"}
@@ -66,7 +68,7 @@ def test_settings_content_holds_every_pinned_value_and_nothing_else(tmp_path):
 
 
 def test_every_pin_is_consistent_with_its_check(tmp_path):
-    rows = sandbox.pins(tmp_path, allowed_domains=(), read_deny=())
+    rows = sandbox.pins(tmp_path, allowed_domains=(), read_deny=(), write_deny=())
     assert len({row.key for row in rows}) == len(rows)
     for row in rows:
         if row.check in (Check.ABSENT, Check.NOT_ASSERTED):
@@ -77,7 +79,7 @@ def test_every_pin_is_consistent_with_its_check(tmp_path):
 
 
 def test_known_sandbox_keys_cover_every_sandbox_pin_and_not_other_keys(tmp_path):
-    named = {row.key for row in sandbox.pins(tmp_path, allowed_domains=(), read_deny=()) if row.key[0] == "sandbox"}
+    named = {row.key for row in sandbox.pins(tmp_path, allowed_domains=(), read_deny=(), write_deny=()) if row.key[0] == "sandbox"}
     assert sandbox.KNOWN_SANDBOX_KEYS == named
     assert ("sandbox", "network", "allowedDomains") in named and ("sandbox", "autoAllowBashIfSandboxed") in named
     assert ("crossSessionInbound",) not in named
@@ -86,11 +88,11 @@ def test_known_sandbox_keys_cover_every_sandbox_pin_and_not_other_keys(tmp_path)
 @pytest.mark.parametrize("domains", ["example.com", [1], [None]])
 def test_allowed_domains_must_be_a_sequence_of_strings(tmp_path, domains):
     with pytest.raises(TypeError):
-        sandbox.settings_content(tmp_path, allowed_domains=domains)
+        sandbox.settings_content(tmp_path, allowed_domains=domains, write_deny=())
 
 
 def test_two_allowlists_or_deny_lists_give_two_contents(tmp_path):
-    contents = {json.dumps(sandbox.settings_content(tmp_path, allowed_domains=d, read_deny=r), sort_keys=True)
+    contents = {json.dumps(sandbox.settings_content(tmp_path, allowed_domains=d, read_deny=r, write_deny=()), sort_keys=True)
                 for d, r in [((), ()), (("a.example",), ()), (("b.example",), ()), ((), ("/a",)), ((), ("/b",))]}
     assert len(contents) == 5
 

@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from looper.agents import operator_mcp, task_manager_readback as rb, task_manager_sandbox as sandbox
+from looper.agents import operator_mcp, task_manager_readback as rb, task_manager_sandbox as sandbox, task_manager_tmpdir
 from looper.agents.claude_cli import ResidentClaude
 from looper.agents.library import EMPTY_LIBRARY
 from looper.agents.mcp import write_config
@@ -98,9 +98,13 @@ class Live:
         private = private_dir(self.probe)
         return rb.Expected(
             private_dir=private,
-            pins=sandbox.pins(self.cwd, allowed_domains=(), read_deny=self.probe.read_deny),
+            pins=sandbox.pins(self.cwd, allowed_domains=(), read_deny=self.probe.read_deny,
+                              write_deny=sandbox.shared_write_roots(self.probe.env)),
             fs_allow_write=frozenset(),
-            writes_allowed=rb.writes_allowed(self.probe.env["HOME"], os.getuid(), None, self.probe.read_deny),
+            writes_allowed=rb.writes_allowed(self.probe.env["HOME"], os.getuid(), self.probe.private_tmp.path,
+                                             self.probe.read_deny),
+            temp_root=self.probe.private_tmp.write_root,
+            shared_writes=frozenset(sandbox.shared_write_roots(self.probe.env)), uid=os.getuid(),
             mcp=rb.expected_mcp(library_mcp_servers(self.library), private),
             known_tools=rb.KNOWN_BUILTIN_TOOLS[VERIFIED_CLI_VERSION])
 
@@ -585,3 +589,21 @@ def test_r2_unrelated_user_settings_keys_appear_in_effective_and_do_not_refuse(p
     probe.observations["effective_top_level_keys"] = sorted(readback.settings["effective"])
     assert readback.settings["effective"].get("model") == "synthetic-model"
     assert mismatches == [], rb.notice(mismatches, probe.version)
+
+
+def test_a_session_without_its_private_temporary_directory_is_refused_after_the_launch(probe):
+    """The CLI falls back to the shared root by itself when the path is too long: the readback catches that."""
+    long = probe.root / "a-temporary-directory-longer-than-the-cli-accepts"
+    long.mkdir(mode=0o700)
+
+    async def check():
+        live = Live(probe, [text("done")])
+        probe.env[task_manager_tmpdir.ENV_NAME] = str(long)
+        try:
+            await live.start()
+            _, mismatches = await live.readback()
+            assert "dialog.shared_temp_root" in {m.item for m in mismatches}, mismatches
+        finally:
+            await live.stop()
+
+    asyncio.run(check())

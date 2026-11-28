@@ -71,6 +71,7 @@ if '--version' in sys.argv:
 exec({READBACK_SOURCE!r})
 resuming = '--resume' in sys.argv
 record({{'kind':'launch', 'command':sys.argv[1:], 'cwd':os.getcwd(), 'path':os.environ.get('PATH'),
+         'tmpdir':os.environ.get('CLAUDE_CODE_TMPDIR'), 'tmpdir_exists':os.path.isdir(os.environ.get('CLAUDE_CODE_TMPDIR') or ''),
          'environment':{{key:os.environ.get(key) for key in ('LOOPER_TASK_MANAGER','LOOPER_AGENT_RUN','SERVER_PRIVATE')}}}})
 session = sys.argv[sys.argv.index('--resume')+1] if resuming else uuid.uuid4().hex
 if resuming and Path('reject-resume').exists():

@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from looper.agents import operator_mcp, task_manager_sandbox as sandbox
+from evals.prompt_regression.task_manager_write_probe import WriteProbe
+from looper.agents import operator_mcp, task_manager_dirs, task_manager_sandbox as sandbox, task_manager_tmpdir
 from looper.agents.mcp import write_config
 from looper.agents.task_manager_safety import VERIFIED_CLI_VERSION
 from sandbox_probe_support import SandboxProbe, text, tool_use
@@ -366,7 +367,8 @@ def test_p13_every_pinned_key_is_accepted_by_the_cli(probe):
     session.user("hi")
     session.wait_results(1)
     settings = effective(session)
-    pins = sandbox.pins(probe.cwd, allowed_domains=(), read_deny=probe.read_deny)
+    pins = sandbox.pins(probe.cwd, allowed_domains=(), read_deny=probe.read_deny,
+                        write_deny=sandbox.shared_write_roots(probe.env))
     accepted, missing, wrong = [], [], []
     for pin in pins:
         if pin.check not in (sandbox.Check.EQUAL, sandbox.Check.ARRAY_EQUAL, sandbox.Check.CONTAINS):
@@ -401,7 +403,8 @@ def test_p14_user_layer_loosening_is_recorded_per_key(probe):
     session.wait_results(1)
     settings = effective(session)
     report = {}
-    for pin in sandbox.pins(probe.cwd, allowed_domains=(), read_deny=probe.read_deny):
+    for pin in sandbox.pins(probe.cwd, allowed_domains=(), read_deny=probe.read_deny,
+                        write_deny=sandbox.shared_write_roots(probe.env)):
         if pin.check in (sandbox.Check.EQUAL, sandbox.Check.ARRAY_EQUAL):
             value, present = dig(settings, pin.key)
             report[pin.item] = {"injected": pin.value, "effective": value if present else "<absent>",
@@ -594,3 +597,52 @@ def test_p16_the_subprocess_scrub_variant_is_measured_not_launched(probe):
     assert "KEY-ABSENT" in outcomes[0] and (probe.cwd / "inside-ok").exists() and not (probe.outside / "scrub").exists()
     assert "echoed" in outcomes[2]
     assert scrubbed.init["permissionMode"] == "default"  # what a readback expecting bypassPermissions would refuse
+
+
+# --- P19, P20: the write set is the task directory and the launch's private temporary directory ---
+
+
+def write_probe_run(probe, *, deny_shared: bool = True):
+    (probe.home / ".npm" / "_logs").mkdir(parents=True)
+    (probe.home / ".claude" / "debug").mkdir(parents=True)
+    check = WriteProbe(temp_root=probe.private_tmp.write_root, environment=probe.env)
+    try:
+        script = [*(bash(row.command) for row in check.rows),
+                  bash("mkdir -p sub && cd sub"), bash("pwd -P"), bash("git status --porcelain; echo rc=$?"),
+                  bash('d=$(mktemp -d "$TMPDIR/made.XXXXXX") && touch "$d/file"; echo rc=$?'), text("done")]
+        run = probe.run(script, command=probe.command(deny_shared=deny_shared))
+        found = results_of(run, script)
+        verdict = check.judge({row.name: result for row, result in zip(check.rows, found)})
+    finally:
+        check.close()
+    probe.observations["write_probe"] = verdict
+    return verdict, found[len(check.rows):]
+
+
+def test_p19_only_the_task_directory_and_the_private_temp_directory_are_writable(probe):
+    verdict, (_, where, status, made) = write_probe_run(probe)
+    assert verdict == {"status": "PASS", "failed": [], "unverified": []}, verdict
+    # What the CLI keeps in its temporary directory still works: the working directory follows ``cd``.
+    assert where.strip().splitlines()[0] == str(probe.cwd.resolve() / "sub"), where
+    assert "rc=0" in status and "rc=0" in made
+
+
+def test_p19_positive_control_without_the_private_directory_the_shared_places_are_writable(probe):
+    del probe.env[task_manager_tmpdir.ENV_NAME]
+    verdict, _ = write_probe_run(probe, deny_shared=False)
+    assert verdict["status"] == "FAIL"
+    assert {"shared_temp_root", "placed_script", "new_sibling_directory", "placed_script changed",
+            "fixed_root_0", "fixed_root_2"} <= set(verdict["failed"]), verdict
+
+
+def test_p20_a_worktree_task_is_refused_because_its_directory_cannot_be_read(probe):
+    worktree = probe.runtime_root / "task-worktrees" / "probe-task"
+    worktree.parent.mkdir()
+    worktree = probe.repo("runtime/task-worktrees/probe-task")
+    problem = task_manager_dirs.check({"workspace_mode": "worktree"}, str(worktree), environment=probe.env,
+                                      runtime_root=probe.runtime_root, live=())
+    assert problem is not None and problem.reason is task_manager_dirs.Reason.WORKTREE_UNSUPPORTED
+    script = [bash("cat a.txt; echo rc=$?"), text("done")]
+    run = probe.run(script, cwd=worktree)
+    read = results_of(run, script)[0]
+    assert "Operation not permitted" in read and "rc=1" in read, read

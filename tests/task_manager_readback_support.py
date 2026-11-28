@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +11,12 @@ from looper.agents import operator_mcp, task_manager_readback as rb, task_manage
 
 HOME = "/home-placeholder"
 UID = 501
-READ_DENY = (f"{HOME}/.ssh", f"{HOME}/.aws")
+READ_DENY = (f"{HOME}/.ssh", f"{HOME}/.aws", f"{HOME}/.claude")
 MCP_ALLOWED = {"docs": {"type": "stdio", "command": "/usr/bin/docs-server", "args": ["--serve"], "env": {"TOKEN": "x"}},
                "looper": {"type": "stdio", "command": "/usr/bin/python3", "args": ["-I", "/opt/looper/mcp.py"]}}
+SHARED = sandbox.shared_write_roots({"HOME": HOME})
+TMPDIR = "/tmp/lpr-501/0a1b2c3d"
+TEMP_ROOT = f"{os.path.realpath(TMPDIR)}/claude-{UID}/"
 KNOWN = frozenset({"Agent", "Edit", "Write", "Read", "Glob", "Grep", "Skill", "WebFetch", "WebSearch", "Monitor",
                    "ToolSearch", "NotebookEdit", "EndConversation", "WaitForMcpServers", "Bash"})
 
@@ -33,13 +37,14 @@ class Case:
         self.work = tmp_path / "work"
         self.work.mkdir(exist_ok=True)
         self.private = tmp_path / "mcp-cwd"
-        injected = sandbox.settings_content(self.work, allowed_domains=allowed_domains, read_deny=READ_DENY)
-        pins = sandbox.pins(self.work, allowed_domains=allowed_domains, read_deny=READ_DENY)
+        injected = sandbox.settings_content(self.work, allowed_domains=allowed_domains, read_deny=READ_DENY,
+                                            write_deny=SHARED)
+        pins = sandbox.pins(self.work, allowed_domains=allowed_domains, read_deny=READ_DENY, write_deny=SHARED)
         wrapped = {name: operator_mcp.wrap(definition, self.private) for name, definition in MCP_ALLOWED.items()}
         self.expected = rb.Expected(
             private_dir=self.private, pins=pins, fs_allow_write=frozenset(),
-            writes_allowed=rb.writes_allowed(HOME, UID), mcp=rb.expected_mcp(wrapped, self.private),
-            known_tools=KNOWN)
+            writes_allowed=rb.writes_allowed(HOME, UID, TMPDIR, READ_DENY), mcp=rb.expected_mcp(wrapped, self.private),
+            known_tools=KNOWN, temp_root=TEMP_ROOT, shared_writes=frozenset(SHARED), uid=UID)
         self.injected = injected
         self.mode: str | None = "bypassPermissions"
         self.settings: dict[str, Any] = {
@@ -53,7 +58,7 @@ class Case:
             "restrictions": {"fs_allow_write": [], "fs_deny_write": [], "network_allowed_domains": list(allowed_domains)},
             "lists": {"rows": [row("writes_allowed", sorted(self.expected.writes_allowed)),
                                row("reads_denied", [*deny, f"{HOME}/extra-denied"]),
-                               row("writes_denied", [*sandbox.git_deny_write(self.work), "/x"]),
+                               row("writes_denied", [*sandbox.git_deny_write(self.work), *SHARED, "/x"]),
                                *([row("hosts_allowed", list(allowed_domains))] if allowed_domains else [])],
                       "files_confined": True, "all_unix_sockets": False, "other_hosts": "refused"}}
         self.hooks: dict[str, Any] = {"hooks": [
