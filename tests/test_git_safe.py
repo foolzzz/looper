@@ -1094,6 +1094,70 @@ def test_no_direct_git_calls_outside_the_allowlist():
         assert (REPO_ROOT / relative).is_file(), f"{relative} is listed but does not exist"
 
 
+# --- Every ``git status`` is asked for in the porcelain format ---
+
+# The long format prints what is in the state files of an operation in progress, which ``ref_links`` does not look at.
+_STATUS_CALLERS = _SPAWNERS | {"spawn", "_checked"}
+# The ``git status`` calls that do not go through ``git_safe``, each on a directory Looper owns the content of.
+STATUS_OUTSIDE_THE_HELPER = {
+    "looper/agents/service.py": "Looper's own checkout (self-upgrade)",
+    "looper/agents/memory_write.py": "the operator's knowledge vault (``vault._git``)",
+    "looper/agents/vault_commit.py": "the operator's knowledge vault (``vault._git``)",
+}
+
+
+def _status_calls(source: str) -> list[tuple[int, bool, bool]]:
+    """Each ``git status`` in ``source``: its line, whether it asks for the porcelain format, and whether it is
+    started outside ``git_safe``. It is a ``"status"`` argument of a call to a git runner (a name holding ``git``, or a
+    process starter), of an argv starting with git, or at the head of an argument list followed by an option."""
+    calls = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            func, items = node.func, node.args
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            runner = "git" in name.lower() or name in _STATUS_CALLERS
+            outside = isinstance(func, ast.Attribute) and getattr(func.value, "id", "") == "vault"
+        elif isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+            items, outside = node.elts, _starts_with_git(node)
+            first = items[0]
+            runner = outside or (isinstance(first, ast.Constant) and first.value == "status" and any(
+                isinstance(item, ast.Constant) and str(item.value).startswith("-") for item in items[1:]))
+        else:
+            continue
+        words = [item.value if isinstance(item, ast.Constant) else None for item in items]
+        if not runner or "status" not in words:
+            continue
+        options = words[words.index("status") + 1:]
+        options = options[:options.index("--")] if "--" in options else options
+        porcelain = (any(str(word).startswith("--porcelain") for word in options)
+                     and not {"--long", "--no-porcelain"} & set(options))
+        calls.append((node.lineno, porcelain, outside))
+    return calls
+
+
+@pytest.mark.parametrize("source, porcelain", [
+    ('git("status")', False), ('_git(d, "status", "--short")', False),
+    ('git_safe.run(d, "status", "--porcelain", "--long")', False), ('await git_safe.spawn(d, "status")', False),
+    ('step_workspaces._git(d, "--no-optional-locks", "status", "--", "--porcelain")', False),
+    ('subprocess.run(["git", "-C", d, "status"])', False), ('args = ("status", "-sb")', False),
+    ('git("status", "--porcelain")', True), ('_git(d, "status", "--porcelain=v1", "-z")', True),
+])
+def test_the_status_scan_tells_the_formats_apart(source, porcelain):
+    assert [found for _, found, _ in _status_calls(source)] == [porcelain]
+
+
+def test_every_git_status_is_porcelain_and_goes_through_the_helper():
+    calls = {}
+    for path in sorted((REPO_ROOT / "looper").rglob("*.py")):
+        if found := _status_calls(path.read_text()):
+            calls[path.relative_to(REPO_ROOT).as_posix()] = found
+    assert "looper/agents/step_workspaces.py" in calls  # positive control
+    long = {name: [line for line, porcelain, _ in found if not porcelain] for name, found in calls.items()}
+    assert not {name: lines for name, lines in long.items() if lines}, "git status without --porcelain"
+    outside = {name for name, found in calls.items() if any(entry[2] for entry in found)}
+    assert outside == set(STATUS_OUTSIDE_THE_HELPER)
+
+
 # --- The eval-export committable check runs git through git_safe ---
 
 def test_committable_runs_nothing_a_hostile_repository_configures(repo, probe, marker):
