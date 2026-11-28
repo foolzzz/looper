@@ -343,8 +343,12 @@ def _git_head(work_dir: str | Path) -> str | None:
 
 async def _git_dir_refusal(work_dir: str | Path) -> str | None:
     """The full walk at the start and end of a step: why ``work_dir``'s git directory is refused for a symbolic link,
-    else None. Any other outcome of the check is left to the git commands themselves."""
+    else None. Any other outcome of the check is left to the git commands themselves. A directory with no ``.git`` at
+    or above it starts no process."""
     try:
+        here = Path(work_dir).resolve()
+        if not any(os.path.lexists(place / ".git") for place in (here, *here.parents)):
+            return None
         await git_safe.check_repository_async(work_dir)
     except git_safe.RepositoryRefused as exc:
         if exc.reason in git_safe.REF_REASONS:

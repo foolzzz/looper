@@ -549,6 +549,16 @@ def test_a_step_does_not_start_in_a_repository_the_full_walk_refuses(repo, revie
     assert result["passed"] is False if review else result["status"] == "failed"
 
 
+def test_the_step_check_starts_no_process_outside_a_repository(tmp_path, monkeypatch):
+    (tmp_path / "plain").mkdir()
+
+    def refuse(*args, **kwargs):
+        pytest.fail("a directory without a .git must start no process")
+
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    assert asyncio.run(worker._git_dir_refusal(tmp_path / "plain")) is None
+
+
 @pytest.mark.parametrize("review", [False, True])
 def test_a_step_that_ends_in_a_repository_the_full_walk_refuses_fails(repo, review, monkeypatch):
     _judged(repo)
