@@ -5,7 +5,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..db.tasks import InteractionMode
-from .task_manager_sandbox import BUILTIN_TOOLS  # the direct text below is worded from this allowlist
+# The direct text below is worded from these: the built-in allowlist and the write-denied parts of ``.git``.
+from .task_manager_sandbox import BUILTIN_TOOLS, GIT_DENY_WRITE_PARTS
 from .task_workspaces import Reopened, task_branch
 from .untrusted import Source, fence
 
@@ -34,15 +35,16 @@ def _direct_lines(builtin: tuple[str, ...]) -> list[str]:
                "Read and search files through Bash (cat, sed -n, head, rg, find); images and PDFs cannot be viewed, "
                "and some locations outside the task directory, such as credentials and agent settings, cannot be "
                "read.")
+    denied = _listed([f".git/{part}" for part in GIT_DENY_WRITE_PARTS], "or")
     return [
         "You work directly in the task's directory: it is the user's real checkout, so your changes land in their "
         "files.",
         f"{tools}, besides Looper's task tools and any MCP tools the user allowed"
         + (f"; there is no {_listed(missing, 'or')}. " if missing else ". ") + reading,
         EDIT_LINE,
-        "Your shell commands run in a sandbox: they can write only inside the task directory (not .git/hooks, "
-        ".git/config, .git/info or .git/modules) and $TMPDIR, and reach "
-        "only the project's allowed domains over HTTP(S); local ports, including databases and Looper itself, are "
+        f"Your shell commands run in a sandbox: they can write only inside the task directory (not {denied}) "
+        "and $TMPDIR, and reach only the project's allowed domains over HTTP(S); local ports, including databases "
+        "and Looper itself, are "
         "closed. So `looper task` and Go command-line tools such as `gh` do not work here: read and change the task "
         "through your task tools, and leave pushing and opening pull requests to the user.",
         "When the sandbox denies a command, do not retry it or look for a way around the sandbox; say what you could "

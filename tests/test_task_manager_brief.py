@@ -1,4 +1,5 @@
 """The task session's fixed instructions and bounded, fenced brief."""
+import os
 import re
 
 from looper.agents import task_manager_brief as brief_module
@@ -37,11 +38,19 @@ def test_direct_instructions_exact():
         "Read and search files through Bash (cat, sed -n, head, rg, find); images and PDFs cannot be viewed, and some locations outside the task directory, such as credentials and agent settings, cannot be read.\n"
         'Change files with looper-edit through Bash; it changes only files inside the directory it runs in. `looper-edit replace <file>` reads JSON {"old": ..., "new": ..., "count": ...} on stdin and replaces that exact text, failing when it matches nowhere or more often than count (default 1); an empty old only creates a missing file. '
         "`looper-edit patch` reads a unified diff on stdin and applies all of it or nothing. A failed edit changes nothing and says why: look at the file again before you retry.\n"
-        "Your shell commands run in a sandbox: they can write only inside the task directory (not .git/hooks, .git/config, .git/info or .git/modules) and $TMPDIR, and reach only the project's allowed domains over HTTP(S); local ports, including databases and Looper itself, are closed. "
+        "Your shell commands run in a sandbox: they can write only inside the task directory (not .git/hooks, .git/config, .git/info, .git/modules or .git/objects/info) and $TMPDIR, and reach only the project's allowed domains over HTTP(S); local ports, including databases and Looper itself, are closed. "
         "So `looper task` and Go command-line tools such as `gh` do not work here: read and change the task through your task tools, and leave pushing and opening pull requests to the user.\n"
         "When the sandbox denies a command, do not retry it or look for a way around the sandbox; say what you could not do.\n"
         "Looper reports changes to branches and tags to the user, and switching the checked-out branch stops your next turn until the user sorts it out, so do not switch branches unless the user asks.\n"
         + COMMON_TAIL)
+
+
+def test_the_sentence_lists_exactly_what_the_sandbox_write_denies(tmp_path):
+    (sentence,) = [line for line in brief_module._direct_lines(BUILTIN_TOOLS) if "they can write only inside" in line]
+    listed = sentence.partition("(not ")[2].partition(")")[0]
+    root = f"{os.path.realpath(tmp_path)}/"
+    denied = [path.removeprefix(root) for path in task_manager_sandbox.git_deny_write(tmp_path)]
+    assert re.split(r", | or ", listed) == denied
 
 
 def test_direct_text_offers_only_allowlisted_tools_and_the_read_switch():
