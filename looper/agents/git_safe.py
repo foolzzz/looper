@@ -26,15 +26,25 @@ Every git command Looper runs in a task, step or worktree directory goes through
 * ``check_repository`` refuses, with ``RepositoryRefused``, a directory whose ``.git`` points somewhere that does
   not point back (another repository, a ``core.worktree`` elsewhere, a ``gitdir:`` link that is not a linked
   worktree's or a submodule's), so the checks above are made on the repository the directory claims to be.
-* ``check_repository`` also refuses a repository (or a checked-out submodule) whose ref storage holds a symbolic
-  link (``ref_links``): git would read, write and delete refs through it, outside the repository. This part is never
-  remembered: every call walks the ref storage again, so every command ``run`` and ``spawn`` start is preceded by it,
-  inside ``cached()`` too.
+* A repository (or a checked-out submodule) whose git directory holds a symbolic link where git reads refs or its own
+  files is refused (``ref_links``): git would read, write and delete through it, outside the repository. This part is
+  never remembered, inside ``cached()`` either. Before every command ``run`` and ``spawn`` start, a fixed check
+  (``ref_links.check``) looks at the git directory and the common directory; a command that writes refs
+  (``_WRITING``) also has the reflogs it writes checked. ``check_repository`` without ``args`` walks everything
+  (``ref_links.find`` besides the fixed check): at the start and end of a direct task Manager turn and of a Worker
+  step, for a command that reads reflogs, and when this process first judges a repository (and again after a walk
+  that refused it, until it is repaired).
+* ``environment`` points ``GIT_GRAFT_FILE`` at ``/dev/null``: a graft file changes no history Looper reads.
 
 **Known race limits.** A check and the command it precedes are not atomic: a process writing the repository at the same
-time can put a link in place after the walk, and git follows it. A direct task Manager session checks again before and
+time can put a link in place after the check, and git follows it. A direct task Manager session checks again before and
 after each turn, while it holds the directory's lock. In orchestrated mode this risk remains: the Worker is not
 sandboxed and can already read and write such files itself, but what git then prints could still reach Looper's records.
+The check before a command is not the full walk: a link placed deeper under ``logs``, or among another worktree's own
+refs and root pseudo-refs, between two full walks is found at the next full walk, or at the next command that writes
+that reflog. Reading commands in between do not go through it (a command given a reflog walks everything; revisions
+passed on standard input are not looked at for that), and no command Looper runs reads another worktree's root
+pseudo-refs (``ORIG_HEAD``, ...).
 The drivers are found before the command runs, so an agent that writes a definition in between is not stopped
 (the fixed overrides, which do not depend on the repository, are). ``cached`` reuses one check for a directory
 inside a block, for an operation that runs many commands and has no agent running meanwhile.
@@ -75,9 +85,11 @@ OVERRIDES = (
     "gc.auto=0", "maintenance.auto=false",
     # Not a program: a replacement ref would make git answer with another object than the one asked for.
     "core.useReplaceRefs=false",
+    # Printed for any graft file git opens, the empty one ``environment`` names too.
+    "advice.graftFileDeprecated=false",
 )
 PREFLIGHT_TIMEOUT_SEC = 10
-# The ``RepositoryRefused`` reasons about the ref storage; their ``path`` names the place inside the repository.
+# The ``RepositoryRefused`` reasons about links in the git directory; ``path`` names the place inside the repository.
 REF_REASONS = ("ref_symlink", "ref_unchecked")
 logger = logging.getLogger(__name__)
 
@@ -94,11 +106,11 @@ CALLER_VARIABLES = frozenset({
     "GIT_OPTIONAL_LOCKS", "GIT_MERGE_AUTOEDIT", "GIT_REFLOG_ACTION", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
 })
-# Fixed: no prompt, no pager, an editor that edits nothing, no askpass, no external diff, no replacement refs, and
-# no lazy fetch (for a missing object git would read a promisor remote the repository names, through a transport
-# program its configuration chooses).
+# Fixed: no prompt, no pager, an editor that edits nothing, no askpass, no external diff, no replacement refs, no
+# grafts, and no lazy fetch (for a missing object git would read a promisor remote the repository names, through a
+# transport program its configuration chooses).
 _FIXED_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_EDITOR": "true", "GIT_ASKPASS": "true",
-              "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1"}
+              "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1", "GIT_GRAFT_FILE": os.devnull}
 
 # An attribute line that assigns a filter, diff or merge driver (``-diff`` and ``diff`` assign none).
 _DRIVER = re.compile(r"(?:^|\s)(filter|diff|merge)=")
@@ -113,7 +125,8 @@ class RepositoryRefused(subprocess.SubprocessError):
     ``reason`` is ``attributes_driver`` (``info/attributes`` assigns a driver), ``git_dir_mismatch`` (the ``.git``
     does not belong to this directory), ``outside_worktree`` (the directory is not inside the work tree git
     reports), ``object_alternates`` (``objects/info/alternates`` or ``http-alternates`` is not empty),
-    ``ref_symlink`` (the ref storage holds a symbolic link) or ``ref_unchecked`` (a part of it could not be listed).
+    ``ref_symlink`` (the git directory holds a symbolic link where git reads refs or its own files) or
+    ``ref_unchecked`` (such a place could not be looked at).
     For the last two, ``path`` names the place (``.git/refs/heads/x``), never what a link points at.
     """
 
@@ -267,6 +280,8 @@ def _signature(directory: str | Path, top: str | None, git_dir: str, common: str
 
 
 _MISS = object()
+# The common directories this process has walked in full and found no link in, oldest first.
+_walked: dict[str, None] = {}
 
 
 def _remembered(key: tuple[str, bool], directory: str | Path) -> Any:
@@ -333,7 +348,7 @@ def _refuse_attributes(directory: str | Path, text: str) -> None:
 @dataclass(frozen=True)
 class Inspection:
     """What ``check_repository`` found: the ``-c`` settings that replace the repository's own driver definitions, and
-    where the ref storage it walks on every call is."""
+    where the git directories it looks for links in on every call are."""
 
     overrides: tuple[str, ...] = ()
     top: str | None = field(default=None, compare=False)
@@ -363,19 +378,123 @@ def _ref_directories(directory: str | Path, found: Inspection) -> Iterator[tuple
                 yield place, f"{os.path.relpath(module, found.top or directory)}/.git"
 
 
-def _refuse_ref_links(directory: str | Path, found: Inspection) -> None:
-    """Refuse when the ref storage holds a symbolic link, or a part of it cannot be checked. Reads the file system
-    every time it is called."""
-    for git_dir, label in _ref_directories(directory, found):
-        finding = ref_links.find(git_dir, label)
-        if finding is None:
+# The subcommands that can write a ref, and with it a reflog. ``worktree`` only with one of ``_WORKTREE_WRITES``.
+_WRITING = frozenset({"am", "branch", "checkout", "cherry-pick", "commit", "fetch", "merge", "pull", "rebase",
+                      "remote", "reset", "revert", "switch", "tag", "update-ref", "worktree"})
+_WORKTREE_WRITES = frozenset({"add", "move", "prune", "remove", "repair"})
+# Writing subcommands whose arguments do not name the refs written: every reflog is walked.
+_UNNAMED_WRITES = frozenset({"fetch", "pull", "remote"})
+# git's own options that take the next argument as their value.
+_VALUE_OPTIONS = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env"})
+
+
+def _subcommand(args: Sequence[str]) -> tuple[str, Sequence[str]]:
+    """The subcommand of ``git *args`` and what follows it (``""`` without one)."""
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        index += 2 if args[index] in _VALUE_OPTIONS else 1
+    return (args[index], args[index + 1:]) if index < len(args) else ("", ())
+
+
+def _reads_reflogs(args: Sequence[str]) -> bool:
+    """Whether the command can read any reflog: everything is walked before it."""
+    return (_subcommand(args)[0] in ("reflog", "stash")
+            or any("@{" in arg or arg in ("-g", "--reflog", "--walk-reflogs") for arg in args))
+
+
+def _written_reflogs(found: Inspection, args: Sequence[str]) -> tuple[bool, tuple[str, ...]] | None:
+    """For a command that can write refs: whether every reflog is to be walked, and else the reflogs (below ``logs``)
+    of the refs it may write: ``HEAD``'s branch and every ref an argument may name. None for any other command."""
+    command, rest = _subcommand(args)
+    if command not in _WRITING or (command == "worktree" and not _WORKTREE_WRITES & set(rest[:1])):
+        return None
+    if command in _UNNAMED_WRITES or "--stdin" in rest:
+        return True, ()
+    words = []
+    for arg in rest:
+        if arg.startswith("--"):
+            arg = arg.partition("=")[2]
+        elif arg.startswith("-"):
+            arg = arg[2:]  # a value joined to a short option
+        words += arg.removeprefix("+").split(":")
+    names = [f"{prefix}{word}" for word in words if word
+             for prefix in ("", "refs/", "refs/tags/", "refs/heads/", "refs/remotes/")]
+    if (target := ref_links.head_target(found.git_dir)) is not None:
+        names.append(target)
+    return False, tuple(dict.fromkeys(names))
+
+
+def _own_directories(directory: str | Path, found: Inspection) -> Iterator[tuple[str, str]]:
+    """The common directory and the git directory of the repository and of each checked-out submodule, with the name
+    their places are reported under."""
+    repositories = [(found.common, found.git_dir, None)]
+    for module in found.modules:
+        if module.joinpath(".git").exists():
+            git_dir = _real(_git_dir_of(module))
+            repositories.append((str(_common_dir_of(Path(git_dir))), git_dir, module))
+    for common, git_dir, module in repositories:
+        for place in dict.fromkeys((common, git_dir)):
+            if place == found.common:
+                yield place, ".git"
+            elif place.startswith(found.common + os.sep):
+                yield place, f".git/{os.path.relpath(place, found.common)}"
+            elif module is None:
+                yield place, ".git"
+            else:
+                yield place, f"{os.path.relpath(module, found.top or directory)}/.git"
+
+
+def _raise_for(directory: str | Path, finding: ref_links.Finding | None) -> None:
+    if finding is None:
+        return
+    if finding.link:
+        raise RepositoryRefused("ref_symlink", directory,
+                                f"{finding.path} is a symbolic link, which git would follow out of the repository "
+                                "(replace it with a real file or directory)", path=finding.path)
+    raise RepositoryRefused("ref_unchecked", directory,
+                            f"{finding.path} could not be checked for symbolic links", path=finding.path)
+
+
+def _refuse_ref_links(directory: str | Path, found: Inspection, args: Sequence[str] | None) -> None:
+    """Refuse when a git directory holds a symbolic link where git reads refs or its own files, or such a place cannot
+    be checked: the fixed check for the command ``args``, and the full walk without ``args``, for a command that reads
+    reflogs and for a repository this process has not walked in full. Reads the file system every time."""
+    full = args is None or _reads_reflogs(args) or found.common not in _walked
+    writes = None if full or args is None else _written_reflogs(found, args)
+    try:
+        for place, label in _own_directories(directory, found):
+            log_tree, reflogs = False, ()
+            if writes is not None:
+                every, named = writes
+                # This worktree's own reflogs are all walked; the shared ones, those of the refs named.
+                log_tree = every or place == found.git_dir
+                reflogs = named if place == found.common else ()
+            _raise_for(directory, ref_links.check(place, label, log_tree=log_tree, reflogs=reflogs))
+        if full:
+            for place, label in _ref_directories(directory, found):
+                _raise_for(directory, ref_links.find(place, label))
+    except RepositoryRefused:
+        _walked.pop(found.common, None)  # walked in full again, until a walk passes
+        raise
+    if full:
+        _walked[found.common] = None
+        while len(_walked) > MEMO_LIMIT:
+            _walked.pop(next(iter(_walked)), None)
+
+
+def _refuse_links_without_a_repository(directory: str | Path) -> None:
+    """git found no repository (a link may be why, and the command would still read through it): the fixed check of
+    the git directory the nearest ``.git`` above ``directory`` names, and of its common directory."""
+    here = Path(_real(directory))
+    for ancestor in (here, *here.parents):
+        if not os.path.lexists(ancestor / ".git"):
             continue
-        if finding.link:
-            raise RepositoryRefused("ref_symlink", directory,
-                                    f"{finding.path} is a symbolic link, which git would follow out of the repository "
-                                    "(replace it with a real file or directory)", path=finding.path)
-        raise RepositoryRefused("ref_unchecked", directory,
-                                f"{finding.path} could not be checked for symbolic links", path=finding.path)
+        git_dir = _real(_git_dir_of(ancestor))
+        _raise_for(directory, ref_links.check(git_dir, ".git"))  # before its ``commondir`` is read
+        common = str(_common_dir_of(Path(git_dir)))
+        if common != git_dir:
+            _raise_for(directory, ref_links.check(common, ".git"))
+        return
 
 
 def _overrides(output: str) -> tuple[str, ...]:
@@ -503,14 +622,18 @@ def _cache_key(directory: str | Path, layout: bool) -> tuple[str, bool]:
     return _real(directory), layout
 
 
-def check_repository(directory: str | Path, *, layout: bool = True) -> Inspection | None:
+def check_repository(directory: str | Path, *, layout: bool = True,
+                     args: Sequence[str] | None = None) -> Inspection | None:
     """What git_safe found in the repository ``directory`` is in, or None outside one.
     Raises ``RepositoryRefused``. Blocking: from async code use ``check_repository_async``.
 
-    The ref storage is walked on every call, whatever else is reused (``_refuse_ref_links``)."""
+    Links are looked for on every call, whatever else is reused: without ``args`` the full walk, with the arguments
+    of the git command about to run the check that command needs (``_refuse_ref_links``)."""
     found = _inspect(directory, layout)
     if found is not None:
-        _refuse_ref_links(directory, found)
+        _refuse_ref_links(directory, found, args)
+    else:
+        _refuse_links_without_a_repository(directory)
     return found
 
 
@@ -544,8 +667,9 @@ def _inspect(directory: str | Path, layout: bool) -> Inspection | None:
     return found
 
 
-async def check_repository_async(directory: str | Path, *, layout: bool = True) -> Inspection | None:
-    return await asyncio.wait_for(asyncio.to_thread(check_repository, directory, layout=layout),
+async def check_repository_async(directory: str | Path, *, layout: bool = True,
+                                 args: Sequence[str] | None = None) -> Inspection | None:
+    return await asyncio.wait_for(asyncio.to_thread(check_repository, directory, layout=layout, args=args),
                                   PREFLIGHT_TIMEOUT_SEC * 4)
 
 
@@ -627,7 +751,7 @@ def run(directory: str | Path | None, *args: str, extra_env: Mapping[str, str] |
     Raises ``RepositoryRefused`` (a ``subprocess.SubprocessError``) before running anything."""
     if {"env", "cwd", "shell"} & kwargs.keys():
         raise ValueError("git_safe.run: env, cwd and shell are not accepted")
-    inspection = check_repository(directory) if directory is not None else None
+    inspection = check_repository(directory, args=args) if directory is not None else None
     done = subprocess.run(argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()),
                           env=environment(extra_env), **kwargs)
     if directory is not None:
@@ -641,7 +765,7 @@ async def spawn(directory: str | Path, *args: str, extra_env: Mapping[str, str] 
     directory Looper is relocating (see ``check_repository``)."""
     if {"env", "cwd", "shell"} & kwargs.keys():
         raise ValueError("git_safe.spawn: env, cwd and shell are not accepted")
-    inspection = await check_repository_async(directory, layout=layout)
+    inspection = await check_repository_async(directory, layout=layout, args=args)
     process = await asyncio.create_subprocess_exec(
         *argv(*args, directory=directory, overrides=inspection.overrides if inspection else ()),
         env=environment(extra_env), **kwargs)

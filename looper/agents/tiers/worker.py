@@ -341,6 +341,21 @@ def _git_head(work_dir: str | Path) -> str | None:
         return None
 
 
+async def _git_dir_refusal(work_dir: str | Path) -> str | None:
+    """The full walk at the start and end of a step: why ``work_dir``'s git directory is refused for a symbolic link,
+    else None. Any other outcome of the check is left to the git commands themselves."""
+    try:
+        await git_safe.check_repository_async(work_dir)
+    except git_safe.RepositoryRefused as exc:
+        if exc.reason in git_safe.REF_REASONS:
+            found = "holds a symbolic link at" if exc.reason == "ref_symlink" else "could not be checked at"
+            return (f"Looper does not run git in the work directory: its git directory {found} {exc.path}. "
+                    "Replace it with a real file or directory, then retry.")
+    except Exception:
+        logger.warning("could not check the work directory's git directory", exc_info=True)
+    return None
+
+
 WAITING_CHECK_SECONDS = (30, 1800)
 WAITING_FOR_MAX_CHARS = 300
 
@@ -2221,6 +2236,8 @@ class WorkerPool:
                 Path(work_dir).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 problem = f"Cannot create work directory {reported_files.prompt_name(work_dir)}: {exc}"
+        if problem is None:
+            problem = await _git_dir_refusal(work_dir)
         if problem:
             logger.error("worker %s: %s", worker_id, problem)
             result = (_verify_failed(problem) if is_verify else {"status": "failed", "error": problem})
@@ -2900,6 +2917,12 @@ class WorkerPool:
             return result
         if ctx.verification is not None and "verification" not in result:
             result = await self._verification_result(ctx, result)
+        if (refused := await _git_dir_refusal(ctx.work_dir)) is not None:
+            ctx.fallback_reason = None
+            if ctx.parent_task_id:
+                await self._activity(ctx.parent_task_id, ctx.worker_id, "error", refused[:500])
+            failed = _verify_failed(refused) if ctx.is_verify else _work_failed(refused)
+            return {**result, **failed}
         return result
 
     async def _consume_once(self, ctx: RunContext, handle: RunHandle, recorder: ClaudeRunRecorder, *,

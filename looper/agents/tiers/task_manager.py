@@ -349,7 +349,7 @@ class TaskManagerAgent:
         if direct and (unsupported := task_manager_sandbox.platform_problem()) is not None:
             task_manager_safety.record_refusal(task_manager_safety.Reason.SANDBOX_UNAVAILABLE, phase)
             raise Refused(RefuseReason.SANDBOX_UNAVAILABLE, unsupported)
-        # Before any other git command or the CLI: a repository whose ref storage holds a link refuses the turn.
+        # Before any other git command or the CLI: a link in the repository's git directory refuses the turn.
         if direct and (refused := await task_manager_refs.ref_storage_refusal(self.task_id, reopened.work_dir,
                                                                               phase=phase)) is not None:
             raise refused

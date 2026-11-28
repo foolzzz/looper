@@ -1,5 +1,5 @@
 """Ref reports that wait for the operator: a direct session's turn changed a branch or tag other than the task branch,
-or was refused for the repository's ref storage (a symbolic link in it).
+or was refused for a symbolic link in the repository's git directory.
 
 ``attention.py`` turns each unresolved report that needs the operator into one "needs you" item. A change to the
 task branch or to another Looper task's branch is not listed (RFC 25.9): it is in the task conversation only.

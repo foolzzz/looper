@@ -41,7 +41,7 @@ async def insert_report(task_id: str, message_id: str | None, changes: dict[str,
 
 async def insert_refusal(task_id: str, message_id: str | None, reason: str, path: str, *,
                          pool: asyncpg.Pool | None = None) -> None:
-    """A turn refused for the repository's ref storage, as a report that needs the operator: one per task and path
+    """A turn refused for a link in the repository's git directory, as a report that needs the operator: one per task and path
     while it is unresolved."""
     changes = {"changes": [], "info": [], "head": None, "own_commits": 0, "refused": {"reason": reason, "path": path}}
     await (pool or get_pool()).execute(
