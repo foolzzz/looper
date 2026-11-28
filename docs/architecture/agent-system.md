@@ -4552,7 +4552,8 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   another worktree's root pseudo-refs (`ORIG_HEAD`, ...). A direct session
   checks before and after each turn under the directory lock. In orchestrated
   mode the risk remains: the Worker is not sandboxed and can already read such
-  files itself, but what git then prints could still reach Looper's records.
+  files itself, but what a git command that succeeds then prints could still
+  reach Looper's records (a failed command's output does not, below).
   `tests/test_git_safe.py` fails on a direct `git` call elsewhere
   in `looper/`, except for Looper's own checkout, a fresh clone, and the
   knowledge vault, each listed there with its reason.

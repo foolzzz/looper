@@ -39,7 +39,8 @@ Every git command Looper runs in a task, step or worktree directory goes through
 **Known race limits.** A check and the command it precedes are not atomic: a process writing the repository at the same
 time can put a link in place after the check, and git follows it. A direct task Manager session checks again before and
 after each turn, while it holds the directory's lock. In orchestrated mode this risk remains: the Worker is not
-sandboxed and can already read and write such files itself, but what git then prints could still reach Looper's records.
+sandboxed and can already read and write such files itself, but what a git command that succeeds then prints could
+still reach Looper's records (a failed command's output does not, ``GitFailure``).
 The check before a command is not the full walk: a link placed deeper under ``logs``, or among another worktree's own
 refs and root pseudo-refs, between two full walks is found at the next full walk, or at the next command that writes
 that reflog. Reading commands in between do not go through it (a command given a reflog walks everything; revisions
