@@ -8,7 +8,10 @@ the settings reference that could widen the boundary). Verified against Claude C
 
 - F1 ``sandbox.enabled``: Bash runs in the sandbox (Seatbelt on macOS).
 - F2 ``sandbox.failIfUnavailable``: no silent fallback to an unsandboxed Bash.
-- F3 ``filesystem.allowWrite`` stays empty: the writable set is the task directory and the sandbox's temp directory.
+- F3 ``filesystem.allowWrite`` stays empty. The writable set is then Claude Code's own: the task directory, the
+  temporary root under ``CLAUDE_CODE_TMPDIR`` (private to the launch, ``task_manager_tmpdir``; shared by every Claude
+  Code session of the user without it), device files, and the fixed shared paths of ``shared_write_roots``, which F11
+  denies again.
 - F4 ``network.strictAllowlist``: with ``bypassPermissions`` a connection outside the allowlist would otherwise pass.
 - F5 ``allowUnsandboxedCommands`` false: ``dangerouslyDisableSandbox`` is ignored, and project/local layers cannot
   switch the sandbox off.
@@ -19,7 +22,7 @@ the settings reference that could widen the boundary). Verified against Claude C
   Tool search is pinned off so the allowed MCP servers' tools are present without ``ToolSearch``.
 - F10 ``filesystem.denyRead``: credentials and trust roots (``read_deny_paths``); a blacklist, incomplete by nature.
 - F11 ``filesystem.denyWrite``: ``.git/hooks``, ``config``, ``info``, ``modules`` and ``objects/info`` of the task
-  directory.
+  directory, and the sandbox runtime's fixed shared write roots (``shared_write_roots``).
 """
 from __future__ import annotations
 
@@ -154,7 +157,21 @@ def git_deny_write(work_dir: Path) -> tuple[str, ...]:
     return tuple(f"{root}/.git/{part}" for part in GIT_DENY_WRITE_PARTS)
 
 
-def pins(work_dir: Path, *, allowed_domains: Sequence[str], read_deny: Sequence[str]) -> tuple[Pin, ...]:
+# Device files the sandbox runtime always lets a command write (2.1.332, macOS).
+DEVICE_WRITE_PATHS: tuple[str, ...] = ("/dev/stdout", "/dev/stderr", "/dev/null", "/dev/tty", "/dev/dtracehelper",
+                                       "/dev/autofs_nowait")
+
+
+def shared_write_roots(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """The directories the sandbox runtime always allows writing, whatever ``CLAUDE_CODE_TMPDIR`` says: shared between
+    sessions, so F11 denies them. The one list for the pins and for the readback's expectation."""
+    home = environment.get("HOME") or str(Path.home())
+    # The CLI's debug directory is listed only when the read deny list does not cover its spelling (a symlinked HOME).
+    return ("/private/tmp/claude", "/tmp/claude", f"{home}/.npm/_logs", f"{home}/.claude/debug")
+
+
+def pins(work_dir: Path, *, allowed_domains: Sequence[str], read_deny: Sequence[str],
+         write_deny: Sequence[str]) -> tuple[Pin, ...]:
     """Every key the readback compares (RFC 25.2.1), in order."""
     eq, arr, has, absent, free = Check.EQUAL, Check.ARRAY_EQUAL, Check.CONTAINS, Check.ABSENT, Check.NOT_ASSERTED
     return (
@@ -178,7 +195,7 @@ def pins(work_dir: Path, *, allowed_domains: Sequence[str], read_deny: Sequence[
         Pin("sandbox.network.allowMachLookup", ("sandbox", "network", "allowMachLookup"), [], arr),
         Pin("F3", ("sandbox", "filesystem", "allowWrite"), [], arr),
         Pin("permissions.additionalDirectories", ("permissions", "additionalDirectories"), [], arr),
-        Pin("F11", ("sandbox", "filesystem", "denyWrite"), list(git_deny_write(work_dir)), has),
+        Pin("F11", ("sandbox", "filesystem", "denyWrite"), [*git_deny_write(work_dir), *write_deny], has),
         Pin("F10", ("sandbox", "filesystem", "denyRead"), list(read_deny), has),
         Pin("sandbox.network.httpProxyPort", ("sandbox", "network", "httpProxyPort"), None, absent),
         Pin("sandbox.network.socksProxyPort", ("sandbox", "network", "socksProxyPort"), None, absent),
@@ -195,7 +212,7 @@ def pins(work_dir: Path, *, allowed_domains: Sequence[str], read_deny: Sequence[
 
 # Every ``sandbox.*`` key the pins name; the readback refuses any other as ``unknown_key``.
 KNOWN_SANDBOX_KEYS: frozenset[tuple[str, ...]] = frozenset(
-    pin.key for pin in pins(Path("/"), allowed_domains=(), read_deny=()) if pin.key[0] == "sandbox")
+    pin.key for pin in pins(Path("/"), allowed_domains=(), read_deny=(), write_deny=()) if pin.key[0] == "sandbox")
 
 
 def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
@@ -247,14 +264,14 @@ def _set(tree: dict[str, Any], key: tuple[str, ...], value: Any) -> None:
     tree[key[-1]] = value
 
 
-def settings_content(work_dir: Path, *, allowed_domains: Sequence[str] = (),
+def settings_content(work_dir: Path, *, write_deny: Sequence[str], allowed_domains: Sequence[str] = (),
                      read_deny: Sequence[str] = ()) -> dict[str, Any]:
     """The nested ``--settings`` object: the value of every EQUAL, ARRAY_EQUAL and CONTAINS pin. No ``hooks``, no
     ``disableAllHooks`` (F6). ``allowed_domains`` arrive validated; here only their type is checked."""
     if isinstance(allowed_domains, str) or not all(isinstance(domain, str) for domain in allowed_domains):
         raise TypeError("allowed_domains must be a sequence of str")
     content: dict[str, Any] = {}
-    for pin in pins(work_dir, allowed_domains=allowed_domains, read_deny=read_deny):
+    for pin in pins(work_dir, allowed_domains=allowed_domains, read_deny=read_deny, write_deny=write_deny):
         if pin.check in (Check.EQUAL, Check.ARRAY_EQUAL, Check.CONTAINS):
             _set(content, pin.key, pin.value)
     return content

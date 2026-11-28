@@ -26,8 +26,9 @@ from looper.ops_config import FILE
 
 _IN_PLACE = {"workspace_mode": "in_place"}
 _WORKTREE_TEXT = (
-    "v1 runs the task Manager's direct mode only for in-place tasks; this task works in its own worktree. "
-    "Use the background (orchestrated) mode for it."
+    "v1 runs the task Manager's direct mode only for in-place tasks; this task works in its own worktree, inside "
+    "Looper's own data directory, which the session's sandbox cannot read. Use the background (orchestrated) mode "
+    "for it, or open the task in place on a repository."
 )
 
 

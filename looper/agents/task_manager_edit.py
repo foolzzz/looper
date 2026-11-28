@@ -5,7 +5,8 @@ through it. ``edit_bin`` keeps a private directory holding one symlink, ``looper
 installed next to the running interpreter, and ``task_manager_safety.environment(..., edit_dir=...)`` puts that
 directory first on the CLI's PATH. The directory is in the operator's cache: not under Looper's runtime root (on the
 sandbox's read deny list, and the sandbox cannot run a link it cannot read), and not under the task directory or
-``$TMPDIR`` (both writable inside the sandbox, so the model could replace the link). A directory under any of
+any other place of the sandbox's write set, such as the launch's temporary directory (the model could replace the
+link). A directory under any of
 ``forbidden`` is refused, as is a missing console script (an installation defect).
 """
 

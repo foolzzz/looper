@@ -71,18 +71,20 @@ DIALOG_ROWS = frozenset({"reads_denied", "reads_allowed_anyway", "writes_allowed
                          "writes_allowed_anyway", "hosts_allowed", "hosts_denied", "unix_sockets_allowed"})
 _MUST_BE_EMPTY = ("reads_allowed_anyway", "writes_allowed_anyway", "unix_sockets_allowed")
 
-_WRITES_FIXED = ("/dev/stdout", "/dev/stderr", "/dev/null", "/dev/tty", "/dev/dtracehelper", "/dev/autofs_nowait",
-                 "/tmp/claude", "/private/tmp/claude", ".")
+def shared_temp_root(uid: int) -> str:
+    """The temporary root every Claude Code session of the user shares when it has no ``CLAUDE_CODE_TMPDIR``."""
+    return f"{os.path.realpath('/tmp')}/claude-{uid}/"
 
 
 def writes_allowed(home: str, uid: int, claude_tmpdir: str | None = None,
                    read_deny: Sequence[str] = ()) -> frozenset[str]:
-    """The sandbox's effective write set for a cwd with no ``allowWrite`` (2.1.332, macOS): Claude Code's own
-    entries only, less any that lie inside a read-denied path (measured: ``<HOME>/.claude/debug`` drops out when the
+    """The sandbox's effective write set for a cwd with no ``allowWrite`` (2.1.332, macOS; ``denyWrite`` does not
+    take entries out of it): Claude Code's own entries only, less any that lie inside a read-denied path (measured: ``<HOME>/.claude/debug`` drops out when the
     configuration directory is denied). The per-user temporary root is ``<realpath(CLAUDE_CODE_TMPDIR or /tmp)>/
     claude-<uid>/`` and does not follow the process's ``TMPDIR``; ``.`` is the working directory."""
     root = os.path.realpath(claude_tmpdir or "/tmp")
-    entries = (*_WRITES_FIXED, f"{home}/.npm/_logs", f"{home}/.claude/debug", f"{root}/claude-{uid}/")
+    entries = (*task_manager_sandbox.DEVICE_WRITE_PATHS, ".",
+               *task_manager_sandbox.shared_write_roots({"HOME": home}), f"{root}/claude-{uid}/")
     return frozenset(entry for entry in entries
                      if not any(entry == path or entry.startswith(path.rstrip("/") + "/") for path in read_deny))
 
@@ -133,6 +135,9 @@ class Expected:
     writes_allowed: frozenset[str]  # the effective write set (``writes_allowed``)
     mcp: Mapping[str, str]  # server name -> ``shape`` of its definition before wrapping
     known_tools: frozenset[str]  # the built-ins this CLI version ships (``KNOWN_BUILTIN_TOOLS``)
+    temp_root: str  # the launch's private temporary root (``PrivateTmpdir.write_root``)
+    shared_writes: frozenset[str]  # ``shared_write_roots``: listed as allowed, and must be listed as denied
+    uid: int
 
 
 @dataclass(frozen=True)
@@ -371,6 +376,7 @@ def compare(readback: Readback, expected: Expected) -> list[Mismatch]:
     runtime = {row["id"]: set(map(str, row["entries"])) for row in sandbox["lists"]["rows"]}
     if runtime["writes_allowed"] != expected.writes_allowed:
         found.append(Mismatch(wider, "F3.effective", sorted(expected.writes_allowed), sorted(runtime["writes_allowed"]), blamed))
+    found.extend(_compare_write_roots(expected, runtime))
     found.extend(_compare_dialog(readback, expected, runtime))
     # 6. no forbidden variable (names only, never values; the names the launch drops from the process environment)
     env = effective.get("env")
@@ -405,6 +411,25 @@ def compare(readback: Readback, expected: Expected) -> list[Mismatch]:
     return found
 
 
+def _compare_write_roots(expected: Expected, runtime: Mapping[str, set[str]]) -> list[Mismatch]:
+    """Whatever ``writes_allowed`` computes, the session may write only its task directory and its private temporary
+    root: no shared temporary root, nothing else beyond devices and the fixed shared paths (which
+    ``_compare_dialog`` requires to be denied)."""
+    found: list[Mismatch] = []
+
+    def wrong(item: str, want: Any, got: Any) -> None:
+        found.append(Mismatch(Reason.LAUNCH_SETTING_MISMATCH, f"dialog.{item}", want, got, Source.UNKNOWN))
+
+    allowed, shared = runtime["writes_allowed"], shared_temp_root(expected.uid)
+    if inside := sorted(entry for entry in allowed if entry.startswith("/") and (
+            f"{entry.rstrip('/')}/".startswith(shared) or shared.startswith(f"{entry.rstrip('/')}/"))):
+        wrong("shared_temp_root", [], inside)
+    known = {".", expected.temp_root, *task_manager_sandbox.DEVICE_WRITE_PATHS, *expected.shared_writes}
+    if extra := sorted(allowed - known):
+        wrong("writes_allowed_extra", [], extra)
+    return found
+
+
 def _pin_value(expected: Expected, item: str) -> Sequence[Any]:
     return next((pin.value for pin in expected.pins if pin.item == item), [])
 
@@ -416,7 +441,8 @@ def _compare_dialog(readback: Readback, expected: Expected, runtime: Mapping[str
     box = readback.sandbox
     domains = set(_pin_value(expected, "sandbox.network.allowedDomains"))
     denied = set(_pin_value(expected, "F10"))
-    git_denied = set(_pin_value(expected, "F11"))
+    # F11 plus the fixed shared roots, required whatever the pins say: they are listed as writable.
+    write_denied = set(_pin_value(expected, "F11")) | expected.shared_writes
 
     def wrong(item: str, want: Any, got: Any, pin: str = "") -> None:
         source = Source.UNKNOWN
@@ -427,8 +453,8 @@ def _compare_dialog(readback: Readback, expected: Expected, runtime: Mapping[str
 
     if not denied <= runtime.get("reads_denied", set()):
         wrong("reads_denied", sorted(denied), sorted(runtime.get("reads_denied", set())), "F10")
-    if not git_denied <= runtime.get("writes_denied", set()):
-        wrong("writes_denied", sorted(git_denied), sorted(runtime.get("writes_denied", set())), "F11")
+    if not write_denied <= runtime.get("writes_denied", set()):
+        wrong("writes_denied", sorted(write_denied), sorted(runtime.get("writes_denied", set())), "F11")
     for identifier in _MUST_BE_EMPTY:
         if runtime.get(identifier):
             wrong(identifier, [], sorted(runtime[identifier]),

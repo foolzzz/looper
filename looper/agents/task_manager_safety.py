@@ -52,6 +52,7 @@ class Reason(str, Enum):
     WORKTREE_UNSUPPORTED = "worktree_unsupported"
     HEAD_MOVED = "head_moved"
     HEAD_DETACHED = "head_detached"
+    PRIVATE_TMPDIR_UNUSABLE = "private_tmpdir_unusable"
 
 
 class Predicate(str, Enum):

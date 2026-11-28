@@ -328,7 +328,8 @@ def check(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, s
         return Problem(
             Reason.WORKTREE_UNSUPPORTED, Kind.WORKSPACE_MODE,
             f"{work_dir}: v1 runs the task Manager's direct mode only for in-place tasks; this task works in its "
-            "own worktree. Use the background (orchestrated) mode for it.")
+            "own worktree, inside Looper's own data directory, which the session's sandbox cannot read. Use the "
+            "background (orchestrated) mode for it, or open the task in place on a repository.")
     place = _realpath(work_dir)
     if _same(place, _realpath(_home(environment))):
         return Problem(

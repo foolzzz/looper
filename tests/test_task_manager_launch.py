@@ -41,11 +41,14 @@ def test_operator_command_golden(tmp_path):
         *(["--effort", run.effort] if run.effort else []),
     ]
     content = json.loads(Path(settings_file).read_text())
-    assert content == task_manager_sandbox.settings_content(tmp_path, read_deny=deny)
+    shared = task_manager_sandbox.shared_write_roots(CLAUDE_CODE.environment(run))
+    assert content == task_manager_sandbox.settings_content(tmp_path, read_deny=deny, write_deny=shared)
     assert "hooks" not in content and "disableAllHooks" not in content
     root = os.path.realpath(tmp_path)
+    home = CLAUDE_CODE.environment(run)["HOME"]
     assert content["sandbox"]["filesystem"]["denyWrite"] == [
-        f"{root}/.git/{part}" for part in ("hooks", "config", "info", "modules", "objects/info")]
+        *(f"{root}/.git/{part}" for part in ("hooks", "config", "info", "modules", "objects/info")),
+        "/private/tmp/claude", "/tmp/claude", f"{home}/.npm/_logs", f"{home}/.claude/debug"]
     assert content["sandbox"]["filesystem"]["denyRead"] == list(deny)
     assert content["disableSkillShellExecution"] is True
     assert Path(settings_file).stat().st_mode & 0o777 == 0o600

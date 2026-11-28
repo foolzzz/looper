@@ -5,6 +5,7 @@ import asyncio
 import copy
 import json
 import os
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -14,7 +15,7 @@ from looper.agents import task_manager_sandbox as sandbox
 from looper.agents.claude_cli import CONTROL_STARTUP_SEC, CONTROL_TIMEOUT_SEC, ControlUnavailable
 from looper.agents.task_manager_safety import Reason
 from looper.agents.task_manager_sandbox import Check
-from tests.task_manager_readback_support import KNOWN, READ_DENY, Case, FakeResident, tool_rule
+from tests.task_manager_readback_support import KNOWN, READ_DENY, SHARED, TEMP_ROOT, UID, Case, FakeResident, tool_rule
 
 WIDER = Reason.LAUNCH_SETTING_MISMATCH
 
@@ -26,7 +27,7 @@ def case(tmp_path) -> Case:
 
 def _pin_cases():
     from pathlib import Path
-    pins = sandbox.pins(Path("/work"), allowed_domains=("api.example.com",), read_deny=READ_DENY)
+    pins = sandbox.pins(Path("/work"), allowed_domains=("api.example.com",), read_deny=READ_DENY, write_deny=SHARED)
     return [pin for pin in pins if pin.check is not Check.NOT_ASSERTED]
 
 
@@ -158,7 +159,7 @@ def test_an_extra_writable_path_is_refused(case) -> None:
     assert [m.item for m in case.compare()] == ["F3"]
     case.sandbox["restrictions"]["fs_allow_write"] = []
     case.sandbox["lists"]["rows"][0]["entries"].append("/private/tmp/shared")
-    assert [m.item for m in case.compare()] == ["F3.effective"]
+    assert [m.item for m in case.compare()] == ["F3.effective", "dialog.writes_allowed_extra"]
 
 
 def test_the_permission_mode_must_be_bypass_when_it_was_read(case) -> None:
@@ -310,6 +311,51 @@ def test_the_write_set_rule_follows_home_uid_and_the_claude_temp_root(tmp_path) 
     assert f"{os.path.realpath('/tmp')}/claude-7/" in rb.writes_allowed("/h", 7)  # /private/tmp on macOS, /tmp on Linux
 
 
+# --- the write set holds the task directory and the private temporary root, nothing else that can be written ---
+
+
+def _writes(case, *, add=(), allowed=None, denied=None) -> None:
+    for entry in case.sandbox["lists"]["rows"]:
+        values = {"writes_allowed": allowed, "writes_denied": denied}.get(entry["id"])
+        if entry["id"] == "writes_allowed" and add:
+            values = [*entry["entries"], *add]
+        if values is not None:
+            entry["entries"], entry["total"] = list(values), len(values)
+
+
+def test_the_expected_write_set_is_the_task_directory_the_private_root_devices_and_denied_roots(case) -> None:
+    listed = {path for path in SHARED if not path.endswith("/.claude/debug")}  # read-denied, so not listed
+    assert case.expected.writes_allowed == {".", TEMP_ROOT, *sandbox.DEVICE_WRITE_PATHS, *listed}
+
+
+@pytest.mark.parametrize("entry", [
+    rb.shared_temp_root(UID), f"{rb.shared_temp_root(UID)}x", os.path.realpath("/tmp"), "/"])
+def test_a_shared_temporary_root_is_refused_even_when_the_expectation_lists_it(case, entry) -> None:
+    case.expected = replace(case.expected, writes_allowed=case.expected.writes_allowed | {entry})
+    _writes(case, add=[entry])
+    assert {"dialog.shared_temp_root", "dialog.writes_allowed_extra"} <= {m.item for m in case.compare()}
+
+
+def test_any_other_writable_entry_is_refused_even_when_the_expectation_lists_it(case) -> None:
+    case.expected = replace(case.expected, writes_allowed=case.expected.writes_allowed | {"/new/fixed/root"})
+    _writes(case, add=["/new/fixed/root"])
+    assert [(m.item, m.actual) for m in case.compare()] == [("dialog.writes_allowed_extra", ["/new/fixed/root"])]
+
+
+@pytest.mark.parametrize("missing", SHARED)
+def test_a_fixed_shared_root_the_sandbox_does_not_deny_is_refused(case, missing) -> None:
+    row = next(row for row in case.sandbox["lists"]["rows"] if row["id"] == "writes_denied")
+    _writes(case, denied=[entry for entry in row["entries"] if entry != missing])
+    assert [m.item for m in case.compare()] == ["dialog.writes_denied"]
+
+
+def test_the_fixed_shared_roots_must_be_denied_even_when_the_pins_do_not_name_them(case) -> None:
+    pins = sandbox.pins(case.work, allowed_domains=("api.example.com",), read_deny=READ_DENY, write_deny=())
+    case.expected = replace(case.expected, pins=pins)
+    _writes(case, denied=sandbox.git_deny_write(case.work))
+    assert [m.item for m in case.compare()] == ["dialog.writes_denied"]
+
+
 # --- the positive check of a turn's system/init ---
 
 MCP = frozenset({"mcp__docs__do", "mcp__looper__do"})
@@ -430,7 +476,7 @@ def test_a_wider_dialog_list_scalar_is_refused(case, field, value) -> None:
 
 def test_extra_denied_entries_and_extra_known_rows_with_matching_content_pass(case) -> None:
     _set_row(case, "hosts_denied", ["bad.example"])
-    _set_row(case, "reads_denied", ["/home-placeholder/.ssh", "/home-placeholder/.aws", "/more"])
+    _set_row(case, "reads_denied", [*READ_DENY, "/more"])
     assert case.compare() == []
 
 

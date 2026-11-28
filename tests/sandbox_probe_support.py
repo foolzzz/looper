@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from fake_anthropic_messages import FakeAnthropicMessages, text, tool_use  # noqa: F401  (re-exported for the probes)
-from looper.agents import operator_mcp, task_manager_sandbox
+from looper.agents import operator_mcp, task_manager_sandbox, task_manager_tmpdir
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.library import EMPTY_LIBRARY, AgentLibrary
 from looper.agents.profile_registry import builtin_resolved_profile
@@ -215,6 +215,9 @@ class SandboxProbe:
                     "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ANTHROPIC_API_KEY": "sk-probe-not-real",
                     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1",
                     "DISABLE_TELEMETRY": "1"}
+        # As a live launch: a private temporary directory (``close`` removes it).
+        self.private_tmp = task_manager_tmpdir.create()
+        self.env[task_manager_tmpdir.ENV_NAME] = self.private_tmp.path
         self.version = subprocess.check_output([binary, "--version"], env=self.env, text=True, timeout=30).strip()
         self.listener = Listener()
         self.cwd = self.repo("project")
@@ -259,7 +262,8 @@ class SandboxProbe:
         return Launch(AgentSettings(profile=builtin_resolved_profile()), library=library)
 
     def command(self, cwd: Path | None = None, *, library: AgentLibrary = EMPTY_LIBRARY, resume: str | None = None,
-                allowed_domains: tuple[str, ...] = (), control: str | None = None) -> list[str]:
+                allowed_domains: tuple[str, ...] = (), control: str | None = None,
+                deny_shared: bool = True) -> list[str]:
         """The direct session's command. ``control="loose"`` is the positive control: the same command with the
         pins removed (only ``sandbox.enabled``) and the project and local layers loading, the shape the boundary
         replaces."""
@@ -268,7 +272,8 @@ class SandboxProbe:
         prompt.write_text("")
         command = CLAUDE_CODE.operator_resident_command(
             self.binary, cwd=cwd, prompt_file=prompt, launch=self.launch(library), settings_dir=self.root / "settings",
-            allowed_domains=allowed_domains, read_deny=self.read_deny)
+            allowed_domains=allowed_domains, read_deny=self.read_deny,
+            write_deny=task_manager_sandbox.shared_write_roots(self.env) if deny_shared else ())
         if control == "loose":
             loose = self.root / "loose-settings.json"
             loose.write_text(json.dumps({"sandbox": {"enabled": True}}))
@@ -342,6 +347,7 @@ class SandboxProbe:
         for server in getattr(self, "servers", []):
             server.stop()
         self.listener.close()
+        self.private_tmp.remove()
 
     def evidence(self) -> dict[str, Any]:
         return {"version": self.version, "observations": self.observations,
