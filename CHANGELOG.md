@@ -30,7 +30,7 @@ Frozen at `946876e38` (the merge of [#1905](https://github.com/foolzzz/looper/pu
 - **Lark cards @-mention only a well-formed open_id** ([#1883](https://github.com/foolzzz/looper/pull/1883)); **very long Lark text is neutralized in one linear pass** ([#1875](https://github.com/foolzzz/looper/pull/1875)).
 - **The ACP preflight runs isolated; API responses carry `X-Content-Type-Options: nosniff`** ([#1884](https://github.com/foolzzz/looper/pull/1884)).
 - **Project instruction files that Looper reads itself are read only from inside the repository** ([#1901](https://github.com/foolzzz/looper/pull/1901)); the work directory is the boundary when the repository root is or holds the home or Looper's runtime root, and a file of a nested repository is left out ([#1907](https://github.com/foolzzz/looper/pull/1907)); upgrade if you run the DSH or pi runtime, or omp outside a repository.
-- **Looper's git calls refuse a repository that borrows another object store, ignore replacement refs and fetch no missing object lazily; the direct session's sandbox write-denies `.git/objects/info`** ([#1905](https://github.com/foolzzz/looper/pull/1905)); repack a repository cloned with `--shared` or `--reference` and remove its alternates file before you upgrade.
+- **Looper's git calls refuse a repository that borrows another object store, ignore replacement refs and, on a git that honours `GIT_NO_LAZY_FETCH`, fetch no missing object lazily; the direct session's sandbox write-denies `.git/objects/info`** ([#1905](https://github.com/foolzzz/looper/pull/1905)); repack a repository cloned with `--shared` or `--reference` and remove its alternates file before you upgrade, or new tasks there are refused.
 
 ### Fixed
 
