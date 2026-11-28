@@ -977,8 +977,9 @@ counter visible in `manager_metrics.get` while work mode is enabled.
 
 #### Task Manager direct session: sandbox
 
-A direct session runs the model's Bash inside Claude Code's sandbox (macOS only for now: elsewhere
-it refuses with `sandbox_unavailable` and starts no process). The task directory is untrusted, so
+A direct session runs the model's Bash inside Claude Code's sandbox (macOS only for now: elsewhere,
+or where the self-check of the sandbox Looper's own git runs in fails, it refuses with
+`sandbox_unavailable` and starts no process). The task directory is untrusted, so
 the boundary is code, not configuration: `task_manager_sandbox` renders the `--settings` file and
 the launch flags, and no `tasks.conversations.*` field, environment variable or project file can loosen
 them.
@@ -4547,8 +4548,41 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   (`GIT_NO_LAZY_FETCH=1`): in a partial clone, objects not yet fetched are
   reported missing by Looper's git calls instead of being fetched.
   `tests/test_git_safe.py` fails on a direct `git` call elsewhere
-  in `looper/`, except for Looper's own checkout, a fresh clone, and the
-  knowledge vault, each listed there with its reason.
+  in `looper/`, except for Looper's own checkout, a fresh clone, the jail's
+  self-check and the knowledge vault, each listed there with its reason.
+- **Looper's git on project repositories is confined on macOS**
+  (`looper/agents/git_jail.py`). A task Manager's direct session edits the
+  user's repository itself, and what it leaves in `.git` stays for every later
+  git call there. So every command the helper runs, its own checks included,
+  whichever task or code path starts it, runs under a Seatbelt profile
+  (`sandbox-exec`): it reads everything except the direct session's read deny
+  list (the server's, plus that of every session launched since the server
+  started), writes only the repository's work tree and git directories (never
+  the parts of the git directory a session may not write) and the places the
+  command itself names (a worktree, snapshot or clone under Looper's runtime
+  root, a private index in Looper's temporary directory, a moved checkout's
+  `.git` link during a project move), and has no network. A directory outside
+  the work tree is writable only when it points back (a linked worktree) or
+  lies inside an enclosing checkout's repository (a submodule). The
+  component manifest's read-only git calls run under the same read rules.
+  It fails closed: a command that reaches outside is killed and refused as
+  `sandbox_denied`, carrying none of its output (git may leave a lock file
+  behind, which the user removes); when the profile cannot be applied the
+  refusal is `sandbox_unavailable`; and direct mode refuses to start unless a
+  self-check finds that a confined read of a synthetic denied file is killed,
+  an allowed read works and git runs. Other platforms are unchanged: direct
+  mode is refused there. A filter or driver from the operator's own git
+  configuration (for example Git LFS) runs inside the same limits: one that
+  writes elsewhere or needs the network is killed, a `required` filter then
+  fails the command, and one that is not required leaves the content
+  unfiltered. **Residuals:** Seatbelt judges paths, so a hard link to a denied
+  file made beforehand by a process outside the sandbox is readable; what
+  Looper reads in its own process (the repository checks above) is not
+  confined; after a restart, a credential directory named only by a launched
+  session's profile is denied again from the next such launch; the knowledge
+  vault's git (its commit hooks run by design) and the git of `looper service
+  upgrade` on Looper's own checkout are not confined, also when either is a
+  registered project's repository.
 - **Git's output stays inside.** Git's messages can quote file content that
   Looper does not control. A git command that
   fails in a task, step or worktree directory, or in a repository a project move
