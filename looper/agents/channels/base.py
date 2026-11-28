@@ -50,6 +50,55 @@ class PostOutcome(StrEnum):
     UNKNOWN = "unknown"
 
 
+class NotifyAnswer:
+    """``(sent, error)`` plus the :class:`PostOutcome`. A tuple cannot carry the outcome (a subtype may not add
+    slots), so this unpacks and compares as that pair. A schedule retry reads ``outcome`` so a send that may have
+    gone is not asked again."""
+
+    __slots__ = ("outcome", "_pair")
+
+    def __init__(self, outcome: PostOutcome, error: str | None = None) -> None:
+        sent = outcome is PostOutcome.SENT
+        self.outcome = outcome
+        self._pair = (sent, None if sent else error)
+
+    def __iter__(self):
+        return iter(self._pair)
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int):
+        return self._pair[index]
+
+    @property
+    def error(self) -> str | None:
+        return self._pair[1]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, NotifyAnswer):
+            return self.outcome is other.outcome and self._pair == other._pair
+        if isinstance(other, tuple):
+            return self._pair == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._pair)
+
+    def __repr__(self) -> str:
+        return f"NotifyAnswer({self.outcome.value}, error={self._pair[1]!r})"
+
+
+def notice_answer(success: bool, error: str | None, outcome: PostOutcome | None) -> NotifyAnswer:
+    """A channel ``notify`` result. A failure that names no outcome never left, so it is ``REJECTED`` and may be
+    retried. :meth:`DeliveryReceipt.result` would call that ``UNKNOWN`` and the notice would never be tried again."""
+    if success:
+        return NotifyAnswer(PostOutcome.SENT)
+    if outcome is None or outcome is PostOutcome.SENT:
+        return NotifyAnswer(PostOutcome.REJECTED, error)
+    return NotifyAnswer(outcome, error)
+
+
 @dataclass(frozen=True)
 class PostReceipt:
     """What posting a message to a chat did: the ids of the channel messages sent (several when it was split), or

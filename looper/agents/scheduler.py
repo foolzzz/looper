@@ -543,11 +543,13 @@ class Scheduler:
     async def start(self) -> None:
         if self._commands is not None:
             await asyncio.to_thread(self._commands.prepare)
-        # A gate cannot outlive the server that ran it.
+        # A gate cannot outlive the server that ran it. A notice claimed as sending cannot be told from one the
+        # channel already accepted, so it is uncertain and is not sent again.
         async with db_connection.transaction() as conn:
             if count := await db_schedules.fail_gating_runs(conn, self._clock()):
                 logger.warning("%d schedule run(s) were checking their gate when the server stopped: gate_failed",
                                count)
+        await self._notifier.settle_stopped()
         self._loop_task = asyncio.create_task(self._loop())
         logger.info("scheduler started: checks the schedules every %g s", self._tick_seconds)
 
@@ -580,9 +582,19 @@ class Scheduler:
         }
 
     async def idle(self) -> None:
-        """Wait for the gates and messages under way, and those they start."""
+        """Wait for the gates and messages under way, and those they start, then send notice retries that are due.
+
+        The retry is after that wait so a recovery spawned by this pass can name an alert before the alert is sent
+        again. The scheduler loop also retries after each tick; a second pass claims nothing the first one took.
+        """
         while self._background:
             await asyncio.gather(*list(self._background), return_exceptions=True)
+        await self._retry_notices()
+
+    async def _retry_notices(self) -> None:
+        if self._drain is not None and self._drain.draining:
+            return
+        await self._notifier.retry_due(self._clock())
 
     def _spawn(self, job: Any, *, gate: bool = False) -> None:
         task = asyncio.ensure_future(job)
@@ -601,6 +613,7 @@ class Scheduler:
             try:
                 await self.tick()
                 self._last_tick_at = self._last_ok_tick_at = self._clock()
+                await self._retry_notices()
             except asyncio.CancelledError:
                 raise
             except Exception:

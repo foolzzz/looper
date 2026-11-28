@@ -927,12 +927,15 @@ async def prune_runs(conn: Db, before: datetime) -> int:
 
 
 async def prune_notifications(conn: Db, before: datetime) -> int:
-    """Delete one batch of notifications older than the retention cutoff."""
+    """Delete one batch of notifications older than the retention cutoff, and the same batch of settled notice
+    retries (a pending or in-flight retry stays). The count is the notifications removed."""
     from ..agents.housekeeping import PRUNE_BATCH
+    from .schedule_notice_retries import prune_settled
 
     result = await conn.execute(
         "DELETE FROM schedule_notifications WHERE id IN ("
         "SELECT id FROM schedule_notifications WHERE created_at < $1 LIMIT $2)", before, PRUNE_BATCH)
+    await prune_settled(conn, before, PRUNE_BATCH)
     return int(result.split()[-1])
 
 
