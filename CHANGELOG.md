@@ -20,7 +20,7 @@ How the agent system works today is described in
 
 ## [2.15.45] - 2026-11-27
 
-Frozen at `0399cd8ce` (the merge of [#1903](https://github.com/foolzzz/looper/pull/1903)): everything merged to main after v2.15.44's freeze `448632f1f`, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. The release body is [docs/releases/v2.15.45.md](docs/releases/v2.15.45.md). Startup adds three migrations: `task_manager_sandbox_policy` (2160), `manager_action_sender` (2170) and `task_manager_refs` (2180). No runtime dependency changes. The task Manager changes apply only while `tasks.conversations.manager_answers` is on; read Before you upgrade in the release body first.
+Frozen at `0c15253a6` (the merge of [#1908](https://github.com/foolzzz/looper/pull/1908)): everything merged to main after v2.15.44's freeze `448632f1f`, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. The release body is [docs/releases/v2.15.45.md](docs/releases/v2.15.45.md). Startup adds three migrations: `task_manager_sandbox_policy` (2160), `manager_action_sender` (2170) and `task_manager_refs` (2180). No runtime dependency changes. The task Manager changes apply only while `tasks.conversations.manager_answers` is on; read Before you upgrade in the release body first.
 
 ### Security
 
@@ -29,7 +29,7 @@ Frozen at `0399cd8ce` (the merge of [#1903](https://github.com/foolzzz/looper/pu
 - **`looper leads eval-export` asks git through the hardened helper** ([#1881](https://github.com/foolzzz/looper/pull/1881)).
 - **Lark cards @-mention only a well-formed open_id** ([#1883](https://github.com/foolzzz/looper/pull/1883)); **very long Lark text is neutralized in one linear pass** ([#1875](https://github.com/foolzzz/looper/pull/1875)).
 - **The ACP preflight runs isolated; API responses carry `X-Content-Type-Options: nosniff`** ([#1884](https://github.com/foolzzz/looper/pull/1884)).
-- **Project instruction files that Looper reads itself are read only from inside the repository** ([#1901](https://github.com/foolzzz/looper/pull/1901)); upgrade if you run the DSH or pi runtime, or omp outside a repository.
+- **Project instruction files that Looper reads itself are read only from inside the repository** ([#1901](https://github.com/foolzzz/looper/pull/1901)); the work directory is the boundary when the repository root is or holds the home or Looper's runtime root, and a file of a nested repository is left out ([#1907](https://github.com/foolzzz/looper/pull/1907)); upgrade if you run the DSH or pi runtime, or omp outside a repository.
 
 ### Fixed
 
@@ -40,7 +40,7 @@ Frozen at `0399cd8ce` (the merge of [#1903](https://github.com/foolzzz/looper/pu
 
 ### Internal
 
-- The REST confirmation wording of v2.15.44 ([#1892](https://github.com/foolzzz/looper/pull/1892)); tests, CI and plan sync with no product change ([#1880](https://github.com/foolzzz/looper/pull/1880), [#1882](https://github.com/foolzzz/looper/pull/1882), [#1887](https://github.com/foolzzz/looper/pull/1887), [#1891](https://github.com/foolzzz/looper/pull/1891), [#1893](https://github.com/foolzzz/looper/pull/1893), [#1895](https://github.com/foolzzz/looper/pull/1895), [#1896](https://github.com/foolzzz/looper/pull/1896), [#1897](https://github.com/foolzzz/looper/pull/1897), [#1898](https://github.com/foolzzz/looper/pull/1898), [#1899](https://github.com/foolzzz/looper/pull/1899), [#1902](https://github.com/foolzzz/looper/pull/1902)).
+- The REST confirmation wording of v2.15.44 ([#1892](https://github.com/foolzzz/looper/pull/1892)); tests, CI and plan sync with no product change ([#1880](https://github.com/foolzzz/looper/pull/1880), [#1882](https://github.com/foolzzz/looper/pull/1882), [#1887](https://github.com/foolzzz/looper/pull/1887), [#1891](https://github.com/foolzzz/looper/pull/1891), [#1893](https://github.com/foolzzz/looper/pull/1893), [#1895](https://github.com/foolzzz/looper/pull/1895), [#1896](https://github.com/foolzzz/looper/pull/1896), [#1897](https://github.com/foolzzz/looper/pull/1897), [#1898](https://github.com/foolzzz/looper/pull/1898), [#1899](https://github.com/foolzzz/looper/pull/1899), [#1902](https://github.com/foolzzz/looper/pull/1902), [#1904](https://github.com/foolzzz/looper/pull/1904), [#1906](https://github.com/foolzzz/looper/pull/1906), [#1908](https://github.com/foolzzz/looper/pull/1908)).
 
 ## [2.15.44] - 2026-11-26
 
