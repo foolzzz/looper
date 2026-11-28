@@ -1060,6 +1060,39 @@ def test_a_hop_only_the_chain_before_the_turn_read_is_checked_before_it_is_read_
     assert change.restore is None and change.not_restorable.value == "ref_file_unreadable"
 
 
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+def test_a_hop_linked_only_until_the_comparison_has_read_it_shows_nothing_outside(repo, tmp_path, monkeypatch, caplog,
+                                                                                 kind):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    hidden, real = repo / ".git" / "refs" / "hidden" / "x", refs._git
+    git(repo, "update-ref", "refs/hidden/x", "HEAD")
+    git(repo, "symbolic-ref", "refs/heads/up", "refs/hidden/x")
+    body = hidden.read_text()
+
+    async def restoring(work_dir, *args):
+        answer = await real(work_dir, *args)
+        if hidden.is_symlink() and args[-1] == "refs/hidden/x" and args[0] in ("symbolic-ref", "show-ref"):
+            if args[0] == "show-ref" or answer[0] == 0:  # git has the value: the ordinary file comes back
+                hidden.unlink()
+                hidden.write_text(body)
+        return answer
+
+    async def go():
+        before = await refs.snapshot(repo)
+        git(repo, "symbolic-ref", "refs/heads/up", "refs/heads/other")
+        after = await refs.snapshot(repo)  # no chain reads the hop now, so only the comparison does
+        hidden.unlink()
+        hidden.symlink_to(outside)
+        monkeypatch.setattr(refs, "_git", restoring)
+        return await refs.compare(repo, before, after, task_branch="main", task_id=TASK, active_task=inactive)
+
+    caplog.set_level("DEBUG")
+    report = asyncio.run(go())
+    _leaks_nothing(report, caplog, secrets)
+    change = by_ref(report)["refs/heads/up"]
+    assert change.restore is None and change.not_restorable.value == "ref_file_unreadable"
+
+
 def test_the_old_symlink_spelling_of_a_symbolic_ref_is_still_read(repo):
     (repo / ".git" / "refs" / "heads" / "old-style").symlink_to("refs/heads/other")
     found = asyncio.run(refs.snapshot(repo))
