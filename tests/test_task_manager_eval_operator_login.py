@@ -676,8 +676,9 @@ def test_a_bypass_launch_must_carry_the_sandbox_and_the_deny_list(operator, tmp_
 
 
 @pytest.mark.skipif(not DSN, reason="requires a disposable LOOPER_TEST_DATABASE_URL")
+@pytest.mark.skipif(sys.platform != "darwin", reason="the isolated service opens a direct session on macOS only; "
+                                                     "a skip is not a pass")
 def test_fake_run_passes_both_stages_and_a_readback_mismatch_aborts_it(operator, monkeypatch, tmp_path):
-    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", "darwin")
     selected = [cases.BY_ID[name] for name in ("foreign_task_refused", "direct_edit_brief", "readonly_resume")]
     result, path = suite(tmp_path, admin_url=DSN, selected=selected)
     assert not (operator / ".cache").exists()  # every cache of the run went under its own root
