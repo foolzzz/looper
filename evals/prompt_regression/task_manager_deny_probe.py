@@ -4,6 +4,12 @@ The real CLI runs as a task Manager's direct session (``operator_resident_comman
 ``task_manager_sandbox``) against a local scripted Messages server, so no model is called and nothing is billed. The
 script is one read-only Bash command per denied path that exists here; each prints ``DENIED``, ``ALLOWED`` or
 ``OTHER`` and never a file name or a byte of content. The server keeps those markers and nothing else of a request.
+
+The hard verdict on the boundary is only the markers answered inside the sandbox (``DENIED``, ``ALLOWED``, ``OTHER``,
+``BLOCKED_BY_HOOK``) and the positive and negative controls; the session must also follow the script and send no other
+credential. A watched directory's modification time and number of entries are an auxiliary signal, seen from outside:
+a change in a ``CREDENTIAL`` entry is an ``ALARM``; a change in an ``AGENT_STATE`` entry, which running agent
+sessions write at any time, is only listed under ``changed_during_probe``.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -25,6 +32,7 @@ from looper.agents import task_manager_safety, task_manager_sandbox
 from looper.agents.agent_settings import AgentSettings, Launch
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.agents.runtimes import CLAUDE_CODE
+from looper.agents.task_manager_sandbox import DenyClass
 
 PROBE_KEY = "sk-probe-not-real"
 TIMEOUT_SEC = 420.0
@@ -42,13 +50,13 @@ class Status(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"  # an entry was not denied, or a control answered wrongly
     INVALID = "INVALID"  # the probe says nothing: a command was blocked, or the session did not follow the script
-    ALARM = "ALARM"  # every answer was right, but a denied directory changed while the probe ran
+    ALARM = "ALARM"  # every answer was right, but a denied credential directory changed while the probe ran
     ABORTED = "ABORTED"  # the CLI's requests were not the probe's: stopped at once, nothing else recorded
 
 
 class Refusal(StrEnum):
     AUTHORIZATION = "an Authorization header reached the probe server"
-    WRONG_KEY = "a request did not carry the probe's API key"
+    WRONG_KEY = "a request carried another API key, or a model request carried none"
 
 
 class Kind(StrEnum):
@@ -56,13 +64,23 @@ class Kind(StrEnum):
     FILE = "file"
 
 
+class Unverifiable(StrEnum):
+    """Why a present entry is not verified: outside the sandbox too it cannot be read, so a refusal inside proves
+    nothing about the sandbox. No command is run for it."""
+
+    NO_METADATA = "its metadata cannot be read outside the sandbox"
+    NOT_LISTABLE = "it cannot be listed outside the sandbox"
+    NOT_READABLE = "it has no read permission outside the sandbox"
+
+
 # --- The server -------------------------------------------------------------------------------------------------
 
 
 class MarkerServer:
     """A Messages endpoint on 127.0.0.1 that asks for the scripted commands one at a time. Of a request it keeps the
-    marker of each answered command; bodies and headers are dropped. A request with an ``Authorization`` header, or a
-    model request without the probe's key, is answered 401 without reading its body, and sets ``refused``."""
+    marker of each answered command; bodies and headers are dropped. A request of any method with an
+    ``Authorization`` header or another API key, or a model request without the probe's key, is answered 401 without
+    reading its body, and sets ``refused``."""
 
     def __init__(self, script: list[tuple[str, str]]) -> None:
         self.script = list(script)
@@ -88,9 +106,16 @@ class MarkerServer:
                 if self.command != "HEAD":
                     self.wfile.write(data)
 
-            def admitted(self, model_request: bool) -> bool:
+            def parse_request(self) -> bool:
+                # Every request is checked here, before it is dispatched by method (an unsupported one included).
+                return super().parse_request() and self.admitted()
+
+            def admitted(self) -> bool:
+                keys = self.headers.get_all("x-api-key") or []
+                model_request = self.command == "POST" and self.path.startswith("/v1/messages")
                 refusal = (Refusal.AUTHORIZATION if self.headers.get_all("Authorization") else
-                           Refusal.WRONG_KEY if model_request and self.headers.get("x-api-key") != PROBE_KEY else None)
+                           Refusal.WRONG_KEY if any(key != PROBE_KEY for key in keys) or (model_request and not keys)
+                           else None)
                 with owner._lock:
                     owner.refusal = owner.refusal or refusal
                     if owner.refusal is None:
@@ -101,15 +126,12 @@ class MarkerServer:
                 return False
 
             def do_GET(self) -> None:
-                if self.admitted(False):
-                    self.reply(404, "{}")
+                self.reply(404, "{}")
 
             do_HEAD = do_GET
 
             def do_POST(self) -> None:
                 path = self.path.split("?", 1)[0]
-                if not self.admitted(path.startswith("/v1/messages")):
-                    return
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
                 if path == "/v1/messages/count_tokens":
                     self.reply(200, json.dumps({"input_tokens": 1}))
@@ -203,7 +225,8 @@ class Entry:
     path: str
     label: str
     kind: Kind | None  # None: absent on this machine
-    readable: bool = True
+    deny_class: DenyClass = DenyClass.CREDENTIAL
+    unverifiable: Unverifiable | None = None
     state: tuple[int, int] | None = None  # a directory's (mtime in ns, number of entries)
 
 
@@ -216,17 +239,18 @@ def directory_state(path: str) -> tuple[int, int] | None:
         return None
 
 
-def look(index: int, path: str, label: str) -> Entry:
+def look(index: int, path: str, label: str, deny_class: DenyClass = DenyClass.CREDENTIAL) -> Entry:
+    entry = partial(Entry, index, path, label, deny_class=deny_class)
     try:
         found = os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
-        return Entry(index, path, label, None)
+        return entry(None)
     except OSError:
-        return Entry(index, path, label, Kind.FILE, readable=False)
+        return entry(Kind.FILE, unverifiable=Unverifiable.NO_METADATA)
     if stat.S_ISDIR(found.st_mode):
         state = directory_state(path)
-        return Entry(index, path, label, Kind.DIRECTORY, readable=state is not None, state=state)
-    return Entry(index, path, label, Kind.FILE, readable=os.access(path, os.R_OK))
+        return entry(Kind.DIRECTORY, unverifiable=None if state else Unverifiable.NOT_LISTABLE, state=state)
+    return entry(Kind.FILE, unverifiable=None if os.access(path, os.R_OK) else Unverifiable.NOT_READABLE)
 
 
 def labeller(home: str, runtime_root: Path) -> Callable[[int, str], str]:
@@ -310,7 +334,8 @@ def run_probe(claude_bin: str, *, root: Path, drive: Callable[..., CliRun] = dri
     subprocess.run(["git", "init", "-q"], cwd=task, check=True, capture_output=True, timeout=30)
 
     launch = Launch(AgentSettings(profile=builtin_resolved_profile()))
-    live = task_manager_sandbox.read_deny_paths(launch.runtime.environment(launch), runtime)
+    classes = task_manager_sandbox.read_deny_classes(launch.runtime.environment(launch), runtime)
+    live = tuple(classes)  # the list a live session is launched with (``read_deny_paths``)
     added = tuple(os.path.realpath(controls[name]) for name in ("denied_directory", "denied_file"))
     prompt = root / "prompt.md"
     prompt.write_text("")
@@ -321,8 +346,8 @@ def run_probe(claude_bin: str, *, root: Path, drive: Callable[..., CliRun] = dri
         *task_manager_sandbox.dropped_env(launch), "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"))
     home = env.get("HOME") or str(Path.home())
     label = labeller(home, runtime)
-    entries = [look(index, path, label(index, path)) for index, path in enumerate(live)]
-    tested = [entry for entry in entries if entry.kind is not None and entry.readable]
+    entries = [look(index, path, label(index, path), classes[path]) for index, path in enumerate(live)]
+    tested = [entry for entry in entries if entry.kind is not None and entry.unverifiable is None]
     script = [(f"toolu_probe_{entry.index}", command(entry.path, entry.kind)) for entry in tested]
     script += [(f"toolu_probe_{name}", command(controls[name], kind)) for name, kind, _ in CONTROLS]
 
@@ -344,19 +369,22 @@ def run_probe(claude_bin: str, *, root: Path, drive: Callable[..., CliRun] = dri
     failed = [{"index": entry.index, "path": entry.label, "mark": marks[f"toolu_probe_{entry.index}"].value}
               for entry in tested if marks[f"toolu_probe_{entry.index}"] is not Mark.DENIED]
     answers = {name: marks[f"toolu_probe_{name}"] for name, _, _ in CONTROLS}
-    alarms = []
+    alarms, changed_during_probe = [], []
     for entry in entries:
         if entry.state is None:
             continue
         now = directory_state(entry.path)
         changed = (["gone or unreadable"] if now is None else
                    [what for what, before, after in zip(("mtime", "count"), entry.state, now) if before != after])
-        if changed:
-            alarms.append({"index": entry.index, "path": entry.label, "changed": changed})
+        if changed:  # a directory that is gone or unreadable now is an alarm whatever its class
+            expected = now is not None and entry.deny_class is DenyClass.AGENT_STATE
+            (changed_during_probe if expected else alarms).append(
+                {"index": entry.index, "path": entry.label, "changed": changed})
     counts = {mark.value: sum(value is mark for value in marks.values()) for mark in Mark}
     verified = sum(marks[f"toolu_probe_{entry.index}"] is Mark.DENIED for entry in tested)
     absent = [entry.label for entry in entries if entry.kind is None]
-    unverifiable = [entry.label for entry in entries if entry.kind is not None and not entry.readable]
+    unverifiable = [{"index": entry.index, "path": entry.label, "reason": entry.unverifiable.value}
+                    for entry in entries if entry.unverifiable is not None]
     expected = len(script) + 1
     reason = None
     if counts[Mark.BLOCKED_BY_HOOK.value]:
@@ -367,13 +395,17 @@ def run_probe(claude_bin: str, *, root: Path, drive: Callable[..., CliRun] = dri
         status = Status.FAIL
         reason = "an entry was not denied, a control answered wrongly, or nothing was verified"
     elif alarms:
-        status, reason = Status.ALARM, "a denied directory changed while the probe ran"
-    else:
+        status, reason = Status.ALARM, "a denied credential directory changed while the probe ran"
+    else:  # every present entry is DENIED, or listed as unverifiable with its reason
         status = Status.PASS
+        if unverifiable:
+            reason = "passed with present entries that were not verified: " + "; ".join(
+                f"{item['path']} ({item['reason']})" for item in unverifiable)
     summary = f"{verified} verified denied, {len(absent)} absent on this machine (not verified)"
     if unverifiable:
         summary += f", {len(unverifiable)} unreadable outside the sandbox too (not verified)"
     return {"status": status.value, "reason": reason, "summary": summary, "entries": len(entries),
             "verified_denied": verified, "absent": absent, "unverifiable": unverifiable, "failed": failed,
-            "alarms": alarms, "controls": {name: mark.value for name, mark in answers.items()}, "markers": counts,
+            "alarms": alarms, "changed_during_probe": changed_during_probe,
+            "controls": {name: mark.value for name, mark in answers.items()}, "markers": counts,
             "requests": server.requests, "cli_exit_code": done.exit_code}

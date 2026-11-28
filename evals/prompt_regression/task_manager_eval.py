@@ -139,8 +139,9 @@ def isolated_environment(root: Path, credential: tuple[str, str] | None, *,
     ``operator_login``: HOME and CLAUDE_CONFIG_DIR (set or unset) stay the operator's, so the CLI finds its own
     login; nothing is written to either by the eval, no synthetic settings apply and no credential is added. The
     variables of ``OPERATOR_LOGIN_HOMES`` stay too (the read deny list follows them). TMPDIR and XDG_CACHE_HOME
-    point under ``root``, so nothing is cached under the operator's HOME; git gets a configuration under ``root``
-    that turns off the user's ignore and attributes files, and no system configuration."""
+    point under ``root`` (the CLI, and programs that ignore these two, may still write under HOME); git gets a
+    configuration under ``root`` that turns off the user's ignore and attributes files, and no system
+    configuration."""
     saved = dict(os.environ)
     if operator_login:
         if credential is not None:
@@ -1206,8 +1207,9 @@ def main(argv: list[str] | None = None) -> None:
                         help="compare two task-manager-eval.json reports; exit 1 when not directly comparable")
     parser.add_argument("--probe-deny-read", action="store_true",
                         help="free: have the real --claude-bin, under your HOME and configuration and against a local "
-                             "scripted server, try to read every path on the sandbox's read deny list; exit 1 unless "
-                             "every one present is refused")
+                             "scripted server, try to read every path on this shell's read deny list; exit 0 only on "
+                             "PASS. The verdict is the in-sandbox markers and controls; a directory's mtime and "
+                             "entry count are an auxiliary signal")
     args = parser.parse_args(argv)
     try:
         if args.compare_runs:

@@ -2158,9 +2158,10 @@ A throwaway `HOME` or `CLAUDE_CONFIG_DIR` has no login, so this mode keeps yours
 `CLAUDE_CONFIG_DIR` is left as you have it (set or unset). The eval reads, copies and exports no credential file or
 keychain entry and adds no credential variable; the CLI signs in by itself. The variables that move other logins
 (`XDG_CONFIG_HOME`, `CODEX_HOME`, `GROK_HOME`, `TRAE_HOME`, `COPILOT_HOME`) stay too, so the sandbox's read deny list
-follows them. `TMPDIR` and `XDG_CACHE_HOME` point under the run's own directory, so no cache is written under your
-`HOME`. git gets a configuration under that directory that turns off your global configuration, ignore file and
-attributes file, and no system configuration.
+follows them. `TMPDIR` and `XDG_CACHE_HOME` point under the run's own directory, so programs that follow them keep
+temporary files and caches there. Your `HOME` is still written to: the CLI writes into its configuration directory, and
+a program that ignores these two variables may cache under `HOME`. git gets a configuration under that directory that
+turns off your global configuration, ignore file and attributes file, and no system configuration.
 
 **Billing is checked before any CLI start** (and again before every case). If your `settings.json`,
 `settings.local.json` or the managed settings hold `apiKey`, `primaryApiKey`, `apiKeyHelper`, the AWS credential
@@ -2183,6 +2184,10 @@ uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regressi
   --probe-deny-read --claude-bin "$CLAUDE_BIN"
 ```
 
+It checks the read deny list of the current shell: its `HOME` and the configuration and login-home variables above,
+with the built-in profile and a throwaway runtime root. It does not check the list of a running service, which may
+differ with that service's environment, an Agent Profile, or a runtime root other than the default.
+
 It calls no model and costs nothing. The CLI (the same verified version) runs as a direct session, with the command,
 environment and pinned sandbox settings built by the functions a live session uses, under your `HOME` and
 configuration, but against a scripted server on 127.0.0.1 with the key `sk-probe-not-real`. The first request that
@@ -2195,14 +2200,25 @@ run's deny list).
 
 | status | meaning |
 |---|---|
-| `PASS` | every entry present here was refused and the controls answered as expected |
+| `PASS` | every entry present here was refused, or is listed as unverifiable with its reason, and the controls answered as expected |
 | `FAIL` | an entry answered `ALLOWED` or `OTHER` (named by index and `~/…` path), a control answered wrongly, or nothing could be verified |
 | `INVALID` | a command was blocked before it ran (a `PreToolUse` hook or a permission rule: `BLOCKED_BY_HOOK`), or the session did not follow the script; nothing is concluded |
-| `ALARM` | a present deny directory's modification time or number of entries changed while the probe ran (your configuration directory included, which other sessions and the CLI itself also write to) |
-| `ABORTED` | no request, or one with a foreign credential |
+| `ALARM` | the answers were right, but a present `CREDENTIAL` deny directory's modification time or number of entries changed while the probe ran, or a watched directory of either class was gone or unreadable afterwards |
+| `ABORTED` | no request, or one (of any HTTP method) with a foreign credential |
+
+The hard verdict on the boundary is only the markers answered inside the sandbox (`DENIED`, `ALLOWED`, `OTHER`,
+`BLOCKED_BY_HOOK`) and the positive and negative controls. The modification time and entry count, read from outside,
+are an auxiliary signal. Each deny entry has a class in code. `AGENT_STATE` (the configuration and state of agent CLIs:
+the Claude directories and `~/.claude.json`, and the Codex, Grok, Trae (Coco) and Copilot homes) is written by running
+sessions at any time, so a change there is only listed under `changed_during_probe` and holds nothing back; an
+unexpected write inside such a directory therefore does not show in this signal. Every other entry, Looper's runtime
+root and ops file included, is `CREDENTIAL`, as is an entry without a class or declared under both. Only directories
+are watched, and only their own modification time and direct entries: not files, nested changes, or entries that were
+absent when the probe began.
 
 Only `PASS` lets cases start; the command exits 1 otherwise. The report says "N verified denied, M absent on this
-machine (not verified)"; an entry that cannot be read outside the sandbox either is listed apart and not counted. A
+machine (not verified)". A present entry that cannot be read outside the sandbox either is not run and not counted as
+verified: it is listed under `unverifiable` with the reason, and a `PASS` that has any repeats them in its `reason`. A
 pass says nothing about paths that are not on the deny list.
 
 - **Report.** `operator_login` records the CLI version, the probe's result, the reservation, the transcript note and

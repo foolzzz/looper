@@ -112,15 +112,44 @@ def test_a_foreign_credential_stops_the_server_and_nothing_of_the_request_is_kep
     assert "SECRET" not in kept and SENTINEL not in kept
 
 
-def test_a_bearer_on_any_method_is_refused():
+METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "BREW"]
+
+
+def send(url, method, headers, path="/"):
+    try:
+        with urlopen(Request(url + path, headers=headers, method=method), timeout=10) as response:
+            return response.status
+    except HTTPError as error:
+        return error.code
+
+
+@pytest.mark.parametrize("path", ["/", "/v1/messages"])
+@pytest.mark.parametrize("headers, refusal", [
+    ({"Authorization": "Bearer x"}, probe.Refusal.AUTHORIZATION),
+    ({"x-api-key": "sk-ant-api-SECRET"}, probe.Refusal.WRONG_KEY),
+])
+@pytest.mark.parametrize("method", METHODS)
+def test_a_foreign_credential_on_any_method_is_refused(method, headers, refusal, path):
     server = probe.MarkerServer(script("true"))
     url = server.start()
     try:
-        with pytest.raises(HTTPError):
-            urlopen(Request(url + "/", headers={"Authorization": "Bearer x"}, method="HEAD"), timeout=10)
+        assert send(url, method, headers, path) == 401
+        assert server.refused.is_set()
     finally:
         server.stop()
-    assert server.refusal is probe.Refusal.AUTHORIZATION
+    assert server.refusal is refusal and server.requests == 0
+
+
+@pytest.mark.parametrize("headers", [{}, {"x-api-key": KEY}])
+def test_a_request_without_a_foreign_credential_is_not_refused(headers):
+    server = probe.MarkerServer(script("true"))
+    url = server.start()
+    try:
+        assert send(url, "HEAD", headers) == 404
+        assert send(url, "GET", headers) == 404
+    finally:
+        server.stop()
+    assert server.refusal is None
 
 
 # --- The commands -----------------------------------------------------------------------------------------------
@@ -141,6 +170,20 @@ def test_commands_print_one_marker_and_no_name_or_content(tmp_path, kind):
     missing = shell(probe.command(tmp_path / "gone", probe.Kind(kind)))
     assert missing.stdout == "OTHER\n" and missing.stderr == ""
     assert (base / "secret-name").read_text() == "secret-content"
+
+
+def test_the_file_command_copies_no_byte_of_the_file(tmp_path):
+    """The real ``dd``, with its output redirected into a file this test can read: it must stay empty."""
+    stub, copied, target = tmp_path / "bin", tmp_path / "copied", tmp_path / "target"
+    stub.mkdir()
+    target.write_text("secret-content")
+    (stub / "dd").write_text(
+        '#!/bin/bash\nargs=()\nfor a in "$@"; do [[ $a == of=* ]] && a="of=$COPIED"; args+=("$a"); done\n'
+        'exec /bin/dd "${args[@]}"\n')
+    (stub / "dd").chmod(0o755)
+    done = subprocess.run(["/bin/bash", "-c", probe.command(target, probe.Kind.FILE)], capture_output=True, text=True,
+                          timeout=30, env={"PATH": f"{stub}:/usr/bin:/bin", "COPIED": str(copied)})
+    assert done.stdout == "ALLOWED\n" and copied.read_bytes() == b""
 
 
 @pytest.mark.parametrize("kind", ["directory", "file"])
@@ -221,7 +264,8 @@ def test_a_boundary_that_holds_passes_and_lists_what_this_machine_does_not_have(
     # ~/.ssh, ~/.netrc and the runtime root the probe made are present.
     assert report["verified_denied"] == 3
     assert report["summary"] == (f"3 verified denied, {len(report['absent'])} absent on this machine (not verified)")
-    assert report["failed"] == [] and report["alarms"] == []
+    assert report["failed"] == [] and report["alarms"] == [] and report["changed_during_probe"] == []
+    assert report["reason"] is None and report["unverifiable"] == []
     assert report["controls"] == {"allowed_directory": "ALLOWED", "allowed_file": "ALLOWED",
                                   "denied_directory": "DENIED", "denied_file": "DENIED"}
     assert str(home) not in json.dumps(report) and str(tmp_path) not in json.dumps(report)
@@ -314,6 +358,96 @@ def test_a_changed_denied_directory_raises_the_alarm(home, tmp_path, change):
     assert report["status"] == "ALARM"
     [alarm] = report["alarms"]
     assert alarm["path"] == "~/.ssh" and change in alarm["changed"]
+    assert report["changed_during_probe"] == []
+
+
+def change_directory(path, change):
+    if change == "count":
+        (path / "written-by-a-session").write_text("x")
+    elif change == "mtime":
+        os.utime(path, ns=(1, 1))
+    else:
+        path.rmdir()
+
+
+@pytest.mark.parametrize("change", ["count", "mtime"])
+@pytest.mark.parametrize("name", [".claude", ".codex", ".grok", ".trae", ".copilot"])
+def test_a_changed_agent_state_directory_is_listed_and_still_passes(home, tmp_path, name, change):
+    (home / name).mkdir()
+    report = run(tmp_path, Cli(sandbox, touch=lambda: change_directory(home / name, change)))
+    assert report["status"] == "PASS" and report["alarms"] == [], report
+    [seen] = report["changed_during_probe"]
+    assert seen["path"] == f"~/{name}" and change in seen["changed"]
+
+
+def test_an_agent_state_change_does_not_hide_a_credential_change(home, tmp_path):
+    (home / ".claude").mkdir()
+
+    def touch():
+        change_directory(home / ".claude", "count")
+        change_directory(home / ".ssh", "count")
+
+    report = run(tmp_path, Cli(sandbox, touch=touch))
+    assert report["status"] == "ALARM"
+    assert [item["path"] for item in report["alarms"]] == ["~/.ssh"]
+    assert [item["path"] for item in report["changed_during_probe"]] == ["~/.claude"]
+
+
+def test_an_agent_state_directory_that_disappears_still_raises_the_alarm(home, tmp_path):
+    (home / ".grok").mkdir()
+    report = run(tmp_path, Cli(sandbox, touch=lambda: change_directory(home / ".grok", "gone")))
+    assert report["status"] == "ALARM" and report["changed_during_probe"] == []
+    assert report["alarms"][0]["changed"] == ["gone or unreadable"]
+
+
+@pytest.mark.parametrize("name", [".claude", ".grok"])
+def test_an_agent_state_entry_that_is_not_denied_still_fails(home, tmp_path, name):
+    (home / name).mkdir()
+    report = run(tmp_path, Cli(lambda c: ("ALLOWED", False) if c.count(f"/{name} ") else sandbox(c),
+                               touch=lambda: change_directory(home / name, "count")))
+    assert report["status"] == "FAIL" and [item["path"] for item in report["failed"]] == [f"~/{name}"]
+
+
+# --- The classes ------------------------------------------------------------------------------------------------
+
+
+def every_variable(tmp_path):
+    names = ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "CODEX_HOME", "GROK_HOME", "TRAE_HOME", "COPILOT_HOME")
+    return {"HOME": str(tmp_path / "h"), **{name: str(tmp_path / name.lower()) for name in names}}
+
+
+def test_every_deny_entry_declares_its_class(tmp_path):
+    entries = task_manager_sandbox.read_deny_entries(every_variable(tmp_path), tmp_path / "runtime", tmp_path / "ops")
+    assert [str(e.path) for e in entries if not isinstance(e.deny_class, task_manager_sandbox.DenyClass)] == []
+
+
+def test_the_agent_state_entries_are_exactly_the_agent_clis_own(tmp_path):
+    env = every_variable(tmp_path)
+    classes = task_manager_sandbox.read_deny_classes(env, tmp_path / "runtime", tmp_path / "ops")
+    assert tuple(classes) == task_manager_sandbox.read_deny_paths(env, tmp_path / "runtime", tmp_path / "ops")
+    home = tmp_path / "h"
+    expected = [home / name for name in (".claude", ".claude.json", ".codex", ".grok", ".trae", ".copilot")]
+    expected += [Path(env[name]) for name in
+                 ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "GROK_HOME", "TRAE_HOME", "COPILOT_HOME")]
+    state = {path for path, found in classes.items() if found is task_manager_sandbox.DenyClass.AGENT_STATE}
+    assert state == {os.path.realpath(path) for path in expected}
+
+
+def test_a_path_declared_under_both_classes_is_a_credential(tmp_path):
+    home = tmp_path / "h"
+    env = {"HOME": str(home), "CODEX_HOME": str(home / ".ssh"), "CLAUDE_CONFIG_DIR": str(tmp_path / "runtime")}
+    classes = task_manager_sandbox.read_deny_classes(env, tmp_path / "runtime")
+    for path in (home / ".ssh", tmp_path / "runtime"):  # declared credential first, and declared credential last
+        assert classes[os.path.realpath(path)] is task_manager_sandbox.DenyClass.CREDENTIAL
+
+
+def test_an_unclassified_entry_is_watched_as_a_credential(home, tmp_path, monkeypatch):
+    declared = task_manager_sandbox.read_deny_entries
+    (home / "new-store").mkdir()
+    monkeypatch.setattr(task_manager_sandbox, "read_deny_entries", lambda *args: (
+        *declared(*args), task_manager_sandbox.DenyEntry(home / "new-store")))
+    report = run(tmp_path, Cli(sandbox, touch=lambda: change_directory(home / "new-store", "count")))
+    assert report["status"] == "ALARM" and [item["path"] for item in report["alarms"]] == ["~/new-store"]
 
 
 def test_a_directory_unreadable_outside_the_sandbox_is_not_counted_as_verified(home, tmp_path):
@@ -322,7 +456,36 @@ def test_a_directory_unreadable_outside_the_sandbox_is_not_counted_as_verified(h
         report = run(tmp_path, Cli(sandbox))
     finally:
         (home / ".aws").chmod(0o700)
-    assert report["unverifiable"] == ["~/.aws"] and report["verified_denied"] == 3 and report["status"] == "PASS"
+    assert report["status"] == "PASS" and report["verified_denied"] == 3
+    [item] = report["unverifiable"]
+    assert item["path"] == "~/.aws" and item["reason"] == "it cannot be listed outside the sandbox"
+    assert "~/.aws (it cannot be listed outside the sandbox)" in report["reason"]
+
+
+def test_a_file_unreadable_outside_the_sandbox_is_named_with_its_reason(home, tmp_path):
+    (home / ".netrc").chmod(0o000)
+    used = []
+
+    def answer(command):
+        used.append(command)
+        return sandbox(command)
+
+    report = run(tmp_path, Cli(answer))
+    assert not any("/.netrc" in command for command in used)
+    assert [(item["path"], item["reason"]) for item in report["unverifiable"]] == [
+        ("~/.netrc", "it has no read permission outside the sandbox")]
+    assert report["status"] == "PASS" and "~/.netrc" in report["reason"] and report["verified_denied"] == 2
+
+
+def test_an_entry_whose_metadata_cannot_be_read_is_named_with_its_reason(home, tmp_path):
+    (home / ".config" / "gh").mkdir(parents=True)
+    (home / ".config").chmod(0o000)
+    try:
+        report = run(tmp_path, Cli(sandbox))
+    finally:
+        (home / ".config").chmod(0o700)
+    reasons = {item["path"]: item["reason"] for item in report["unverifiable"]}
+    assert reasons["~/.config/gh"] == "its metadata cannot be read outside the sandbox"
 
 
 def test_the_standalone_command_runs_the_probe_and_exits_by_its_status(home, tmp_path, monkeypatch, capsys):
@@ -393,6 +556,6 @@ def test_real_cli_denies_every_entry_in_a_synthetic_home(tmp_path, monkeypatch, 
         assert report["failed"] == [] and report["verified_denied"] >= 5, report
         assert report["controls"] == {"allowed_directory": "ALLOWED", "allowed_file": "ALLOWED",
                                       "denied_directory": "DENIED", "denied_file": "DENIED"}
-        # The CLI writes its session into its own configuration directory, which is one of the denied entries.
-        assert {alarm["path"] for alarm in report["alarms"]} <= {"~/.claude"}, report
-        assert report["status"] in ("PASS", "ALARM")
+        # The CLI writes its session into its own configuration directory, an AGENT_STATE entry: listed, no alarm.
+        assert report["status"] == "PASS" and report["alarms"] == [], report
+        assert {item["path"] for item in report["changed_during_probe"]} <= {"~/.claude"}, report

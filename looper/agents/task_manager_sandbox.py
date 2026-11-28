@@ -194,11 +194,23 @@ KNOWN_SANDBOX_KEYS: frozenset[tuple[str, ...]] = frozenset(
     pin.key for pin in pins(Path("/"), allowed_domains=(), read_deny=()) if pin.key[0] == "sandbox")
 
 
-def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
-                    config_file: Path | None = None) -> tuple[str, ...]:
-    """F10: the operator's credentials and trust roots, as real paths without duplicates; ``environment`` is the CLI's
-    (``launch.runtime.environment(launch)``); ``config_file`` is Looper's ops file when it lives outside
-    ``runtime_root``. A blacklist: it cannot say "read only the task directory"."""
+class DenyClass(StrEnum):
+    """What a read deny entry holds. The sandbox refuses both alike; a check that watches the paths from outside the
+    sandbox (the eval's read deny probe) tells them apart."""
+
+    AGENT_STATE = "agent_state"  # an agent CLI's configuration or state: its sessions write there at any time
+    CREDENTIAL = "credential"  # a credential or trust root
+
+
+@dataclass(frozen=True)
+class DenyEntry:
+    path: Path
+    deny_class: DenyClass | None = None  # None: not classified, treated as CREDENTIAL; a test refuses it
+
+
+def read_deny_entries(environment: Mapping[str, str], runtime_root: Path,
+                      config_file: Path | None = None) -> tuple[DenyEntry, ...]:
+    """The read deny list as declared, each entry with its class: ``read_deny_paths`` before paths are resolved."""
     from .runtimes import coco_login, codex_login, grok_login
 
     home = Path(environment.get("HOME") or Path.home())
@@ -218,7 +230,7 @@ def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
     logins.append(home / ".copilot")
     if (environment.get("COPILOT_HOME") or "").strip():
         logins.append(Path(environment["COPILOT_HOME"]).expanduser())
-    entries = (
+    credentials = (
         home / ".ssh",  # SSH keys
         home / ".aws",  # cloud credentials
         home / ".gnupg",  # GPG keys
@@ -227,14 +239,40 @@ def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
         *(home / name for name in (*HOME_CREDENTIAL_FILES, *HOME_CREDENTIAL_DIRS, *HOME_HISTORY_FILES,
                                    *HOME_BROWSER_PATHS)),
         *(config_home / name for name in (*CONFIG_CREDENTIAL_DIRS, *CONFIG_CREDENTIAL_FILES)),  # CLI credential stores
+    )
+    agent_state = (
         *claude_dirs,  # Claude Code's whole configuration directory: login, settings with `env`, session transcripts
         home / ".claude.json",  # MCP server definitions with their secrets (inside the directory above when it is set)
         *logins,
+    )
+    looper = (
         home / ".looper",  # the default runtime root, when the active one is elsewhere
         runtime_root,  # Looper's ops file, tokens, generated MCP configs and launch settings
         *([config_file] if config_file is not None else []),  # the ops file, when it lives elsewhere
     )
-    return tuple(dict.fromkeys(os.path.realpath(entry) for entry in entries))
+    return (*(DenyEntry(path, DenyClass.CREDENTIAL) for path in credentials),
+            *(DenyEntry(path, DenyClass.AGENT_STATE) for path in agent_state),
+            *(DenyEntry(path, DenyClass.CREDENTIAL) for path in looper))
+
+
+def read_deny_classes(environment: Mapping[str, str], runtime_root: Path,
+                      config_file: Path | None = None) -> dict[str, DenyClass]:
+    """The read deny list as real paths without duplicates, in order, each with its class. An unclassified entry, and
+    a path declared under both classes, is a CREDENTIAL."""
+    found: dict[str, DenyClass] = {}
+    for entry in read_deny_entries(environment, runtime_root, config_file):
+        real = os.path.realpath(entry.path)
+        if found.get(real) is not DenyClass.CREDENTIAL:
+            found[real] = entry.deny_class or DenyClass.CREDENTIAL
+    return found
+
+
+def read_deny_paths(environment: Mapping[str, str], runtime_root: Path,
+                    config_file: Path | None = None) -> tuple[str, ...]:
+    """F10: the operator's credentials and trust roots, as real paths without duplicates; ``environment`` is the CLI's
+    (``launch.runtime.environment(launch)``); ``config_file`` is Looper's ops file when it lives outside
+    ``runtime_root``. A blacklist: it cannot say "read only the task directory"."""
+    return tuple(read_deny_classes(environment, runtime_root, config_file))
 
 
 def _set(tree: dict[str, Any], key: tuple[str, ...], value: Any) -> None:
