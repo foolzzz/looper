@@ -13,6 +13,9 @@ path. The link count is taken both from that descriptor and from the name it was
 file. At most ``limit + 1`` bytes are read, and a leaf that is not a regular file (a FIFO, a device) is opened
 without blocking and never read. Every descriptor is closed on every path. A refused file is a typed ``Skipped``;
 nothing of its content is kept.
+
+A caller that walks a tree itself uses the same two steps: ``open_directory`` (never through a link, without
+resolving the path first) and ``read_at`` (one name in such a directory).
 """
 
 from __future__ import annotations
@@ -20,7 +23,8 @@ from __future__ import annotations
 import errno
 import os
 import stat
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -140,6 +144,15 @@ def read_inside(boundary: str | Path, path: str | Path, limit: int, *, clip: boo
     except OSError as exc:
         return _io_error(exc)
     try:
+        return _read_opened(directory, fd, name, limit, clip)
+    finally:
+        os.close(fd)
+        os.close(directory)
+
+
+def _read_opened(directory: int, fd: int, name: str, limit: int, clip: bool) -> Content | Skipped:
+    """The open file ``fd``, opened as ``name`` in ``directory``: its first ``limit`` bytes, or why not."""
+    try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return Skipped(Skip.NOT_REGULAR)
@@ -154,9 +167,48 @@ def read_inside(boundary: str | Path, path: str | Path, limit: int, *, clip: boo
         data = _read_bytes(fd, limit + 1)
     except OSError as exc:
         return _io_error(exc)
-    finally:
-        os.close(fd)
-        os.close(directory)
     if len(data) > limit and not clip:  # it grew after it was measured
         return Skipped(Skip.TOO_LARGE)
     return Content(data[:limit], max(st.st_size, len(data)))
+
+
+@contextmanager
+def open_directory(base: str | Path, parts: Collection[str]) -> Iterator[int | Skipped]:
+    """A descriptor of the directory ``parts`` below ``base``, opened one component at a time, ``base``'s own last
+    one included, none through a link; or ``Skip.SYMLINK`` where a component is a link or not a directory, and
+    ``Skip.IO_ERROR`` where it cannot be opened. A component that does not exist raises ``FileNotFoundError``."""
+    held: int | None = None
+    refused: Skipped | None = None
+    try:
+        try:
+            held = _open(str(base), os.O_DIRECTORY)
+            for part in parts:
+                following = _open(part, os.O_DIRECTORY, held)
+                os.close(held)
+                held = following
+        except _LeftTheBoundary:
+            refused = Skipped(Skip.SYMLINK)
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            refused = _io_error(exc)
+        yield held if refused is None else refused
+    finally:
+        if held is not None:
+            os.close(held)
+
+
+def read_at(directory: int, name: str, limit: int) -> Content | Skipped:
+    """The file ``name`` in the open ``directory``, at most ``limit`` bytes: a link, a larger file, one with another
+    hard link and anything but a regular file are refused. A name that is gone is ``Skip.IO_ERROR``."""
+    try:
+        # O_NONBLOCK: opening a FIFO must not wait for a writer
+        fd = _open(name, os.O_NONBLOCK, directory)
+    except _LeftTheBoundary:
+        return Skipped(Skip.SYMLINK)
+    except OSError as exc:
+        return _io_error(exc)
+    try:
+        return _read_opened(directory, fd, name, limit, False)
+    finally:
+        os.close(fd)

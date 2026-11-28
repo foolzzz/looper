@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
 import random
 import shlex
@@ -911,8 +913,255 @@ def test_the_walk_for_dangling_links_reads_no_fifo_and_follows_no_directory_link
     (tmp_path / "elsewhere" / "x").write_text("ref: refs/heads/main\n")
     (repo / ".git" / "refs" / "heads" / "far").symlink_to(tmp_path / "elsewhere")
     (repo / ".git" / "refs" / "tags" / "dang").write_text("ref: refs/heads/nothing\n")
-    found = asyncio.run(asyncio.wait_for(refs._loose_symrefs(repo), 20))
-    assert found == {"refs/tags/dang": "refs/heads/nothing"}  # a link to a path outside refs/ is no symbolic ref
+    found = asyncio.run(asyncio.wait_for(refs.snapshot(repo), 20))
+    assert found.symrefs == {} and found.hops == {"refs/tags/dang": "refs/heads/nothing"}
+    assert set(found.unreadable) == {"refs/heads/pipe", "refs/heads/far"}
+
+
+# --- Nothing outside the git directory is read: swapped directories and linked files ------------------------------
+
+
+MARKER = "outside-marker"
+
+
+def _outside(tmp_path, repo: Path, kind: str) -> tuple[Path, list[str]]:
+    """A file outside the repository shaped like a ref (a symbolic one, or the id of a commit no branch holds), and
+    every spelling of its content that must show nowhere."""
+    folder = tmp_path / "elsewhere"
+    folder.mkdir(exist_ok=True)
+    if kind == "symref":
+        body, secrets = f"ref: refs/heads/{MARKER}\n", [MARKER]
+    else:
+        oid = git(repo, "commit-tree", "-m", MARKER, "HEAD^{tree}")
+        body, secrets = oid + "\n", [oid, oid[:8]]
+    (folder / "x").write_text(body)
+    return folder / "x", secrets
+
+
+def _leaks_nothing(report, caplog, secrets: list[str]) -> None:
+    everything = (*report.changes, *report.info)
+    places = {"report": repr(report), "payload": json.dumps(refs.payload(report, 1, "m")),
+              "log": "\n".join(caplog.handler.format(record) for record in caplog.records),
+              "commands": "\n".join(change.restore for change in everything if change.restore)}
+    for secret in secrets:
+        for place, text in places.items():
+            assert secret not in text, (place, secret)
+
+
+def _typed(report, name: str) -> None:
+    change = by_ref(report)[name]
+    assert change.change.value == "unreadable" and change.restore is None
+    assert change.to_json()["not_restorable"] == "ref_file_unreadable"
+
+
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("existed", [False, True])
+def test_a_directory_swapped_for_a_link_while_the_walk_runs_shows_nothing_outside(repo, tmp_path, monkeypatch, caplog,
+                                                                                  kind, existed):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    folder = repo / ".git" / "refs" / "heads" / "dir"
+    folder.mkdir()
+    if existed:
+        git(repo, "update-ref", "refs/heads/dir/x", "HEAD")
+    real, swapped = os.scandir, []
+
+    def listing(target):
+        with real(target) as found:
+            entries = list(found)
+        if not swapped and any(entry.name == "dir" for entry in entries):  # listed as a directory, not yet opened
+            shutil.rmtree(folder)
+            folder.symlink_to(outside.parent)
+            swapped.append(True)
+        return contextlib.nullcontext(entries) if isinstance(target, int) else iter(entries)
+
+    caplog.set_level("DEBUG")
+    report = run(repo, lambda: monkeypatch.setattr(os, "scandir", listing))
+    assert swapped
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, "refs/heads/dir")
+    if existed:
+        _typed(report, "refs/heads/dir/x")
+    assert report.needs_you
+
+
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("name", ["refs/heads/other", "refs/tags/v1", "refs/heads/fresh"])
+def test_a_ref_file_replaced_by_a_link_to_an_outside_file_shows_nothing_outside(repo, tmp_path, caplog, kind, name):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    path = repo / ".git" / name
+
+    def go():
+        path.unlink(missing_ok=True)
+        path.symlink_to(outside)
+
+    caplog.set_level("DEBUG")
+    report = run(repo, go)
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, name)
+    assert report.needs_you
+
+
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+@pytest.mark.parametrize("why", [None, "git_too_old"])
+@pytest.mark.parametrize("through", ["refs/heads/mid", "refs/hidden/mid"])
+def test_a_link_that_reads_through_a_linked_file_shows_nothing_outside(repo, tmp_path, monkeypatch, caplog, kind, why,
+                                                                       through):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    git(repo, "update-ref", through, "HEAD")
+    git(repo, "symbolic-ref", "refs/heads/outer", through)
+    if why:
+        _without_direct_targets(monkeypatch, why)
+
+    def go():
+        (repo / ".git" / through).unlink()
+        (repo / ".git" / through).symlink_to(outside)
+
+    caplog.set_level("DEBUG")
+    report = run(repo, go)
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, "refs/heads/outer")
+    if through.startswith("refs/heads/"):
+        _typed(report, through)
+
+
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+def test_a_ref_file_linked_while_git_reads_shows_nothing_outside(repo, tmp_path, monkeypatch, caplog, kind):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    path, real = repo / ".git" / "refs" / "heads" / "other", refs._git
+
+    async def swapping(work_dir, *args):
+        if args[0] == "for-each-ref" and not path.is_symlink():  # after Looper's first read of the files
+            path.unlink()
+            path.symlink_to(outside)
+        return await real(work_dir, *args)
+
+    caplog.set_level("DEBUG")
+    report = run(repo, lambda: monkeypatch.setattr(refs, "_git", swapping))
+    _leaks_nothing(report, caplog, secrets)
+    _typed(report, "refs/heads/other")
+
+
+@pytest.mark.parametrize("kind", ["symref", "oid"])
+def test_a_hop_only_the_chain_before_the_turn_read_is_checked_before_it_is_read_again(repo, tmp_path, caplog, kind):
+    outside, secrets = _outside(tmp_path, repo, kind)
+    hidden = repo / ".git" / "refs" / "hidden" / "x"
+    git(repo, "update-ref", "refs/hidden/x", "HEAD")
+    git(repo, "symbolic-ref", "refs/heads/up", "refs/hidden/x")
+
+    def go():
+        git(repo, "symbolic-ref", "refs/heads/up", "refs/heads/other")
+        hidden.unlink()
+        hidden.symlink_to(outside)
+
+    caplog.set_level("DEBUG")
+    report = run(repo, go)
+    _leaks_nothing(report, caplog, secrets)
+    change = by_ref(report)["refs/heads/up"]
+    assert change.restore is None and change.not_restorable.value == "ref_file_unreadable"
+
+
+def test_the_old_symlink_spelling_of_a_symbolic_ref_is_still_read(repo):
+    (repo / ".git" / "refs" / "heads" / "old-style").symlink_to("refs/heads/other")
+    found = asyncio.run(refs.snapshot(repo))
+    assert found.hops == {"refs/heads/old-style": "refs/heads/other"} and not found.unreadable
+
+
+def test_a_linked_worktree_reads_the_ref_files_of_the_common_directory(repo, tmp_path):
+    tree = tmp_path / "tree"
+    git(repo, "worktree", "add", "-q", str(tree), "other")
+    git(repo, "symbolic-ref", "refs/heads/dang", "refs/heads/nothing")
+    found = asyncio.run(refs.snapshot(tree))
+    assert found.hops == {"refs/heads/dang": "refs/heads/nothing"} and not found.unreadable
+    assert found.head == "refs/heads/other"
+
+
+@pytest.mark.parametrize("name", ["packed-refs", "HEAD"])
+def test_a_linked_packed_refs_or_head_refuses_the_whole_snapshot(repo, tmp_path, caplog, name):
+    from looper.agents.tiers.task_manager import Refused
+    folder = tmp_path / "elsewhere"
+    folder.mkdir()
+    oid = git(repo, "rev-parse", "HEAD")
+    (folder / name).write_text(f"{oid} refs/heads/{MARKER}\n" if name == "packed-refs"
+                               else f"ref: refs/heads/{MARKER}\n")
+    (repo / ".git" / name).unlink(missing_ok=True)
+    (repo / ".git" / name).symlink_to(folder / name)
+    caplog.set_level("DEBUG")
+    with pytest.raises(Refused) as refused:
+        asyncio.run(refs.snapshot(repo))
+    assert MARKER not in str(refused.value) and MARKER not in caplog.text
+
+
+def _spoil(repo: Path, tmp_path, monkeypatch, how: str) -> None:
+    path = repo / ".git" / "refs" / "heads" / "odd"
+    path.write_text("ref: refs/heads/nothing\n")
+    if how == "fifo":
+        path.unlink()
+        os.mkfifo(path)
+    elif how == "too_large":
+        path.write_text("ref: refs/heads/" + "a" * 5000)
+    elif how == "hard_link":
+        os.link(path, tmp_path / "second-name")
+    elif how == "no_permission":
+        path.chmod(0)
+    else:  # gone, or a link by now, between the listing and the open
+        real = os.scandir
+
+        def listing(target):
+            with real(target) as found:
+                entries = list(found)
+            if any(entry.name == "odd" for entry in entries) and path.is_file() and not path.is_symlink():
+                path.unlink()
+                if how == "link_race":
+                    path.symlink_to(tmp_path / "elsewhere-file")
+            return contextlib.nullcontext(entries)
+
+        monkeypatch.setattr(os, "scandir", listing)
+
+
+@pytest.mark.parametrize("how", ["fifo", "too_large", "hard_link", "no_permission", "vanished", "link_race"])
+def test_every_read_failure_of_a_ref_file_is_a_typed_entry(repo, tmp_path, monkeypatch, how):
+    if how == "no_permission" and os.geteuid() == 0:
+        pytest.skip("root reads every file")
+
+    async def go():
+        before = await refs.snapshot(repo)
+        _spoil(repo, tmp_path, monkeypatch, how)
+        after = await asyncio.wait_for(refs.snapshot(repo), 20)
+        return await refs.compare(repo, before, after, task_branch="main", task_id=TASK, active_task=inactive)
+
+    report = asyncio.run(go())
+    assert [c.ref for c in report.changes] == ["refs/heads/odd"] and report.needs_you
+    _typed(report, "refs/heads/odd")
+
+
+def test_a_linked_refs_directory_is_a_typed_entry_in_every_report(repo, tmp_path):
+    heads = repo / ".git" / "refs" / "heads"
+    shutil.move(heads, tmp_path / "heads")
+    heads.symlink_to(tmp_path / "heads")
+    report = run(repo, lambda: None)
+    assert [c.ref for c in report.changes] == ["refs/heads"]
+    _typed(report, "refs/heads")
+
+
+def test_a_linked_refs_parent_is_not_skipped_because_of_what_it_points_to(repo, tmp_path):
+    refs_dir = repo / ".git" / "refs"
+    shutil.move(refs_dir, tmp_path / "refs")
+    shutil.rmtree(tmp_path / "refs" / "tags")
+    (tmp_path / "refs" / "tags").write_text("not a directory\n")  # looks like a reftable stub, through a link
+    refs_dir.symlink_to(tmp_path / "refs")
+    files = asyncio.run(refs._ref_files(repo))
+    assert set(files.unreadable) == {"refs/heads", "refs/tags"} and files.links == {}
+
+
+def test_a_reftable_repository_is_still_read(tmp_path):
+    path = tmp_path / "table"
+    made = subprocess.run(["git", "init", "-q", "-b", "main", "--ref-format=reftable", str(path)],
+                          capture_output=True, timeout=30)
+    if made.returncode:
+        pytest.skip("this git cannot make a reftable repository")
+    commit(path, "a.txt")
+    report = run(path, lambda: git(path, "branch", "fresh"))
+    assert [(c.ref, c.change) for c in report.changes] == [("refs/heads/fresh", Change.CREATED)]
 
 
 # --- Chains Looper cannot know: the report says why instead of offering a command

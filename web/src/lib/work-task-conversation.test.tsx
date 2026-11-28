@@ -318,7 +318,8 @@ describe("task conversation", () => {
         head: { before: "refs/heads/main", after: null }, info: [change("refs/heads/looper/t2/task", "moved", old, moved, "git update-ref refs/heads/looper/t2/task A B")],
         changes: [change("refs/heads/oth\\u202eer", "moved", old, moved, `git update-ref refs/heads/other ${old} ${moved}`),
           change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`),
-          change("refs/heads/big", "fast_forward_unverified", old, moved, `git update-ref refs/heads/big ${old} ${moved}`)] },
+          change("refs/heads/big", "fast_forward_unverified", old, moved, `git update-ref refs/heads/big ${old} ${moved}`),
+          { ref: "refs/heads/dir", change: "unreadable", old: null, new: null, restore: null, not_restorable: "ref_file_unreadable" }] },
     ];
     const bad = [
       { kind: "sandbox_notice", notice: "other", detail: "x" },
@@ -339,6 +340,8 @@ describe("task conversation", () => {
     expect(report.textContent).toContain("refs/heads/main 被改写（不是快进）");
     expect(report.textContent).toContain("refs/heads/big 无法确认是否为快进（aaaaaaaa → bbbbbbbb）");
     expect(report.textContent).toContain("不能说它被重置过");
+    expect(report.textContent).toContain("refs/heads/dir 没有读取，是否变化未知");
+    expect(report.textContent).toContain("Looper 没有读它");
     expect(report.textContent).not.toMatch(/refs\/heads\/big 被改写/);
     expect(report.textContent).toContain("reset --hard、rebase 或 commit --amend");
     expect(report.textContent).toContain("属于另一个 Looper 任务");

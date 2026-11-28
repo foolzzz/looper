@@ -11,6 +11,10 @@ The task branch is recorded once, at the first enablement. A turn refuses to sta
 Every git call goes through ``git_safe`` (no repository code runs). Only ``refs/heads`` and ``refs/tags`` are listed
 and compared; any other ref (``refs/remotes`` too) is read only as a hop of a symbolic ref's chain.
 
+Looper opens ref files itself only through descriptors under the git directory, never through a link
+(``_ref_files``). git does follow links there, so a ref whose file or directory Looper refuses, and every link that
+reads through one, is left out of the snapshot (``Snapshot.unreadable``): nothing git said about it is kept.
+
 A symbolic ref is recorded hop by hop (``Snapshot.hops``). Refs that such chains tie together are restored by one
 command: a single ``git update-ref`` transaction that checks every hop it reads through and puts back every hop that
 changed, or changes nothing. When the chains cannot be known, the report says so (``NotRestorable``) instead.
@@ -22,6 +26,7 @@ import logging
 import os
 import re
 import shlex
+import stat
 import unicodedata
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -30,7 +35,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import git_safe, task_manager_safety
+from . import git_safe, safe_read, task_manager_safety
 from ..db import task_manager_refs as store
 
 if TYPE_CHECKING:
@@ -54,6 +59,10 @@ WALK_LIMIT = 20000  # commits read when deciding fast-forward
 OBJECT_LIMIT = 1 << 20  # a commit object larger than this ends the walk undecided
 SYMREF_LIMIT = 200  # symbolic refs asked for their direct target (one git process each) in one snapshot
 SYMREF_GIT = (2, 46)  # the first git whose ``update-ref --stdin`` checks and writes symbolic refs
+REF_FILE_LIMIT = 4096  # bytes of a loose ref file; a larger one is not read
+_ROOTS = ("refs/heads", "refs/tags")
+# What git's ref-name rules forbid, as far as a name used as a path must be checked.
+_NOT_A_REF_NAME = re.compile(r"\.\.|//|/\.|\.lock(/|$)|[\x00-\x20\x7f~^:?*\[\\]|[/.]$")
 _OID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
@@ -71,6 +80,7 @@ class Change(str, Enum):
     MOVED = "moved"
     NON_FAST_FORWARD = "non_fast_forward"
     FAST_FORWARD_UNVERIFIED = "fast_forward_unverified"  # the bounded walk gave up: neither a reset nor a fast-forward is claimed
+    UNREADABLE = "unreadable"  # not read, so nothing is claimed about it
 
 
 class Ancestry(Enum):
@@ -86,6 +96,7 @@ class NotRestorable(str, Enum):
     GIT_TOO_OLD = "git_too_old"  # older than ``SYMREF_GIT``: no command can check and write a symbolic ref
     CHAIN_OUTSIDE_REFS = "chain_outside_refs"  # a hop outside ``refs/``, such as ``HEAD``: Looper never writes those
     CHAIN_UNREADABLE = "chain_unreadable"  # git could not read a hop of the chain
+    REF_FILE_UNREADABLE = "ref_file_unreadable"  # Looper refused a ref file or directory the ref is read from
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,8 @@ class Snapshot:
     # Refs outside branches and tags that a chain reads through and that are not symbolic: the value, None when missing.
     outside: Mapping[str, str | None] = field(default_factory=dict)
     gap: NotRestorable | None = None  # why symbolic refs here have no direct target in ``hops``
+    # Ref files and directories Looper refused, and the links that read through one; nothing else here holds them.
+    unreadable: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -186,8 +199,15 @@ def _resolved(snap: Snapshot, name: str) -> str | None:
     return snap.refs.get(end) or snap.outside.get(end)
 
 
+def _within(name: str, refused: Iterable[str]) -> bool:
+    """Whether ``name``, or a directory it is in, is one of ``refused``."""
+    return any(name == path or name.startswith(path + "/") for path in refused)
+
+
 def _gap(before: Snapshot, after: Snapshot, names: Iterable[str]) -> NotRestorable | None:
     """Why no command can check and restore the refs ``names``, or None."""
+    if any(_within(name, before.unreadable | after.unreadable) for name in names):
+        return NotRestorable.REF_FILE_UNREADABLE
     for name in sorted(names):
         if not name.startswith("refs/"):
             return NotRestorable.CHAIN_OUTSIDE_REFS
@@ -313,48 +333,177 @@ def _unreadable(detail: str):
     return Refused(RefuseReason.WORKSPACE, detail)
 
 
-async def _loose_symrefs(work_dir: str | Path) -> dict[str, str]:
-    """The names under ``refs/heads`` and ``refs/tags`` whose loose ref file is a symbolic ref, with the target the
-    file spells. git does not list one that dangles, and a symbolic ref is never packed, so the files are the only
-    place to find those (not in a reftable repository). git reads the targets a command is built from; the spelled
-    one only tells changes apart where git is not asked."""
-    code, common = await _git(work_dir, "rev-parse", "--git-common-dir")
-    if code:
-        raise _unreadable(f"{work_dir} is not a git repository Looper can read (git exit {code}).")
-    base = os.path.join(str(work_dir), common.removesuffix("\n"))
+@dataclass
+class _Files:
+    """What Looper itself read of the loose ref files."""
 
-    def walk() -> dict[str, str]:
-        found, pending = {}, ["refs/heads", "refs/tags"]
-        while pending:
-            folder = pending.pop()
-            try:
-                entries = list(os.scandir(os.path.join(base, folder)))
-            except FileNotFoundError:
-                continue
-            for entry in entries:
-                name = f"{folder}/{entry.name}"
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(name)
-                elif entry.is_symlink():  # the old spelling of a symbolic ref
-                    if (target := os.readlink(entry.path)).startswith("refs/"):
-                        found[name] = target
-                elif entry.is_file(follow_symlinks=False) and not name.endswith(".lock"):
-                    try:  # the directory is the model's: never follow or block on what appears there
-                        handle = os.open(entry.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-                        try:
-                            body = os.read(handle, 4096)
-                            if body.startswith(b"ref:"):
-                                found[name] = os.fsdecode(body[4:].strip())
-                        finally:
-                            os.close(handle)
-                    except FileNotFoundError:
+    links: dict[str, str] = field(default_factory=dict)  # symbolic ref -> the target its file (or link) spells
+    unreadable: dict[str, str] = field(default_factory=dict)  # ref or directory -> why it was refused
+
+
+async def _git_dirs(work_dir: str | Path) -> tuple[str, str]:
+    """The git directory and the common one (they differ in a linked worktree)."""
+    found = []
+    for option in ("--git-dir", "--git-common-dir"):
+        code, path = await _git(work_dir, "rev-parse", option)
+        if code:
+            raise _unreadable(f"{work_dir} is not a git repository Looper can read (git exit {code}).")
+        found.append(os.path.join(str(work_dir), path.removesuffix("\n")))
+    return found[0], found[1]
+
+
+def _check_top_files(git_dir: str, common: str) -> None:
+    """``HEAD`` and ``packed-refs``, which git reads whole, must be files of their own (``HEAD`` may be the old
+    symbolic-ref link): a link to elsewhere would have git report what is there. Neither is read here."""
+    for folder, name in ((git_dir, "HEAD"), (common, "packed-refs")):
+        refused = _unreadable(f"Looper does not read the repository's {name}: it is not a regular file of its own.")
+        try:
+            with safe_read.open_directory(folder, []) as directory:
+                if isinstance(directory, safe_read.Skipped):
+                    raise refused
+                found = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (name == "HEAD" and stat.S_ISLNK(found.st_mode)
+                        and _is_ref_name(os.readlink(name, dir_fd=directory))):
+                    continue
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(found.st_mode) or found.st_nlink > 1:
+            raise refused
+
+
+def _is_plain_file(common: str, path: str) -> bool:
+    """Whether ``path`` below ``common`` is a regular file, reached through no link."""
+    *parts, leaf = path.split("/")
+    with safe_read.open_directory(common, parts) as directory:
+        return (not isinstance(directory, safe_read.Skipped)
+                and stat.S_ISREG(os.stat(leaf, dir_fd=directory, follow_symlinks=False).st_mode))
+
+
+def _is_ref_name(name: str) -> bool:
+    return name.startswith("refs/") and not _NOT_A_REF_NAME.search(name)
+
+
+def _read_entry(directory: int, entry: str, name: str, files: _Files) -> None:
+    """One name in an open ref directory that is not a directory: record the link it spells, or why it is refused."""
+    try:
+        if stat.S_ISLNK(os.stat(entry, dir_fd=directory, follow_symlinks=False).st_mode):
+            target = os.readlink(entry, dir_fd=directory)  # the old spelling of a symbolic ref
+            if _is_ref_name(target):
+                files.links[name] = target
+            else:
+                files.unreadable[name] = safe_read.Skip.SYMLINK.value
+            return
+    except OSError as exc:
+        files.unreadable[name] = type(exc).__name__
+        return
+    read = safe_read.read_at(directory, entry, REF_FILE_LIMIT)
+    if isinstance(read, safe_read.Skipped):
+        files.unreadable[name] = read.reason.value
+    elif read.data.startswith(b"ref:"):
+        files.links[name] = os.fsdecode(read.data[4:].strip())
+
+
+def _walk(common: str, files: _Files) -> None:
+    """Every loose ref file under ``refs/heads`` and ``refs/tags``. Each directory is opened from ``common`` one
+    component at a time and listed through that descriptor, so a directory swapped for a link is refused."""
+    pending = list(_ROOTS)
+    while pending:
+        folder = pending.pop()
+        try:
+            with safe_read.open_directory(common, folder.split("/")) as directory:
+                if isinstance(directory, safe_read.Skipped):
+                    # A regular file where a root belongs (a reftable repository): nothing can be read under it.
+                    if not (folder in _ROOTS and _is_plain_file(common, folder)):
+                        files.unreadable[folder] = directory.reason.value
+                    continue
+                with os.scandir(directory) as listing:
+                    entries = [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in listing]
+                for entry, is_directory in entries:
+                    if entry.endswith(".lock"):  # no ref name ends so
                         continue
-        return dict(sorted(found.items()))
+                    if is_directory:
+                        pending.append(f"{folder}/{entry}")
+                    else:
+                        _read_entry(directory, entry, f"{folder}/{entry}", files)
+        except FileNotFoundError:
+            if folder not in _ROOTS:  # it was listed a moment ago
+                files.unreadable[folder] = "FileNotFoundError"
+        except OSError as exc:
+            files.unreadable[folder] = type(exc).__name__
+
+
+def _probe_chains(common: str, names: Iterable[str], files: _Files) -> None:
+    """The loose files of the refs outside branches and tags among ``names``, and of what those spell as targets.
+    One that does not exist is packed or missing."""
+    queue, seen = deque(names), set()
+    while queue:
+        name = queue.popleft()
+        if name in seen or name.startswith(COMPARED) or not name.startswith("refs/"):
+            continue
+        seen.add(name)
+        if not _is_ref_name(name):
+            files.unreadable[name] = "not_a_ref_name"
+            continue
+        *parts, leaf = name.split("/")
+        try:
+            with safe_read.open_directory(common, parts) as directory:
+                if isinstance(directory, safe_read.Skipped):
+                    files.unreadable[name] = directory.reason.value
+                    continue
+                os.stat(leaf, dir_fd=directory, follow_symlinks=False)
+                _read_entry(directory, leaf, name, files)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            files.unreadable[name] = type(exc).__name__
+            continue
+        if name in files.links:
+            queue.append(files.links[name])
+
+
+async def _ref_files(work_dir: str | Path, names: Iterable[str] = (), *, walk: bool = True) -> _Files:
+    """The loose ref files of ``work_dir``'s repository: all branches and tags (``walk``), and the chains through
+    ``names`` and through the links found. git does not list a symbolic ref that dangles, and a symbolic ref is never
+    packed, so the files are the only place to find those (not in a reftable repository). git reads the targets a
+    command is built from; a spelled one only tells changes apart where git is not asked."""
+    git_dir, common = await _git_dirs(work_dir)
+    wanted = list(names)
+
+    def read() -> _Files:
+        _check_top_files(git_dir, common)
+        files = _Files()
+        if walk:
+            _walk(common, files)
+        _probe_chains(common, [*wanted, *files.links.values()], files)
+        return files
 
     try:
-        return await asyncio.to_thread(walk)
+        return await asyncio.to_thread(read)
     except OSError as exc:
         raise _unreadable(f"Looper cannot read the branch and tag files ({type(exc).__name__}).") from None
+
+
+def _without_unreadable(snap: Snapshot, *found: _Files) -> Snapshot:
+    """``snap`` without any ref Looper refused, or that reads through one, by any hop either git or a file spells:
+    git follows links, so what it said about those may come from outside the git directory."""
+    refused = set(snap.unreadable).union(*(files.unreadable for files in found))
+    if not refused:
+        return snap
+    edges = [pair for links in (*(files.links for files in found), snap.hops, snap.symrefs) for pair in links.items()]
+    grew = True
+    while grew:
+        tainted = {name for name, target in edges if _within(target, refused) and not _within(name, refused)}
+        refused |= tainted
+        grew = bool(tainted)
+
+    def keep(values: Mapping[str, Any]) -> dict[str, Any]:
+        return {name: value for name, value in values.items() if not _within(name, refused)}
+
+    if snap.unreadable != refused:
+        logger.warning("task Manager refs: %d ref files, directories or links through them are not read", len(refused))
+    head = None if snap.head is not None and _within(snap.head, refused) else snap.head
+    return replace(snap, refs=keep(snap.refs), head=head, symrefs=keep(snap.symrefs), hops=keep(snap.hops),
+                   outside=keep(snap.outside), unreadable=frozenset(refused))
 
 
 async def _symref_gap(work_dir: str | Path, count: int) -> NotRestorable | None:
@@ -377,7 +526,8 @@ async def _follow(work_dir: str | Path, snap: Snapshot, names: Iterable[str]) ->
     hops, outside, queue = dict(snap.hops), dict(snap.outside), deque(names)
     while queue:
         name = queue.popleft()
-        if name.startswith(COMPARED) or not name.startswith("refs/") or name in hops or name in outside:
+        if (name.startswith(COMPARED) or not name.startswith("refs/") or name in hops or name in outside
+                or _within(name, snap.unreadable)):
             continue
         code, target = await _git(work_dir, "symbolic-ref", "-q", "--no-recurse", name)
         if code == 0:
@@ -396,7 +546,10 @@ async def snapshot(work_dir: str | Path) -> Snapshot:
     and where ``HEAD`` points. Packed refs, ``gc``, reflogs and index changes do not show in these values.
 
     A listing that cannot be told apart from another (a ref name holding a character ``str.splitlines`` breaks
-    lines on, or two records of one name) is a read failure, never a last-write-wins value."""
+    lines on, or two records of one name) is a read failure, never a last-write-wins value.
+
+    The ref files are read before git and again after it, so one swapped for a link meanwhile is refused too."""
+    first = await _ref_files(work_dir)
     code, listing = await _git(work_dir, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)",
                                "refs/heads", "refs/tags")
     if code:
@@ -416,13 +569,24 @@ async def snapshot(work_dir: str | Path) -> Snapshot:
         refs[ref] = sha
         if target:
             symrefs[ref] = target
-    dangling = {name: target for name, target in (await _loose_symrefs(work_dir)).items() if name not in refs}
-    if any((_LINE_BREAKS | {"\n"}) & set(name) for name in dangling):
+    dangling = {name: target for name, target in sorted(first.links.items())
+                if name.startswith(COMPARED) and name not in refs}
+    if any((_LINE_BREAKS | {"\n"}) & set(name) for name in (*dangling, *first.unreadable)):
         raise _unreadable("A branch or tag name holds a line-break character; Looper cannot read the refs safely.")
     code, head = await _git(work_dir, "symbolic-ref", "-q", "HEAD")
     # Only the trailing newline goes: ref names may end in (or hold) Unicode whitespace.
     head = head.removesuffix("\n") if code == 0 else ""
     found = Snapshot(refs, head if head.startswith(HEADS) else None, symrefs)
+    found = await _read_hops(work_dir, _without_unreadable(found, first), dangling)
+    second = await _ref_files(work_dir, [*found.hops.values(), *found.outside])
+    return _without_unreadable(found, first, second)
+
+
+async def _read_hops(work_dir: str | Path, found: Snapshot, dangling: Mapping[str, str]) -> Snapshot:
+    """``found`` with every hop of its symbolic refs, the ``dangling`` ones included, or with the reason there are
+    none."""
+    dangling = {name: target for name, target in dangling.items() if not _within(name, found.unreadable)}
+    symrefs = found.symrefs
     links = [*symrefs, *dangling]
     if not links:
         return found
@@ -577,16 +741,27 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
                   active_task: Callable[[str], Awaitable[bool]] = _active_task) -> Report:
     """What changed between two snapshots, with no side effect (it may read more refs: the ones a chain read through
     before the turn and no chain does now)."""
-    after = await _follow(work_dir, after, [*before.hops.values(), *before.outside])
+    earlier = [*before.hops.values(), *before.outside]
+    first = await _ref_files(work_dir, earlier, walk=False)
+    after = await _follow(work_dir, _without_unreadable(after, first), earlier)
+    after = _without_unreadable(after, first, await _ref_files(work_dir, earlier, walk=False))
+    refused = before.unreadable | after.unreadable
     # (entry without its command, the refs the command concerns, whether it is information only)
     entries: list[tuple[RefChange, set[str], bool]] = []
     task_ref, own_commits, needs_you = HEADS + task_branch, 0, False
     kept: dict[str, Value] = {}  # the task branch, where a command leaves other than its value before the turn
-    names = {name for snap in (before, after) for name in (*snap.refs, *snap.symrefs, *snap.hops)
-             if name.startswith(COMPARED)}
+    names = {name for snap in (before, after) for name in (*snap.refs, *snap.symrefs, *snap.hops, *snap.unreadable)
+             if name.startswith(COMPARED) or name in _ROOTS}
     for ref in sorted(names, key=lambda name: (name != task_ref, name)):  # the task branch first
         was, now = _value(before, ref), _value(after, ref)
         old, new = before.refs.get(ref), after.refs.get(ref)
+        owner = ref.removeprefix(LOOPER).split("/", 1) if ref.startswith(LOOPER) else None
+        informs = bool(ref != task_ref and owner and len(owner) == 2 and owner[0] != task_id
+                       and await active_task(owner[0]))
+        if _within(ref, refused):  # whether it changed cannot be known: said in every report, never skipped
+            needs_you = needs_you or (ref != task_ref and not informs)
+            entries.append((RefChange(display(ref), Change.UNREADABLE, old, new, None), {ref}, informs))
+            continue
         changed = _differs(before, after, ref)
         path = _chain(before, ref)
         linked = ref in before.symrefs or ref in before.hops
@@ -617,9 +792,6 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
                 else Change.MOVED if ref != task_ref or verdict is Ancestry.DESCENDS
                 else Change.FAST_FORWARD_UNVERIFIED if verdict is Ancestry.UNDECIDED
                 else Change.NON_FAST_FORWARD)
-        owner = ref.removeprefix(LOOPER).split("/", 1) if ref.startswith(LOOPER) else None
-        informs = bool(ref != task_ref and owner and len(owner) == 2 and owner[0] != task_id
-                       and await active_task(owner[0]))
         needs_you = needs_you or (ref != task_ref and not informs)
         entries.append((RefChange(display(ref), kind, old, new, None), {*path, *_chain(after, ref)}, informs))
     commands = _commands(before, after, [scope for _, scope, _ in entries], kept)

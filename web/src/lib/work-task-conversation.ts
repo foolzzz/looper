@@ -48,8 +48,8 @@ const SUMMARY_MODES = ["direct", "orchestrated"] as const;
 const SANDBOX_CATEGORIES = ["network", "write", "other"] as const;
 const SANDBOX_CASES = ["not_allowed", "unsupported_client", "unknown", "not_allowable"] as const;
 const SANDBOX_CLIENTS = ["go_tls"] as const;
-const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward", "fast_forward_unverified"] as const;
-const NOT_RESTORABLE = ["too_many_symrefs", "git_too_old", "chain_outside_refs", "chain_unreadable"] as const;
+const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward", "fast_forward_unverified", "unreadable"] as const;
+const NOT_RESTORABLE = ["too_many_symrefs", "git_too_old", "chain_outside_refs", "chain_unreadable", "ref_file_unreadable"] as const;
 const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable"] as const;
 const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
@@ -223,6 +223,7 @@ function asEvent(value: unknown): TaskEvent | null {
 const CHANGE_TEXT: Record<RefChange["change"], string> = {
   created: "新建", deleted: "被删除", moved: "被移动", non_fast_forward: "被改写（不是快进）",
   fast_forward_unverified: "无法确认是否为快进",
+  unreadable: "没有读取，是否变化未知",
 };
 const shortId = (id: string | null) => (id ? id.slice(0, 8) : "无");
 const NON_FAST_FORWARD_WARNING = "执行 reset --hard、rebase 或 commit --amend 之后恢复这个引用，工作区会留下一份撤销那些提交的差异；不要不看就提交它。";
@@ -232,6 +233,7 @@ const NOT_RESTORABLE_TEXT: Record<(typeof NOT_RESTORABLE)[number], string> = {
   git_too_old: "本机的 git 版本低于 2.46，无法核对并改写符号引用",
   chain_outside_refs: "引用链经过 refs/ 之外的名字（例如 HEAD），Looper 不改写它",
   chain_unreadable: "git 读不出引用链中的某一跳",
+  ref_file_unreadable: "它要读的引用文件或目录是指向别处的链接、不是独立的普通文件、过大或读取失败，Looper 没有读它",
 };
 const FIRST_ENABLE_TEXT = "管家在你的真实检出目录里直接改文件；v1 只报告分支和标签的变化，不会恢复，删掉的对象也找不回来，建议先把重要分支推送或备份。";
 
