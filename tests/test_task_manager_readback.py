@@ -349,6 +349,13 @@ def test_a_fixed_shared_root_the_sandbox_does_not_deny_is_refused(case, missing)
     assert [m.item for m in case.compare()] == ["dialog.writes_denied"]
 
 
+def test_the_fixed_shared_roots_must_be_denied_even_when_the_pins_do_not_name_them(case) -> None:
+    pins = sandbox.pins(case.work, allowed_domains=("api.example.com",), read_deny=READ_DENY, write_deny=())
+    case.expected = replace(case.expected, pins=pins)
+    _writes(case, denied=sandbox.git_deny_write(case.work))
+    assert [m.item for m in case.compare()] == ["dialog.writes_denied"]
+
+
 # --- the positive check of a turn's system/init ---
 
 MCP = frozenset({"mcp__docs__do", "mcp__looper__do"})
