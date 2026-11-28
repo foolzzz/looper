@@ -64,7 +64,9 @@ def test_stop_completes_when_a_cleanup_step_fails(monkeypatch, tmp_path, caplog,
         assert "task-stop" not in router._planners
         planner.stop.assert_awaited_once()
         assert ended == [("task-stop", "stopped")]
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING and r.exc_info]
+        # caplog records every logger that reaches the root handler; count only the stop path's own logger.
+        warnings = [r for r in caplog.records
+                    if r.name == "looper.agents.tiers.task" and r.levelno == logging.WARNING and r.exc_info]
         # release_queued also runs when the task ends, so it fails (and is logged) once more there.
         assert len(warnings) == (2 if failing == "release_queued" else 1)
         assert all(failing in r.getMessage() for r in warnings)

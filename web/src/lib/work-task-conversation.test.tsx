@@ -219,7 +219,7 @@ describe("task conversation", () => {
       { kind: "turn_summary", files: ["src/b.ts"], commit: null, mode: "direct", uncommitted: ["src/b.ts"] },
       { kind: "turn_summary", files: ["src/c.ts"], commit: null, mode: "direct", unverified: ["src/c.ts"] },
       { kind: "refused", reason: "orchestrated", status: "running" },
-      ...["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"].map((reason) => ({ kind: "refused", reason })),
+      ...["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"].map((reason) => ({ kind: "refused", reason })),
       { kind: "queued", reason: "cap", position: 1, active: 6, type: "queued" },
       { kind: "sandbox_denial", tool_use_id: "tu-a", category: "network", case: "not_allowed", target: "blocked.example:443", client: null, command_name: "curl" },
       { kind: "sandbox_denial", tool_use_id: "tu-b", category: "network", case: "unsupported_client", target: "api.example:443", client: "go_tls", command_name: "gh" },
@@ -259,7 +259,7 @@ describe("task conversation", () => {
     expect(text).toContain("已拒绝（budget）");
     expect(text).toContain("已拒绝（manager_answers_off）");
     expect(text).toContain("已拒绝（mcp_unresolved）");
-    for (const reason of ["sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"]) {
+    for (const reason of ["sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"]) {
       expect(text).toContain(`已拒绝（${reason}）`);
     }
     expect(text).toContain("命令 curl 访问 `blocked.example:443` 被拒绝；该域名不在本项目的白名单里，操作者可在项目的任务管家沙箱设置里放行");

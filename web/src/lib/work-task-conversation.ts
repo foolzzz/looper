@@ -51,7 +51,7 @@ const SANDBOX_CLIENTS = ["go_tls"] as const;
 const REF_CHANGES = ["created", "deleted", "moved", "non_fast_forward", "fast_forward_unverified"] as const;
 const NOT_RESTORABLE = ["too_many_symrefs", "git_too_old", "chain_outside_refs", "chain_unreadable"] as const;
 const SANDBOX_NOTICES = ["first_enable_in_place", "refs_unreadable"] as const;
-const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "worktree_unsupported", "head_moved", "head_detached"] as const;
+const REFUSED = ["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"] as const;
 
 type RefChange = { ref: string; change: (typeof REF_CHANGES)[number]; old: string | null; new: string | null }
   & ({ restore: string } | { restore: null; not_restorable: (typeof NOT_RESTORABLE)[number] });

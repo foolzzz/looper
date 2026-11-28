@@ -45,7 +45,7 @@ _PI_VERSION = re.compile(r"^1\.3\.\d+$")
 
 
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
-    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label)
+    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label, cwd)
                if cwd is not None else "")
     notes = runtime_notes().rsplit("\n", 1)[0] + (
         "\n- Looper's platform tools are named looper_* (for example looper_tasks).")

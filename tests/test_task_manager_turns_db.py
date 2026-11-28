@@ -97,8 +97,8 @@ def test_turn_stream_records_and_session(monkeypatch, tmp_path, native):
             assert len(sink.tools) == 2
             first, second = sink.tools
             assert first.tool_use_id == second.tool_use_id == "tool-call"
-            assert first.name == second.name == "Read" and first.result == "" and "contents" in second.result
-            assert "file_path" in first.args and max(len(first.args), len(second.result)) <= 200
+            assert first.name == second.name == "Bash" and first.result == "" and "contents" in second.result
+            assert "command" in first.args and max(len(first.args), len(second.result)) <= 200
             assert any(kind == "turn_summary" and payload["commit"] is None for kind, payload in sink.events)
             assert sink.finals[0][0] == "onetwo"
             records = await llm_records.list_records(task_id=task_id, pool=db)
@@ -132,11 +132,14 @@ def test_unknown_cost_warns_but_allows_turn(monkeypatch, tmp_path, native):
 def test_fifo_stop_then_next_turn_and_start_exclusion(monkeypatch, tmp_path, native):
     async def check(db):
         task_id, _, _ = await native.create(db)
+        # The stand-in sends its init a moment after it records the input; the delay widens that gap.
+        native.transcript.with_name("readback-override.json").write_text('{"init_delay": 0.3}')
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:
             first, second = Sink(), Sink()
             assert (await pool.submit(task_id, "wait", message_id="one", sink=first)).state == "started"
             await until(lambda: len(native.records("input")) == 1)
+            await until(lambda: pool.agent(task_id).session_id is not None)
             assert pool.in_turn(task_id)
             bus = type("Bus", (), {"publish": AsyncMock()})()
             with pytest.raises(project_service.RequestError, match="task Manager is working") as error:

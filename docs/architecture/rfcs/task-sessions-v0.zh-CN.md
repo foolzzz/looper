@@ -584,7 +584,7 @@ draft、init ──删除──→ （删除）
 | F8 | MCP | `--strict-mcp-config`，只含 Looper 自己的 MCP 服务加操作者白名单（`tasks.conversations.manager_mcp`，#1852）；白名单名字的定义只从**用户层**配置解析（第 25.6 节） | 工作目录里的 `.mcp.json` 在 `--print` 加 bypass 下无需审批就加载，并在沙箱外运行（实测）。`--setting-sources user` 下项目的 `.mcp.json` 也不登记；严格模式仍然需要，用来挡用户层和 local 层之外的来源，并让集合恰好等于白名单 |
 | F9 | 内置工具白名单 | `--tools "Bash"`，再加 Looper 自己的任务工具和已放行 MCP 服务器的工具；预期集合还包括 `EndConversation` 和 `WaitForMcpServers`（见下）；同时在注入的 `env` 里钉 `ENABLE_TOOL_SEARCH=false` | **白名单，不是黑名单。** 沙箱只管 Bash 子进程，别的内置工具在沙箱外，bypass 下不经提示：`Write`、`Edit`、`NotebookEdit` 实测能写任意路径，`WebFetch` 实测直连非白名单端口；按文档，`Monitor` 的 WebSocket 来源由 CLI 自己直连、`SendMessage` 能向操作者本机的其他会话发消息（双方 bypass 时不经批准）、`EnterWorktree` 能把会话的工作目录和写权限移到别的 worktree、`Artifact`、`RemoteTrigger`、`SendUserFile`、`PushNotification` 等有不经白名单的上传或远端通道、`LSP` 在沙箱外处理这个不可信的工作区、`CronCreate`、`ScheduleWakeup` 会在 Looper 的回合循环之外起回合。这些里有的在 `--print` 会话里出不出现取决于版本和账号，所以不逐个列黑名单：不在白名单里的内置工具一概不可用。**`Read`、`Grep`、`Glob`、`TodoWrite`、`Skill` 也都不在白名单里：模型读写文件只经沙箱内的 Bash，读范围因此只有沙箱的 `denyRead` 一个机制（F10）。** 其中 `Grep`、`Glob`： 按权限文档，`Grep(path)`、`Glob(path)` 规则什么也匹配不到，`Read(path)` 的 `deny` 规则只对它们的搜索根目录尽力适用，从被拒目录的上一级开始搜就能返回里面的文件；在 macOS 上这两个工具本来就不在默认工具集里，Claude 会改用内置的 `find`、`grep` 经 Bash 运行，那是在沙箱里，`denyRead` 由系统强制。**`EndConversation`：** CLI 参考写明 `--tools` 列表里不写它也去不掉，所以它在预期集合里；它只是结束对话，不读写文件、不联网（按文档，需要探针确认）。**工具搜索：** 工具搜索默认开启时，MCP 工具被推迟到 `ToolSearch` 之后，不带 `ToolSearch` 的白名单可能让 Looper 的任务工具调不到；v1 选择钉 `ENABLE_TOOL_SEARCH=false`（Looper 自己的任务工具只有几个，放行的 MCP 服务器至多 20 个名字，一开始全部加载的代价可以接受），这时会多出 `WaitForMcpServers`，一并放进预期集合；读回断言 `env` 里这个值，探针要证明 `task_status` 可调用。`TodoWrite` 默认可能被 `Task*` 系列工具取代，写进白名单未必带回它，具体集合由升级探针按 CLI 实际工具清单固化。**后果（照实写）：** 读不了图片、PDF 和笔记本（`Read` 的多模态能力没了，这类文件在 v1 的管家会话里看不到内容）；读文本文件改用 `cat`、`sed -n`、`head`、`rg`，大文件分段读没有问题；用户层技能在 v1 不可用（`Skill` 不在白名单里；放进来要先证明技能的 `allowed-tools` 放宽不了工具集，并确认技能不需要 `Read`），`disableSkillShellExecution` 仍钉着作纵深防御；`TodoWrite` 不需要，进展由任务状态承载；Looper 的固定指令和任务工具没有假定 `Read`（核对了任务管家的启动、上下文和任务工具的代码，没有发现），模型自带系统提示里对 `Read` 的提及由模型自行适应 |
 | F10 | 读范围 | `sandbox.filesystem.denyRead`：操作者的凭据和信任根（`~/.ssh`、`~/.aws`、`~/.gnupg`、已知存放凭据的 `~/.config` 子目录、用户级 Claude 配置目录里的凭据和 `.claude.json`、Looper 自己的运行时、配置和令牌目录） | 内置工具里没有 `Read` 以后，读文件只有沙箱内的 Bash，**读范围只有 `denyRead` 这一个机制，由系统（Seatbelt）强制**，不再依赖 `Read(...)` 的权限规则在 bypass 下是否生效。`denyRead` 对沙箱内命令的强制，文档如此，本机**未实测**，列为启用前必过的探针（敌意测试）。它只能列要保护的根，不能表达「只准读任务目录」，是黑名单，天然不完整，第 25.5 节如实写出。**不整个拒绝 `~/.config`**：git 的全局配置在 `~/.config/git/config`，别的命令行工具的配置也在那里；清单只列存放凭据的子目录，具体清单和它对 `git status/add/commit`、`pytest` 的影响，由探针在 F10 生效的条件下重测（此前的实测是没有 `denyRead` 时做的） |
-| F11 | `sandbox.filesystem.denyWrite` | `.git/hooks`、`.git/config`、`.git/info`、`.git/modules`（任务目录内） | 实测：cwd 内 `.git` 的 `hooks` 和 `config` 默认已被沙箱保护（写、追加、改名、`mv` 覆盖、改名整个 `.git` 都被拒）；但 `.git/info/attributes` 和 `.git/info/exclude` 默认**可写**，而 `info/attributes` 不被 `--attr-source` 中和。加了 `denyWrite` 的 `hooks`、`config`、`info` 后三处都被拒，`git add`、`git commit` 仍成功。`.git/modules`（子模块自己的 `config` 和 `hooks`）按文档推断默认可写、**未实测**，所以也列进去；嵌套仓库自己的 `.git/config` 管不到，见第 25.5 节的残余风险 |
+| F11 | `sandbox.filesystem.denyWrite` | `.git/hooks`、`.git/config`、`.git/info`、`.git/modules`、`.git/objects/info`（任务目录内） | 实测：cwd 内 `.git` 的 `hooks` 和 `config` 默认已被沙箱保护（写、追加、改名、`mv` 覆盖、改名整个 `.git` 都被拒）；但 `.git/info/attributes` 和 `.git/info/exclude` 默认**可写**，而 `info/attributes` 不被 `--attr-source` 中和。加了 `denyWrite` 的 `hooks`、`config`、`info` 后三处都被拒，`git add`、`git commit` 仍成功。`.git/modules`（子模块自己的 `config` 和 `hooks`）按文档推断默认可写、**未实测**，所以也列进去；`.git/objects/info`（`alternates` 能让仓库借用别处的对象库）同样列进去，加上它之后沙箱内写 `alternates`、改名 `.git/objects`、`git add` 和 `git commit` 的行为**未实测**（探针用例已补，待真实 CLI 重跑）；嵌套仓库自己的 `.git/config` 管不到，见第 25.5 节的残余风险 |
 
 
 两条补充：
@@ -617,7 +617,7 @@ draft、init ──删除──→ （删除）
 | `sandbox.network.httpProxyPort`、`socksProxyPort` | 不设 | 必须不存在（设了就是换了一个我们不控制的代理，白名单就不再由沙箱的代理执行） |
 | `sandbox.network.tlsTerminate` | 不设 | 必须不存在 |
 | `sandbox.filesystem.allowWrite` | `[]` | `get_sandbox_dialog` 的实际可写路径集合等于探针固定的期望集合（工作目录和沙箱默认的临时目录），且有效数组为空 |
-| `sandbox.filesystem.denyWrite` | F11 的三项 | 注入的三项是有效数组的子集（别处可以更多：只会更窄） |
+| `sandbox.filesystem.denyWrite` | F11 列出的各项 | 注入的各项是有效数组的子集（别处可以更多：只会更窄） |
 | `sandbox.filesystem.allowRead` | 不设 | 必须不存在 |
 | `sandbox.filesystem.disabled` | `false` | 等于 `false` |
 | `sandbox.credentials.*`（`allowPlaintextInject`、`awsPairs`、`sigv4`、`envVars`、`files`） | 不设 | 必须不存在（它们改变凭据怎样进入沙箱） |
@@ -702,6 +702,7 @@ draft、init ──删除──→ （删除）
   - **其他运行时的凭据与云服务商后端：** Codex、Grok 等非 Anthropic 运行时的变量按 `RUNTIME_ENV_CLASS` 逐名分类，不是 CLI 需要的一律从直接会话的进程环境里去掉，由测试保证每个名字都有分类。v1 只支持 Anthropic API 和 Claude 登录：Agent Profile `env` 里的云服务商变量（`AWS_REGION`、`AWS_PROFILE`、`AWS_ACCESS_KEY_ID`、`CLOUD_ML_REGION`、`GOOGLE_APPLICATION_CREDENTIALS` 等）会被去掉，`~/.aws` 等凭据位置也在读拒绝清单里，所以 Bedrock、Vertex 这类后端的 profile 在直接会话里无法认证；`CLAUDE_CODE_USE_BEDROCK` 这类开关虽保留，但不够用。支持它们要单独设计（非密钥选择器的白名单和凭据的交付方式）。2.1.332 实测：CLI 环境里设 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` 且只靠 `--dangerously-skip-permissions` 时，权限模式被强制回默认，Bash 调用需要批准；加上 `--allowedTools`（Bash 和放行的 MCP 服务器）后，Bash 里看不到 `ANTHROPIC_API_KEY`，Bash 和 MCP 工具都能用，写任务目录成功、写目录外被拒，但 `system/init` 报告 `permissionMode` 为 `default` 而不是 `bypassPermissions`，读回的断言要随之改（RFC 级决定）。所以 v1 没有采用，上一条的长期凭据仍是残余风险。探针行把这个行为记录为可选探针，不作为启动配置。
   - **读保护清单的残余：** 清单按路径，不按 inode：任务目录里已有的指向清单内文件的硬链接仍可读（沙箱内自己造不出硬链接）；`XDG_CONFIG_HOME` 设置后替换默认的 `~/.config`，不遵从 XDG 的工具的密钥仍在 `~/.config`；`AWS_SHARED_CREDENTIALS_FILE`、`KUBECONFIG`、`GNUPGHOME`、`GIT_CONFIG_GLOBAL` 指到清单外的路径时盖不住；`~/.zshenv` 在每条命令之前被 zsh 读取，不能拒绝，也是残余。
   - **其他在任务目录里启动的东西：** 用户层钩子、插件的服务器在任务目录里启动、在沙箱外运行，它们的启动方式受任务目录的影响，记为残余风险，v1 不解决；放行的 MCP 服务器的处理见第 25.6 节第 2 步。
+  - **从准入内的身份比较到启动按路径使用（残余风险，v1 不解决）：** 目录检查和加锁验证的是被锁住目录的身份；三次身份比较通过之后，`admit` 还会按路径再跑一次 `check`，会话随后也是按路径启动的，不是从一个一直握着的目录描述符启动。若有同用户的并发写入者在准入内的身份比较之后到启动之前换掉这条路径（包括换成另一个同样合法的仓库，此时返回的仍是原目录上取到的锁）、它的某级父目录或其中的 `.git`，这次检查看不到。它不在 v1 的威胁模型内：沙箱内的直接会话写不到那里（写范围只有自己的任务目录，F11 又拒绝写 `.git` 的 `hooks`、`config`、`info`、`modules`），而沙箱外的同用户进程本来就能直接读到受信配置，这个竞争不给它增加能力。目录检查防的是操作者的误操作和两个会话共用一个目录，不防同用户的攻击者。以后的改动可以在准入时一直握着目录描述符，并从它启动子进程。
   - **嵌套仓库和子模块：** 目录树里别处的 `.git` 和子模块自己的 `.git/config`、钩子，模型可能写得进去（按文档推断，未实测）；操作者自己的 git 或编辑器在那里自动执行 `status` 时会运行它们，Looper 的加固 git 不受影响，操作者要把这些仓库当不可信的。
 
 ### 25.6 启动前检查、读回和拒绝启动
@@ -721,6 +722,13 @@ draft、init ──删除──→ （删除）
 | 任务是 worktree 模式 | `worktree_unsupported`，`details.kind = workspace_mode` |
 
 此外，一个原地目录同一时间只允许一个任务管家会话：用目录锁，锁文件放在任务目录**之外**（沙箱够不到，模型改不了）。
+
+目录锁的范围和边界，照实写，不当作比实际更强的保证：
+
+- **范围是「每个运行时根、每个确切目录」。** 锁文件在运行时根下，名字是目录的设备号和 inode。两个 Looper 进程的运行时根不同（例如验证用的临时运行时根）时，互相看不到对方的锁；父目录和子目录的 inode 不同，所以跨进程时也不互斥（进程内由重叠检查负责）。v1 不做机器级的锁，也不为此引入全局目录。
+- **运行时根必须在本机文件系统上**：网络挂载上 `flock` 的语义没有保证。
+- **检查到加锁之间目录可能被改名或替换。** 所以加锁之后、启动 CLI 进程之前，代码打开解析后的路径，取这个已打开目录的设备号和 inode，要求它同时等于检查时的目录和锁实际加在的目录（锁对象回报自己锁住的是哪一个），再把整套目录检查（含进程内的重叠检查）再跑一遍；任何差异都拒绝，原因 `workspace_unavailable`，`kind` 为 `changed_after_check`。检查或加锁时的操作系统错误同样是类型化拒绝：在 `inspect` 上，看不到仓库的路径（不存在、普通文件、空目录）是 `workspace_not_repo_root` / `not_git`（父目录是仓库则仍是 `subdirectory`，裸仓库仍是 `bare`），`not_a_directory` 只用于加锁时目录已经没了或已经不是目录；符号链接环、名字过长、权限、I/O，以及运行时根下的锁目录建不出来（文案点名运行时根）都是 `io_error`，不会被当成「不是 git 仓库」，说明由代码生成，不落入通用的「管家回合失败」，也不报告「已启动」。
+- 这些检查和加锁都在工作线程里执行，不阻塞事件循环。`kind` 以类型化字段随拒绝结果（`Submitted.kind`）传递，不在事件载荷里；下游不得靠匹配英文说明判断子类型。
 
 **2. 生成设置。** 本次 `--settings` 的内容（第 25.2 节 F1–F5、F11、第 25.2.1 节的全部钉死值和第 25.3 节的白名单）和参数（F7、F8、F9 的 `--tools`），写入只属于这次启动的私有文件。白名单里 MCP 服务器的定义**只从用户层配置解析**（包括操作者 `.claude.json` 里属于这个目录的 local scope），**不读任务目录和它上级目录的 `.mcp.json`**，也不读项目 scope：这些位置是不可信输入，编排模式的 Worker 不在沙箱里，又和管家共用这个目录，它们可以用一个已放行的名字定义一个服务器，而服务器在沙箱外运行。这会改变 #1852 的行为（不能再放行 project scope 的服务器），后续在 #1852 之上改解析器，按行为变化写出来。
 
@@ -755,6 +763,7 @@ draft、init ──删除──→ （删除）
 | `mcp_set_mismatch` | `mcp_status` 或 `init` 里出现白名单外的服务器，或某服务器的指纹（命令、参数、`env`、`cwd`、`type`、`url`）与解析出的定义不符 | 服务器名、哪一层 |
 | `network_policy_invalid` | 保存的或读到的操作者条目不合法（非外部域名） | 字段、条目 |
 | `workspace_not_repo_root`、`workspace_is_home`、`workspace_contains_trusted_config`、`workspace_in_system_dir`、`workspace_overlaps_session` | 目录检查（上文第 1 步） | 见表 |
+| `workspace_unavailable` | 检查到加锁之间目录被改名或替换，或检查、加锁时遇到操作系统错误 | `kind`：`changed_after_check`、`not_a_directory`、`io_error` |
 | `worktree_unsupported` | linked worktree 或 worktree 模式任务 | `kind` |
 | `head_moved` | 下一回合开始前 `HEAD` 不在任务记录的分支上（第 25.9 节 H2） | 记录的分支、当前分支 |
 | `head_detached` | 第一次启用时 `HEAD` 是分离的，没有分支可记 | — |
@@ -830,7 +839,7 @@ draft、init ──删除──→ （删除）
   - **任务分支怎么记：** 原地任务没有记录的分支（`tasks` 只有 `work_dir`、`workspace_dir`、`workspace_mode`、`workspace_base`）。**第一次启用时**，把当时检出的分支记为任务分支（存在管家的会话记录里，落点由实现卡定），之后一直用它。第一次启用时 `HEAD` 是分离的，拒绝启动（`head_detached`）；目录不是 git 仓库已被目录检查挡住。
   - **模型自己在沙箱里提交：** 任务分支的快进提交允许（没有丢东西），回合记录写明「本轮有 N 个提交由任务管家自己做」。
 - **H3　Looper 自己的 git 调用。** 模型能写工作目录里的 `.gitattributes` 等，Looper 在沙箱外跑 git 会执行它们。实测（git 2.56.1）会触发的：`.git/hooks` 里的 `pre-commit`、`commit-msg`、`prepare-commit-msg`、`post-index-change`、`post-commit`、`reference-transaction`；`core.hooksPath`；`core.fsmonitor`（status、add）；`.gitattributes` 的 `filter.*.clean`（add、status）；`commit.gpgsign` 加 `gpg.program`。`diff.*.textconv`、`diff.external` 在 diff、log、show 触发；`core.sshCommand` 在 fetch、push、ls-remote 触发；`core.pager`、`core.editor`（带 `-m`）、`core.askPass`、别名未触发。经实测有效的覆盖（status、add、commit 和 diff、log、show、ls-remote 全部不触发）：`git --attr-source=<空树> -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false -c diff.external= -c core.sshCommand=false <命令>`。要点：filter 和 textconv 的名字不可枚举，所以用 `--attr-source=<空树>` 让 git 不读工作树的 `.gitattributes`；`GIT_CONFIG_NOSYSTEM` 和用户级配置对仓库自带的 config 不起作用（仓库 config 才是攻击面）；环境变量 `GIT_CONFIG_COUNT/KEY/VALUE` 可代替 `-c`，`--attr-source` 也有等价的环境变量 `GIT_ATTR_SOURCE`（评审实测：设为空树时 `git add` 不执行 `.gitattributes` 里的 clean filter，不设就执行），环境变量会传给子 git 进程，封装应同时设置两者。`--attr-source` 只覆盖工作树里的 `.gitattributes`，不覆盖 `.git/info/attributes`：后者由 F11 的 `denyWrite` 封住（实测它引用的 filter 只有操作者全局配置里已有的名字才可能被利用，范围有限，仍要封）。**Looper 对任务和步骤目录跑的每一条 git 都走这个加固封装**（单独的 PR 正在实现）；封装之外不允许直接调用 git（用测试枚举调用点）。未验证、应由封装另行处理：`.git` 文件被改成指向别处的 `gitdir:`、`core.worktree`、子模块；建议封装用 `git rev-parse --git-dir` 核对 `.git` 指向预期路径（未验证）。
-  - **已实现的封装（`looper/agents/git_safe.py`，[#1861](https://github.com/foolzzz/looper/pull/1861)）与已知限制：** 封装保留 `.gitattributes`，只覆盖仓库自己配置里定义的 driver，检查和命令不是原子的：检查之后才写入的 driver 定义拦不住（影响限于同一系统用户、白名单环境，不含服务凭据，命令后重查并记 WARNING）。**沙箱里的任务管家不受这个竞态影响**：F11 的 `denyWrite` 封住 `.git/config` 和 `.git/info`，它写不进定义 driver 的地方；受影响的是不在沙箱里的并行步骤 Worker，它们共享主仓库的 `.git/config`。
+  - **已实现的封装（`looper/agents/git_safe.py`，[#1861](https://github.com/foolzzz/looper/pull/1861)）与已知限制：** 封装保留 `.gitattributes`，只覆盖仓库自己配置里定义的 driver，检查和命令不是原子的：检查之后才写入的 driver 定义拦不住（影响限于同一系统用户、白名单环境，不含服务凭据，命令后重查并记 WARNING）。**沙箱里的任务管家不受这个竞态影响**：F11 的 `denyWrite` 封住 `.git/config` 和 `.git/info`，它写不进定义 driver 的地方；受影响的是不在沙箱里的并行步骤 Worker，它们共享主仓库的 `.git/config`。封装另外对每条 git 关闭 replace ref，并拒绝 `objects/info/alternates`、`http-alternates` 非空的仓库（含已检出的子模块）；这项检查和上面的 driver 检查一样在命令之前做，不是原子的。
 
 **其他待验证的问题（未验证的不当结论）：**
 

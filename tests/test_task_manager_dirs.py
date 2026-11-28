@@ -15,9 +15,13 @@ from looper.agents.task_manager_dirs import (
     LockHeld,
     Problem,
     Reason,
+    admit,
     check,
+    inspect,
     trusted_paths,
 )
+from looper.agents import task_manager_dirs, task_manager_safety
+from looper.agents.tiers import task_manager as tm
 from looper.ops_config import FILE
 
 _IN_PLACE = {"workspace_mode": "in_place"}
@@ -391,3 +395,199 @@ def test_a_lock_held_by_a_child_process_is_refused(tmp_path: Path) -> None:
     finally:
         process.kill()
         process.wait(timeout=5)
+
+
+def _inspect(tmp_path: Path, work_dir: Path | str, live=()):
+    return inspect(_IN_PLACE, str(work_dir), environment={"HOME": str(tmp_path / "home")},
+                   runtime_root=tmp_path / "runtime", live=live)
+
+
+def _admit(tmp_path: Path, work_dir: Path | str, expected, live=()):
+    return admit(_IN_PLACE, str(work_dir), "t1", environment={"HOME": str(tmp_path / "home")},
+                 runtime_root=tmp_path / "runtime", live=live, expected=expected)
+
+
+def test_a_checked_directory_is_admitted_with_its_lock(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    problem, identity = _inspect(tmp_path, repo)
+    assert problem is None and identity == (os.stat(repo).st_dev, os.stat(repo).st_ino)
+    lock, refused = _admit(tmp_path, repo, identity)
+    assert refused is None and lock is not None
+    with pytest.raises(LockHeld):
+        DirectoryLock.acquire(tmp_path / "runtime", str(repo), "t2")
+    lock.release()
+
+
+def test_a_directory_replaced_after_the_check_is_refused_and_its_lock_is_released(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    _, identity = _inspect(tmp_path, repo)
+    repo.rename(tmp_path / "repo.old")
+    _repo(tmp_path / "repo")  # a different directory now has the same path
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None
+    assert problem is not None and problem.reason is Reason.WORKSPACE_UNAVAILABLE
+    assert problem.kind is Kind.CHANGED_AFTER_CHECK
+    DirectoryLock.acquire(tmp_path / "runtime", str(repo), "again").release()
+
+
+def test_a_path_swapped_for_a_symlink_to_the_home_directory_is_refused(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    home = _repo(tmp_path / "home")
+    _, identity = _inspect(tmp_path, repo)
+    repo.rename(tmp_path / "repo.old")
+    repo.symlink_to(home, target_is_directory=True)
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.CHANGED_AFTER_CHECK
+
+
+def test_the_whole_check_runs_again_under_the_lock(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    _, identity = _inspect(tmp_path, repo)
+    (repo / ".git").rename(repo / ".git.old")  # same directory, no longer a repository root
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_NOT_REPO_ROOT and problem.kind is Kind.NOT_GIT
+    DirectoryLock.acquire(tmp_path / "runtime", str(repo), "again").release()
+
+
+def test_a_directory_that_vanished_is_a_typed_refusal(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    _, identity = _inspect(tmp_path, repo)
+    repo.rename(tmp_path / "repo.old")
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.NOT_A_DIRECTORY
+
+
+def test_an_os_error_while_locking_or_checking_is_a_typed_refusal(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path / "repo")
+    _, identity = _inspect(tmp_path, repo)
+
+    def refuse(*args, **kwargs):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(DirectoryLock, "acquire", classmethod(refuse))
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.IO_ERROR
+    assert "PermissionError" in problem.text
+    monkeypatch.undo()
+    monkeypatch.setattr(task_manager_dirs, "check", refuse)
+    problem, identity = _inspect(tmp_path, repo)
+    assert identity is None and problem is not None and problem.kind is Kind.IO_ERROR
+    lock, problem = _admit(tmp_path, repo, (0, 0))
+    assert lock is None and problem is not None and problem.kind is Kind.CHANGED_AFTER_CHECK
+    DirectoryLock.acquire(tmp_path / "runtime", str(repo), "again").release()
+
+
+def test_the_directory_reasons_stay_in_step_with_the_safety_and_refusal_enums() -> None:
+    reasons = {reason.value for reason in Reason}
+    assert reasons <= {reason.value for reason in task_manager_safety.Reason}
+    assert reasons <= {reason.value for reason in tm.RefuseReason}
+    workspace = {value for value in (r.value for r in task_manager_safety.Reason)
+                 if value.startswith(("workspace_", "worktree_"))}
+    assert workspace == reasons
+    assert {r.value for r in tm.RefuseReason if r.value.startswith(("workspace_", "worktree_"))} == reasons
+    from looper.agents.v1_domains import manager_metrics
+    work_mode = manager_metrics.SUMMARY["properties"]["work_mode"]["properties"]["task_manager_launch_refusals_total"]
+    published = set(work_mode["items"]["properties"]["reason"]["enum"])
+    assert reasons <= published
+
+
+def test_a_caller_cancelled_while_the_lock_is_taken_leaves_no_lock(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+    import threading
+
+    repo = _repo(tmp_path / "repo")
+    gate, entered = threading.Event(), threading.Event()
+    real = DirectoryLock.acquire.__func__
+
+    def slow(cls, *args, **kwargs):
+        entered.set()
+        gate.wait(10)
+        return real(cls, *args, **kwargs)
+
+    monkeypatch.setattr(DirectoryLock, "acquire", classmethod(slow))
+    identity = task_manager_dirs._directory_identity(task_manager_dirs._realpath(str(repo)))
+
+    async def main() -> None:
+        task = asyncio.ensure_future(task_manager_dirs.admit_off_loop(
+            _IN_PLACE, str(repo), "t1", environment={"HOME": str(tmp_path / "home")},
+            runtime_root=tmp_path / "runtime", live=(), expected=identity))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()
+        deadline = asyncio.get_running_loop().time() + 5
+        while True:  # the release runs in a done callback; poll for it with a bound instead of a fixed sleep
+            try:
+                real(DirectoryLock, tmp_path / "runtime", str(repo), "probe").release()
+                break
+            except LockHeld:
+                assert asyncio.get_running_loop().time() < deadline, "the lock leaked after the caller was cancelled"
+                await asyncio.sleep(0.02)
+
+    asyncio.run(main())
+
+
+def test_a_path_swapped_during_the_lock_and_swapped_back_is_refused(tmp_path: Path, monkeypatch) -> None:
+    repo = _repo(tmp_path / "repo")
+    other = _repo(tmp_path / "other")
+    _, identity = _inspect(tmp_path, repo)
+    real = DirectoryLock.acquire.__func__
+
+    def swap_and_back(cls, *args, **kwargs):
+        old = tmp_path / "repo.old"
+        repo.rename(old)
+        repo.symlink_to(other, target_is_directory=True)  # the lock is taken on the other repository
+        try:
+            return real(cls, *args, **kwargs)
+        finally:
+            repo.unlink()
+            old.rename(repo)  # and the path points at the checked directory again
+
+    monkeypatch.setattr(DirectoryLock, "acquire", classmethod(swap_and_back))
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.CHANGED_AFTER_CHECK
+    monkeypatch.undo()
+    DirectoryLock.acquire(tmp_path / "runtime", str(repo), "again").release()  # the wrong lock was released
+
+
+def test_the_lock_reports_the_directory_it_was_taken_on(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    lock = DirectoryLock.acquire(tmp_path / "runtime", str(repo), "t1")
+    assert lock.identity == (os.stat(repo).st_dev, os.stat(repo).st_ino)
+    lock.release()
+
+
+def test_a_symlink_loop_is_an_io_error_not_a_missing_repository(tmp_path: Path) -> None:
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    problem, identity = _inspect(tmp_path, loop)
+    assert identity is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.IO_ERROR
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    problem, identity = _inspect(tmp_path, tmp_path / "a" / "repo")
+    assert identity is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.IO_ERROR
+
+
+def test_a_missing_directory_is_still_not_a_repository(tmp_path: Path) -> None:
+    problem, _ = _inspect(tmp_path, tmp_path / "missing")
+    assert problem is not None and problem.reason is Reason.WORKSPACE_NOT_REPO_ROOT
+    assert problem.kind is Kind.NOT_GIT
+
+
+def test_a_runtime_root_that_is_a_file_is_an_io_error_naming_the_runtime_root(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "repo")
+    _, identity = _inspect(tmp_path, repo)
+    (tmp_path / "runtime").write_text("not a directory")
+    lock, problem = _admit(tmp_path, repo, identity)
+    assert lock is None and problem is not None
+    assert problem.reason is Reason.WORKSPACE_UNAVAILABLE and problem.kind is Kind.IO_ERROR
+    assert str(tmp_path / "runtime") in problem.text and "runtime root" in problem.text

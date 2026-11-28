@@ -27,6 +27,7 @@ from looper.db import projects, tasks
 from looper.db.chat import task_thread
 from tests.db_support import DSN, fresh_database_without_recording
 from tests.fake_claude import fake_claude
+from evals.prompt_regression.fake_readback import SOURCE as READBACK_SOURCE
 from tests.runner_support import require_disposable_database
 
 pytestmark = pytest.mark.skipif(
@@ -51,7 +52,7 @@ _OTHER_CLIS = (
     "lark-cli",
 )
 # A resident that emits one tool and then blocks until the stop control request.
-_CLAUDE = r"""
+_CLAUDE = "exec(%r)\n" % READBACK_SOURCE + r"""
 import json, sys
 if "--version" in sys.argv:
     print("2.1.332")
@@ -71,6 +72,11 @@ for raw in sys.stdin:
         data = json.loads(raw)
     except json.JSONDecodeError:
         continue
+    if data.get("type") == "control_request" and data["request"]["subtype"] in READBACK_SUBTYPES:
+        kind, body = readback_answer(data["request"], "/nonexistent")
+        print(json.dumps({"type": "control_response", "response": {
+            "subtype": kind, "request_id": data.get("request_id"), "response": body}}), flush=True)
+        continue
     if data.get("type") == "control_request":
         print(json.dumps({"type": "control_response", "response": {
             "subtype": "success", "request_id": data.get("request_id")}}), flush=True)
@@ -79,10 +85,11 @@ for raw in sys.stdin:
         continue
     if data.get("type") != "user":
         continue
-    print(json.dumps({"type": "system", "subtype": "init", "session_id": session}), flush=True)
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": session,
+                      **init_fields("/nonexistent")}), flush=True)
     print(json.dumps({"type": "assistant", "message": {"content": [{
-        "type": "tool_use", "id": "tool-1", "name": "Read",
-        "input": {"file_path": "README.md"}}]}}), flush=True)
+        "type": "tool_use", "id": "tool-1", "name": "Bash",
+        "input": {"command": "cat README.md"}}]}}), flush=True)
 """
 
 
@@ -320,7 +327,7 @@ def test_served_task_conversation_streams_a_tool_then_stop_reloads_history(monke
                         )
 
                     tool = _wait(tool_event, 30, failed)
-                    assert tool["tool_use_id"] == TOOL_ID and tool["name"] == "Read"
+                    assert tool["tool_use_id"] == TOOL_ID and tool["name"] == "Bash"
                     stopped = _result(
                         api.post(
                             "/api/v1/operator_chat/stop", {"message_id": MESSAGE_ID}

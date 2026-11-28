@@ -108,8 +108,12 @@ def test_idle_reclaim_measures_from_turn_end(monkeypatch, tmp_path):
         task_id, _, _ = await native.create(db)
         try:
             sink = Sink()
+            native.transcript.with_name("readback-override.json").write_text('{"init_delay": 1.5}')
             await pool.submit(task_id, "wait", message_id="first", sink=sink)
             await until(lambda: len(native.records("input")) == 1)
+            # A stop before the turn's init has passed refuses the turn and ends the process (the readback's gate), so
+            # this test of the idle clock waits for the init, which the delayed stand-in sends later than the input.
+            await until(lambda: pool.agent(task_id).session_id is not None)
             now[0] = 1900
             await pool.reclaim()
             assert pool.agent(task_id).resident.started and pool.in_turn(task_id)
