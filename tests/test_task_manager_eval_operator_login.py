@@ -18,14 +18,19 @@ import pytest
 from evals.prompt_regression import task_manager_cases as cases
 from evals.prompt_regression import task_manager_eval as evaluation
 from evals.prompt_regression.runner import EvalError
-from looper.agents import task_manager_sandbox
+from looper import child_env
+from looper.agents import task_manager_edit, task_manager_sandbox
 from tests.db_support import DSN
 
 SECRET = "sk-test-not-a-real-secret-value"
 SETTINGS = {"env": {"MARKER_IN_SETTINGS": "settings-secret-marker"},
             "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo hook-secret-marker"}]}]}}
 MEMORY = "memory-secret-marker\n"
-HOSTILE = {"foreign_task_refused", "readonly_progress"}  # of the cases on this checkout
+# The hostile cases of this checkout that an operator-login run can start (``read_deny_live`` plants files under HOME).
+HOSTILE = {"foreign_task_refused", "readonly_progress", "project_instructions_hostile",
+           "branch_kept_against_convention"}
+EDIT_CASES = {f"{name}{arm}" for name in ("edit_multi_file", "edit_large_file_local", "edit_retry_after_mismatch")
+              for arm in ("", "_bash")}
 
 
 def sha(data: bytes) -> str:
@@ -372,7 +377,7 @@ def test_every_non_hostile_case_of_every_repetition_runs_before_a_hostile_one(op
     result, _ = suite(tmp_path, reps=2)
     ids = [case for case, _ in started]
     first = len(ids) - 2 * len(HOSTILE)
-    assert set(ids[first:]) == HOSTILE and not set(ids[:first]) & HOSTILE and first == 10
+    assert set(ids[first:]) == HOSTILE and not set(ids[:first]) & HOSTILE and first == 22
     assert ids[0] == "direct_edit_brief" and ids[first - 1] == "readonly_resume"  # read-back launches first
     assert set(result["operator_login"]["hostile_cases"]) == HOSTILE
 
@@ -415,7 +420,7 @@ def new_case(name):
 
 def test_a_new_case_is_hostile_and_needs_a_synthetic_home_until_it_says_otherwise(operator, monkeypatch, tmp_path):
     started = stub(monkeypatch)
-    new = new_case("project_instructions_hostile")
+    new = new_case("someone_elses_new_case")
     assert new.hostile and new.needs_synthetic_home
     result, _ = suite(tmp_path, selected=[new, cases.BY_ID["direct_edit_brief"]])
     assert [case for case, _ in started] == ["direct_edit_brief"]
@@ -429,8 +434,31 @@ def test_a_new_case_is_hostile_and_needs_a_synthetic_home_until_it_says_otherwis
 
 def test_the_cases_on_this_checkout_say_what_they_are():
     safe = {c.id for c in cases.CASES if not c.hostile}
-    assert safe == {"direct_edit_brief", "stop_continue", "fresh_session_excerpt", "readonly_resume", "opus_switch"}
+    assert safe == {"direct_edit_brief", "stop_continue", "fresh_session_excerpt", "readonly_resume",
+                    "opus_switch"} | EDIT_CASES
     assert {c.id for c in cases.CASES if not c.needs_synthetic_home} == safe | HOSTILE
+    canaries = cases.BY_ID["read_deny_live"]
+    assert canaries.hostile and canaries.needs_synthetic_home
+
+
+def test_the_case_that_plants_files_under_home_never_starts(operator, monkeypatch, tmp_path):
+    started = stub(monkeypatch)
+    result, _ = suite(tmp_path, selected=[cases.BY_ID["direct_edit_brief"], cases.BY_ID["read_deny_live"]])
+    assert [case for case, _ in started] == ["direct_edit_brief"]
+    row = next(row for row in result["rows"] if row["case"] == "read_deny_live")
+    assert row["outcome"] == "not_runnable" and row["blocker"] == "needs_synthetic_home"
+    assert not (operator / ".git-credentials").exists() and not (operator / ".zsh_history").exists()
+
+
+def test_the_edit_command_directory_of_a_direct_session_stays_under_the_run_root(operator, tmp_path):
+    root = tmp_path / "case"
+    with evaluation.isolated_environment(root, None, operator_login=True):
+        environment = child_env.inherited()  # what the CLI's environment starts from
+        directory = task_manager_edit.edit_bin(environment, forbidden=(
+            str(root / "work"), environment["TMPDIR"],
+            *task_manager_sandbox.read_deny_paths(environment, root / "runtime")))
+    assert directory == root / "cache" / "looper" / "task-manager-bin" and (directory / "looper-edit").is_symlink()
+    assert not (operator / ".cache").exists()
 
 
 def test_refusals_before_any_case(operator, monkeypatch, tmp_path):
@@ -506,7 +534,7 @@ def test_real_mode_hands_no_credential_to_a_case_and_records_the_verified_versio
 def test_no_case_starts_unless_the_read_deny_probe_passes(operator, monkeypatch, tmp_path, status):
     calls = probe_stub(monkeypatch, status)
     started = stub(monkeypatch)
-    result, path = real_suite(tmp_path)
+    result, path = real_suite(tmp_path, total_cap_usd=20.5)  # every runnable case once
     assert len(calls) == 1 and started == []
     assert result["aborted"] == f"deny_read_probe {status}" and result["outcome"] == "incomplete"
     assert result["operator_login"]["deny_read_probe"]["status"] == status
@@ -544,8 +572,13 @@ def test_the_reservation_is_computed_from_the_cases_and_printed_before_the_run(o
     assert evaluation.reservation_table(rows) in printed[0] and "| total | | | | 11.00 |" in printed[0]
 
 
+CEILING_USD = 23.5  # the approved ceiling of an operator-login run
+# Runnable with operator-login but in neither proposed command: all of them together would exceed the ceiling.
+NOT_PROPOSED = EDIT_CASES | {"project_instructions_hostile", "branch_kept_against_convention"}
+
+
 def documented_reservation():
-    """The README's two commands: every case an operator-login run can start, Opus once and the others twice."""
+    """The README's table: every case an operator-login run can start, Opus once and the others twice."""
     runnable = [c for c in cases.CASES if c.judge is not None and c.requires is None and not c.needs_synthetic_home]
     budgets = {cases.SONNET: 1.25, cases.OPUS: 3.0}
     return (evaluation.reservation([c for c in runnable if c.model == cases.OPUS], 1, budgets)
@@ -554,7 +587,9 @@ def documented_reservation():
 
 def test_the_readme_table_is_the_documented_commands_reservation():
     rows = documented_reservation()
-    assert sum(row["subtotal_usd"] for row in rows) == 18.0 <= 23.5
+    assert sum(row["subtotal_usd"] for row in rows) == 38.0 > CEILING_USD
+    proposed = [row for row in rows if row["case"] not in NOT_PROPOSED]
+    assert proposed == rows[:7] and sum(row["subtotal_usd"] for row in proposed) == 18.0 <= CEILING_USD
     readme = (evaluation.REPO_ROOT / "evals" / "README.md").read_text()
     assert evaluation.reservation_table(rows) in readme
 
@@ -568,7 +603,8 @@ def test_the_documented_commands_run_every_non_hostile_case_before_a_hostile_one
     assert selected[0] == ["opus_switch"] and not cases.BY_ID["opus_switch"].hostile
     assert commands[0].rstrip().endswith("&&")  # the Sonnet command runs only if the first passed
     assert "--total-cap-usd 3 " in commands[0] and "--total-cap-usd 18 " in commands[1]
-    assert {c.id for c in cases.CASES if c.judge and not c.requires} == set(selected[0] + selected[1])
+    runnable = {c.id for c in cases.CASES if c.judge and not c.requires and not c.needs_synthetic_home}
+    assert set(selected[0] + selected[1]) == runnable - NOT_PROPOSED
 
 
 # --- The launch check -------------------------------------------------------------------------------------------
@@ -681,7 +717,7 @@ def test_a_bypass_launch_must_carry_the_sandbox_and_the_deny_list(operator, tmp_
 def test_fake_run_passes_both_stages_and_a_readback_mismatch_aborts_it(operator, monkeypatch, tmp_path):
     selected = [cases.BY_ID[name] for name in ("foreign_task_refused", "direct_edit_brief", "readonly_resume")]
     result, path = suite(tmp_path, admin_url=DSN, selected=selected)
-    assert not (operator / ".cache").exists()  # every cache of the run went under its own root
+    assert not (operator / ".cache").exists()  # every cache of the run went under its own root, looper-edit's too
     assert [(row["case"], row["outcome"]) for row in result["rows"]] == [
         ("direct_edit_brief", "pass"), ("readonly_resume", "pass"), ("foreign_task_refused", "pass")], result["rows"]
     assert result["rows"][0]["verified_direct_launches"] >= 1
@@ -689,6 +725,7 @@ def test_fake_run_passes_both_stages_and_a_readback_mismatch_aborts_it(operator,
     evidence = json.loads((path.parent / "direct_edit_brief-1" / "evidence.json").read_text())
     for launch in evidence["launches"]:
         assert "CLAUDE_CONFIG_DIR" not in launch["env_names"]
+    assert any(launch["looper_edit_on_path"] for launch in evidence["launches"])  # so that directory was made
     for file in path.parent.rglob("*"):
         if file.is_file():
             assert "secret-marker" not in file.read_text(errors="replace"), file

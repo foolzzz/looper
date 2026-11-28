@@ -141,13 +141,17 @@ class Pin:
     check: Check
 
 
+# F11: the parts of ``.git`` a Bash child must not write; the pins and the direct text's sentence both read it.
+GIT_DENY_WRITE_PARTS: tuple[str, ...] = ("hooks", "config", "info", "modules", "objects/info")
+
+
 def git_deny_write(work_dir: Path) -> tuple[str, ...]:
     """F11: the parts of the task directory's ``.git`` a Bash child must not write (absolute paths under the real
     path of ``work_dir``). ``hooks`` and ``config`` are protected by default; ``info`` (``attributes`` is not
     neutralized by ``--attr-source``), ``modules`` (a submodule's own config and hooks) and ``objects/info``
     (``alternates`` names other object stores) are not."""
     root = os.path.realpath(work_dir)
-    return tuple(f"{root}/.git/{part}" for part in ("hooks", "config", "info", "modules", "objects/info"))
+    return tuple(f"{root}/.git/{part}" for part in GIT_DENY_WRITE_PARTS)
 
 
 def pins(work_dir: Path, *, allowed_domains: Sequence[str], read_deny: Sequence[str]) -> tuple[Pin, ...]:

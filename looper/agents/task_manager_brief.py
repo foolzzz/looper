@@ -5,12 +5,57 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from ..db.tasks import InteractionMode
+# The direct text below is worded from these: the built-in allowlist and the write-denied parts of ``.git``.
+from .task_manager_sandbox import BUILTIN_TOOLS, GIT_DENY_WRITE_PARTS
 from .task_workspaces import Reopened, task_branch
 from .untrusted import Source, fence
 
+# Built-in tools a model may reach for out of habit; the direct text names the ones the allowlist leaves out.
+_HABITUAL = ("Read", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch")
+EDIT_LINE = (
+    "Change files with looper-edit through Bash; it changes only files inside the directory it runs in. "
+    "`looper-edit replace <file>` reads JSON "
+    '{"old": ..., "new": ..., "count": ...} on stdin and replaces that exact text, failing when it matches nowhere '
+    "or more often than count (default 1); an empty old only creates a missing file. `looper-edit patch` reads a "
+    "unified diff on stdin and applies all of it or nothing. A failed edit changes nothing and says why: look at the file again "
+    "before you retry.")
+
+
+def _listed(names: list[str], word: str) -> str:
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} {word} {names[-1]}"
+
+
+def _direct_lines(builtin: tuple[str, ...]) -> list[str]:
+    tools = (f"Your only built-in tool is {builtin[0]}" if len(builtin) == 1 else
+             f"Your built-in tools are {_listed(list(builtin), 'and')}")
+    missing = [name for name in _HABITUAL if name not in builtin]
+    # The one switch between "Bash only" and "Bash and Read": how files are read, and whether images can be seen.
+    reading = ("Read files with Read, and search them with rg or find through Bash; some locations outside the task "
+               "directory, such as credentials and agent settings, cannot be read." if "Read" in builtin else
+               "Read and search files through Bash (cat, sed -n, head, rg, find); images and PDFs cannot be viewed, "
+               "and some locations outside the task directory, such as credentials and agent settings, cannot be "
+               "read.")
+    denied = _listed([f".git/{part}" for part in GIT_DENY_WRITE_PARTS], "or")
+    return [
+        "You work directly in the task's directory: it is the user's real checkout, so your changes land in their "
+        "files.",
+        f"{tools}, besides Looper's task tools and any MCP tools the user allowed"
+        + (f"; there is no {_listed(missing, 'or')}. " if missing else ". ") + reading,
+        EDIT_LINE,
+        f"Your shell commands run in a sandbox: they can write only inside the task directory (not {denied}) "
+        "and $TMPDIR, and reach only the project's allowed domains over HTTP(S); local ports, including databases "
+        "and Looper itself, are "
+        "closed. So `looper task` and Go command-line tools such as `gh` do not work here: read and change the task "
+        "through your task tools, and leave pushing and opening pull requests to the user.",
+        "When the sandbox denies a command, do not retry it or look for a way around the sandbox; say what you could "
+        "not do.",
+        "Looper reports changes to branches and tags to the user, and switching the checked-out branch stops your "
+        "next turn until the user sorts it out, so do not switch branches unless the user asks.",
+    ]
+
 
 def instructions(mode: InteractionMode | str) -> str:
-    mode_line = ("You work directly in the task's directory, with all your tools."
+    mode_line = ("\n".join(_direct_lines(BUILTIN_TOOLS))
                  if InteractionMode(mode) is InteractionMode.DIRECT else
                  "Looper's background agents are working on this task now: you can read, but not change, "
                  "its files; answer questions from what you can read.")
