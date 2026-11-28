@@ -359,9 +359,9 @@ async def _task_manager_refs(_: Any) -> Read:
     rows = await task_manager_ref_attention.pending()
     if not rows:
         return NotRead.OFF
-    items = [_item(f"tm_refs:{row['id']}", _TITLES["task_manager_refs"],
+    items = [_item(f"tm_refs:{row['id']}", _REF_REFUSALS.get(row["reason"], _TITLES["task_manager_refs"]),
                    context=_task_name(row, row["task_id"]), since=row["since"], href=f"#tasks/{row['task_id']}",
-                   refs=row["refs"], count=len(row["refs"]))
+                   refs=row["refs"], count=len(row["refs"]), **({"reason": row["reason"]} if row["reason"] else {}))
              for row in rows]
     return items[:SHOWN], len(items)
 
@@ -514,6 +514,9 @@ _TITLES = {"gates": "等你回复的关卡", "confirmations": "等你确认的�
            "deliveries": "可能没送到的消息", "cost": "花费等你决定",
            "failure_holds": "运行失败等你处理", "reminders": "未确认送达的提醒", "vault_commits": "知识库提交受阻",
            "task_manager_refs": "任务管家改了别的分支或标签"}
+# A task Manager turn refused for the repository's ref storage, by ``RepositoryRefused`` reason.
+_REF_REFUSALS = {"ref_symlink": "任务管家这一轮被拒绝：仓库的引用存储里有符号链接",
+                 "ref_unchecked": "任务管家这一轮被拒绝：仓库的引用存储无法完整检查"}
 _CHANNELS = {"web": "控制台聊天", "lark": "飞书", "lark_bot": "飞书", "telegram": "Telegram"}
 _ALERTS = {"failures": "连续失败告警", "stale": "太久没成功", "deadline": "没在截止时间前成功", "overlap": "运行重叠",
            "unanswered": "没人回，已自动暂停"}
@@ -584,6 +587,8 @@ def _line(kind: str, item: Mapping[str, Any], now: datetime) -> str:
         return f"- {item['ref']} {title}（{label}）"
     if kind == "reminders":
         return f"- 提醒 {item['ref']} {title}（{context}）"
+    if kind == "task_manager_refs" and facts.get("reason") in _REF_REFUSALS:
+        return f"- 【{context}】{_REF_REFUSALS[facts['reason']]}：{_plain(facts['refs'][0])}"
     if kind == "task_manager_refs":
         return f"- 【{context}】{facts['count']} 个分支或标签被改：" + "、".join(_plain(name) for name in facts["refs"][:5])
     if kind == "vault_commits":

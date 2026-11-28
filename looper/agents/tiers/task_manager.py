@@ -92,6 +92,7 @@ class RefuseReason(str, Enum):
     WORKTREE_UNSUPPORTED = "worktree_unsupported"
     HEAD_MOVED = "head_moved"
     HEAD_DETACHED = "head_detached"
+    REF_SYMLINK = "ref_symlink"
 
 
 def _off_text(reason: RefuseReason) -> str:
@@ -348,6 +349,10 @@ class TaskManagerAgent:
         if direct and (unsupported := task_manager_sandbox.platform_problem()) is not None:
             task_manager_safety.record_refusal(task_manager_safety.Reason.SANDBOX_UNAVAILABLE, phase)
             raise Refused(RefuseReason.SANDBOX_UNAVAILABLE, unsupported)
+        # Before any other git command or the CLI: a repository whose ref storage holds a link refuses the turn.
+        if direct and (refused := await task_manager_refs.ref_storage_refusal(self.task_id, reopened.work_dir,
+                                                                              phase=phase)) is not None:
+            raise refused
         self.project_id, self.allowed_domains = project["id"], ()
         if direct:
             try:
@@ -683,10 +688,15 @@ class TaskManagerAgent:
             if self.session_id:
                 await agent_sessions.save_session(f"task-manager-{self.task_id}", self.session_id, self.totals.to_dict(),
                     runtime_type="claude-code", profile_id=launch.profile.id, provider_id=launch.profile.provider.id)
-            after = await _files(reopened.work_dir)
-            files = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
+            # Again, before any git command reads what the turn left: while refused there is no summary or report.
+            linked = (await task_manager_refs.ref_storage_refusal(self.task_id, reopened.work_dir, phase="turn",
+                                                                  after_turn=True, message_id=request.message_id)
+                      if self.mode == "direct" else None)
+            after = {} if linked else await _files(reopened.work_dir)
+            files = [] if linked else sorted(name for name in before.keys() | after.keys()
+                                             if before.get(name) != after.get(name))
             commit, summary = None, {}
-            if written and task.get("workspace_mode") == "worktree" and self.mode == "direct":
+            if not linked and written and task.get("workspace_mode") == "worktree" and self.mode == "direct":
                 # A path that already had uncommitted changes when the turn began belongs to the user: it is never
                 # committed here, even when this turn edited it too.
                 own, theirs, unverified = await _own_paths(reopened.work_dir, files, before, after,
@@ -698,8 +708,9 @@ class TaskManagerAgent:
                 if own:
                     commit = await step_workspaces.commit_paths(Path(reopened.work_dir), own, self.links,
                         f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
-            await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode, **summary})
-            if refs_before is not None:
+            if not linked:
+                await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode, **summary})
+            if not linked and refs_before is not None:
                 try:
                     await task_manager_refs.end_turn(task, reopened.work_dir, refs_before, task_branch, sink=request.sink,
                                                      message_id=request.message_id)
@@ -707,6 +718,8 @@ class TaskManagerAgent:
                     logger.warning("task Manager %s: ref report failed", self.task_id, exc_info=True)
                     await activity.insert_activity(task_id=self.task_id, kind="error",
                         summary=f"Ref report failed: {type(exc).__name__}: {exc}"[:300])
+        if linked:  # the reply stands; the turn ends as refused, with why
+            raise Refused(linked.reason, "\n\n".join(part for part in (text, str(linked)) if part))
         from . import task_manager_context
         await task_manager_context.maintain(self, request, reopened, launch, prompt, record_id)
         await request.sink.final(text, outcome)

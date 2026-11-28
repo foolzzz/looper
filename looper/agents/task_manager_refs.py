@@ -8,6 +8,8 @@ the operator's checkout is the operator's. A change to a branch or tag other tha
 you"; it is not an invariant violation and raises no alert (RFC 21, 25.10).
 
 The task branch is recorded once, at the first enablement. A turn refuses to start while ``HEAD`` is not on it.
+A turn is also refused, before and after it runs, while ``git_safe`` refuses the repository's ref storage (a symbolic
+link in it); the refusal goes to "needs you" with the path inside the repository, never what a link points at.
 Every git call goes through ``git_safe`` (no repository code runs); ``refs/remotes`` is never read.
 """
 from __future__ import annotations
@@ -145,6 +147,44 @@ def _refused(exc: git_safe.RepositoryRefused):
     from .tiers.task_manager import RefuseReason, Refused
 
     return Refused(RefuseReason.WORKSPACE, str(exc))
+
+
+async def _refuse_ref_storage(task_id: str, exc: git_safe.RepositoryRefused, *, phase: str, after_turn: bool,
+                              message_id: str | None):
+    """The refusal of a turn for the repository's ref storage, listed in "needs you". Names the path inside the
+    repository only."""
+    from .tiers.task_manager import RefuseReason, Refused
+
+    reason = RefuseReason.WORKSPACE
+    if exc.reason == "ref_symlink":
+        reason = RefuseReason.REF_SYMLINK
+        task_manager_safety.record_refusal(task_manager_safety.Reason.REF_SYMLINK, phase)
+        problem = f"任务目录仓库的引用存储里有符号链接：{exc.path}。"
+        fix = "把它换成普通文件或目录（或删掉）后再发消息。"
+    else:
+        problem = f"任务目录仓库的引用存储无法完整检查：{exc.path}。"
+        fix = "让这个位置可以正常读取（或删掉）后再发消息。"
+    effect = ("这是本轮结束后发现的：本轮的改动汇总和分支报告没有生成，请自己检查。" if after_turn
+              else "这一轮没有开始。")
+    try:
+        await store.insert_refusal(task_id, message_id, exc.reason, exc.path)
+    except Exception:  # the turn is refused either way
+        logger.warning("task Manager %s: cannot record the ref storage refusal", task_id, exc_info=True)
+    return Refused(reason, f"{problem}Looper 不在这样的仓库里运行 git。{effect}{fix}")
+
+
+async def ref_storage_refusal(task_id: str, work_dir: str | Path, *, phase: str, after_turn: bool = False,
+                              message_id: str | None = None):
+    """The ``Refused`` for a direct turn in ``work_dir`` when its ref storage is refused, else None. Any other
+    outcome of the check, a failure included, is left to the git commands that follow."""
+    try:
+        await git_safe.check_repository_async(work_dir)
+    except git_safe.RepositoryRefused as exc:
+        if exc.reason in git_safe.REF_REASONS:
+            return await _refuse_ref_storage(task_id, exc, phase=phase, after_turn=after_turn, message_id=message_id)
+    except Exception:
+        logger.warning("task Manager %s: could not check the ref storage", task_id, exc_info=True)
+    return None
 
 
 async def _git(work_dir: str | Path, *args: str) -> tuple[int, str]:
@@ -304,6 +344,8 @@ async def begin_turn(task: Mapping[str, Any], work_dir: str | Path, *, sink: Tur
     from .tiers.task_manager import RefuseReason, Refused, TaskManagerEvent
 
     task_id = str(task["id"])
+    if (refused := await ref_storage_refusal(task_id, work_dir, phase=phase)) is not None:
+        raise refused
     before = await snapshot(work_dir)
     recorded = await store.get_branch(task_id)
     if recorded is None:

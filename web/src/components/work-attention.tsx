@@ -105,6 +105,9 @@ function details(kind: AttentionKind, item: AttentionItem): { line: string; badg
     case "vault_commits":
       return { line: parts(context, text(facts.reason), text(facts.branch), text(facts.worktree)), badges: ["受阻"] };
     case "task_manager_refs":
+      if (facts.reason === "ref_symlink" || facts.reason === "ref_unchecked")
+        return { line: parts(context, "删掉或换成普通文件后再发消息",
+          Array.isArray(facts.refs) && facts.refs.map((name) => plainName(name)).filter(Boolean).join("、")), badges: [] };
       return { line: parts(context, `${count(facts.count)} 个分支或标签被改`,
         Array.isArray(facts.refs) && facts.refs.map((name) => plainName(name)).filter(Boolean).slice(0, 5).join("、")), badges: [] };
   }

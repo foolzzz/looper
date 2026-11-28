@@ -39,6 +39,18 @@ async def insert_report(task_id: str, message_id: str | None, changes: dict[str,
         "VALUES ($1, $2, $3::jsonb, $4) RETURNING id", task_id, message_id, json.dumps(changes), needs_you)
 
 
+async def insert_refusal(task_id: str, message_id: str | None, reason: str, path: str, *,
+                         pool: asyncpg.Pool | None = None) -> None:
+    """A turn refused for the repository's ref storage, as a report that needs the operator: one per task and path
+    while it is unresolved."""
+    changes = {"changes": [], "info": [], "head": None, "own_commits": 0, "refused": {"reason": reason, "path": path}}
+    await (pool or get_pool()).execute(
+        "INSERT INTO task_manager_ref_reports (task_id, message_id, changes, needs_you) "
+        "SELECT $1, $2, $3::jsonb, true WHERE NOT EXISTS (SELECT 1 FROM task_manager_ref_reports "
+        "WHERE task_id = $1 AND needs_you AND resolved_at IS NULL AND changes->'refused'->>'path' = $4)",
+        task_id, message_id, json.dumps(changes), path)
+
+
 async def pending_reports(*, pool: asyncpg.Pool | None = None) -> list[dict[str, Any]]:
     """Unresolved reports that need the operator, oldest first, with the task's own columns for the item."""
     rows = await (pool or get_pool()).fetch(
