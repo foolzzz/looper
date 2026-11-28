@@ -10,11 +10,19 @@ skips, and an extraction subscription's second check failing in consecutive
 runs that otherwise succeeded (its items stored unchecked). ``alert_policy`` resolves their configurable thresholds with the
 existing agent defaults. An OK run recovers the success alerts; starting a
 new run recovers the overlap alert. Every message goes through the outbox,
-recorded as ``sent``, ``failed`` or ``dashboard``.
+recorded as ``sent``, ``failed`` or ``dashboard``. A chat alert or recovery
+is one episode of one kind in ``schedule_notice_retries``. A refused send is
+tried again a few times; a send that may have gone is ``uncertain`` and is
+not sent again. A notice still in flight is described as maybe not delivered.
+Completion notices are not rows of that table: a failed one is sent again
+the next time the run ends, and an accepted one is not sent twice. The
+scheduler loop runs the retries as one background task and does not wait
+for a send.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -26,11 +34,11 @@ from typing import Any
 import asyncpg
 
 from ..db import (connection as db_connection, managers as db_managers, projects as db_projects,
-                  schedules as db_schedules, tasks as db_tasks)
+                  schedule_notice_retries as db_notice, schedules as db_schedules, tasks as db_tasks)
 from . import turn_metrics
 from . import completion_events, cron, scheduler_settings
 from .links import run_link, schedule_link, task_link
-from .channels.base import PostOutcome
+from .channels.base import NotifyAnswer, PostOutcome
 from .message import builtin_channel_id, parse_channel_id
 from .project_execution import format_usd
 
@@ -47,6 +55,14 @@ STALE_PERIODS = 3
 # minutes, not a schedule gone quiet.
 STALE_FLOOR = STALE_PERIODS * timedelta(minutes=5)
 SNIPPET_CHARS = 300
+# A refused send is tried this many more times, waiting 1, then 5, then 15 minutes. The index is how many
+# attempts are already on the row when this one fails (the first send is 0).
+RETRY_LIMIT = 3
+RETRY_BACKOFF = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=15))
+# Longer than a down-alert notify (20s): one attempt that does not return must not stop the scheduler's ticks.
+SEND_TIMEOUT_SECONDS = 30
+SEND_TIMEOUT_ERROR = "the send timed out"
+STOPPED_ERROR = "the server stopped while the notice was sending"
 
 # The final statuses of a run that ran something (a task, or a gate that failed).
 RAN = ("completed", "failed", "stopped", "cancelled", "timed_out", "gate_failed", "succeeded", "interrupted")
@@ -307,6 +323,68 @@ def stale_alert_text(schedule: Mapping[str, Any], project_name: str, deadline: d
             f"仍没有成功运行（{since}）。\n{schedule_link(base, schedule)}")
 
 
+def _outcome(result: tuple[bool, str | None]) -> tuple[PostOutcome, str | None]:
+    """What a sender returned. A bare ``(False, error)`` refused the send. An exception is not a result."""
+    if isinstance(result, NotifyAnswer):
+        return result.outcome, result.error
+    sent, error = result
+    if sent:
+        return PostOutcome.SENT, None
+    return PostOutcome.REJECTED, error
+
+
+def _retry_state(outcome: PostOutcome, retries: int, now: datetime) -> tuple[str, datetime | None]:
+    if outcome is PostOutcome.SENT:
+        return "sent", None
+    if outcome is PostOutcome.UNKNOWN:
+        return "uncertain", None
+    if retries >= RETRY_LIMIT:
+        return "gave_up", None
+    return "pending", now + RETRY_BACKOFF[retries]
+
+
+def _summary_line(alert: Mapping[str, Any], zone_name: str) -> str:
+    """The recovery's supplement. Empty when the alert was delivered.
+
+    A notice that is still ``sending`` may have gone out, same as ``uncertain``. A refused or superseded one
+    did not.
+    """
+    if alert["state"] == "sent":
+        return ""
+    when = _local(alert["created_at"], zone_name)
+    verb = "可能没有送达" if alert["state"] in ("uncertain", "sending") else "没有送达"
+    noun = "失败告警" if alert.get("kind") == "failures" else "告警"
+    line = f"补充：{when} 的{noun}{verb}"
+    if alert.get("failures") is not None and alert.get("kind") == "failures":
+        line += f"，涉及连续 {alert['failures']} 次运行"
+    return line + "。"
+
+
+def _recovery_text(plain: str, alert: Mapping[str, Any] | None, zone_name: str) -> str:
+    """Plain recovery, plus the alert's supplement chosen from the alert's state at claim time."""
+    if alert is None:
+        return plain
+    line = _summary_line(alert, zone_name)
+    if not line:
+        return plain
+    body = plain if plain.endswith("\n") else plain + "\n"
+    return body + line
+
+
+def _family_role(kind: Kind) -> tuple[str, str] | None:
+    """``(family, role)`` for an alert or recovery. None for a completion notice."""
+    value = kind.value
+    if value.endswith("_recovered"):
+        return value[: -len("_recovered")], "recovery"
+    if value.endswith("_alert"):
+        return value[: -len("_alert")], "alert"
+    return None
+
+
+def _outbox_kind(row: Any) -> str:
+    return f"{row['kind']}_{'alert' if row['role'] == 'alert' else 'recovered'}"
+
+
 def recovered_text(schedule: Mapping[str, Any], project_name: str, run: Mapping[str, Any], kind: Kind, *,
                    base: str = "") -> str:
     what = "不再连续失败" if kind is Kind.FAILURES_RECOVERED else "又有成功的运行"
@@ -355,6 +433,10 @@ class Notifier:
                                     failures_alert_text(schedule, project_name, run, base=self._base,
                                                         context_max_tokens=await scheduler_settings.session_context_max_tokens()),
                                     run_id=run_id)
+            else:
+                # The live counter is the streak now. The recovery reads the number stored on the alert row.
+                await db_notice.note_failure_count(
+                    db_connection.get_pool(), schedule["id"], int(schedule["consecutive_failures"]))
         if status in db_schedules.OK and await self._switch(schedule["id"], "failures_alert_at", None):
             await self._deliver(schedule, Kind.FAILURES_RECOVERED,
                                 recovered_text(schedule, project_name, run, Kind.FAILURES_RECOVERED, base=self._base),
@@ -625,20 +707,105 @@ class Notifier:
     async def _switch(schedule_id: str, column: str, at: datetime | None) -> bool:
         return await db_schedules.set_alert(db_connection.get_pool(), schedule_id, column, at)
 
-    async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> str:
-        """Record ``sent``/``failed`` only after calling the sender; otherwise keep it on the dashboard."""
+    async def settle_stopped(self) -> None:
+        """A restart found claims still ``sending``: the channel may already have them, so they are not sent again."""
+        await db_notice.settle_stopped(db_connection.get_pool(), self._clock(), STOPPED_ERROR)
+
+    async def retry_due(self, now: datetime, *, paused: Callable[[], bool] | None = None) -> None:
+        """Send each due pending notice once. The claim is the lock: a second pass updates nothing.
+
+        Each send has its own time limit, and ``paused`` is checked between rows, so one attempt that does not
+        return cannot hold the caller, and a drain stops the rest of the pass. No pool: nothing to retry.
+        """
+        try:
+            pool = db_connection.get_pool()
+        except db_connection.PoolNotInitializedError:
+            return
+        for row in await db_notice.due(pool, now):
+            if paused is not None and paused():
+                return
+            try:
+                await asyncio.wait_for(self._retry_one(row, now), SEND_TIMEOUT_SECONDS)
+            except TimeoutError:
+                if await db_notice.settle_if_sending(
+                        pool, row["id"], state="uncertain", error=SEND_TIMEOUT_ERROR, now=now):
+                    logger.warning("schedule %s: the %s notice send timed out", row["schedule_id"], _outbox_kind(row))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("schedule %s: could not retry the %s notice", row["schedule_id"], _outbox_kind(row))
+
+    async def _retry_one(self, row: Any, now: datetime) -> None:
+        pool = db_connection.get_pool()
+        schedule = await db_schedules.get_schedule(row["schedule_id"])
+        if schedule is None:
+            await db_notice.give_up(pool, row["id"], now, "the schedule is gone")
+            return
+        kind = Kind(_outbox_kind(row))
+        reason = await self._retry_refusal(schedule, kind, row["run_id"])
+        if reason is not None:
+            if await db_notice.give_up(pool, row["id"], now, reason):
+                await self._record_outbox(schedule, kind.value, row["text"], row["run_id"],
+                                          schedule.get("notify_channel"), schedule.get("notify_chat"), "failed", reason)
+            return
+        claimed = await db_notice.claim_for_send(pool, row["id"], now)
+        if claimed is None:
+            return
+        row, alert = claimed
+        text = row["text"]
+        if row["role"] == "recovery":
+            text = _recovery_text(text, alert, schedule["timezone"])
+        channel, chat = schedule["notify_channel"], schedule["notify_chat"]
+        outcome = await self._call_sender(channel, chat, text, row["run_id"], schedule)
+        if outcome is None:
+            return  # the claim stays sending; the next start settles it to uncertain
+        await self._finish(row, schedule, channel, chat, text, outcome[0], outcome[1], now)
+
+    async def _retry_refusal(self, schedule: Mapping[str, Any], kind: Kind, run_id: str | None) -> str | None:
+        """Why a due retry must stop without calling the sender, or None when the current target may be sent to."""
         from .schedules import notify_targets
 
+        if schedule["notify"] == "never":
+            return "the schedule no longer sends notifications"
+        channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
+        if not channel or not chat:
+            return "the schedule no longer has a notification target"
+        if kind is not Kind.RUN and schedule.get("notify_format") == "deliverable":
+            return "the alert stays on the dashboard"
+        if await _held_back(schedule, run_id):
+            return "the subscription target is not confirmed"
+        if self._sender is None:
+            return "this server cannot send messages"
+        if not any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
+            return ("the notification target is unavailable: "
+                    "its allowlist entry or chat binding was removed")
+        return None
+
+    async def _deliver(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None = None) -> str:
+        """Record a completion notice after its send. Enqueue an alert or recovery; the retry pass sends it.
+
+        The scheduler tick does not wait for that send. A pre-send refusal stays on the dashboard and is not a row.
+        A schedule that is already gone is logged and not raised.
+        """
+        if schedule is None:
+            logger.info("a schedule was deleted: its %s message is not recorded", kind.value)
+            return "failed"
         if schedule.get("kind") == "subscription":
             # Read afresh: the target, its confirmation and whether it notifies may have changed since the caller
             # read the schedule (this run's end, an alert's check), and a notice goes only where it may now.
             schedule = await db_schedules.get_schedule(schedule["id"]) or schedule
+        if kind is Kind.RUN:
+            return await self._deliver_run(schedule, text, run_id=run_id)
+        return await self._enqueue_notice(schedule, kind, text, run_id=run_id)
+
+    async def _deliver_run(self, schedule: Mapping[str, Any], text: str, *, run_id: str | None) -> str:
+        """A completion notice, sent here. A refusal or a raised send is replayed the next time the run ends."""
+        from .schedules import notify_targets
+
         channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
         status, error = "dashboard", None
-        dashboard_alert = kind is not Kind.RUN and schedule.get("notify_format") == "deliverable"
-        # A subscription's notices (failures and alerts too) go only where its pushes may: through the same check.
         unconfirmed = await _held_back(schedule, run_id)
-        if channel and chat and schedule["notify"] != "never" and not dashboard_alert and not unconfirmed:
+        if channel and chat and schedule["notify"] != "never" and not unconfirmed:
             if not any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
                 error = ("the notification target is unavailable: "
                          "its allowlist entry or chat binding was removed")
@@ -648,7 +815,6 @@ class Notifier:
                 try:
                     from .subscription_runs import push_target
 
-                    # Keep the scheduler's existing notification target convention.
                     with turn_metrics.proactive_send(turn_metrics.ProactiveSource.SCHEDULE, run_id,
                                                      schedule.get("manager_id"), group=push_target(channel, chat).group):
                         sent, error = await self._sender(builtin_channel_id(channel), chat, text)
@@ -656,13 +822,102 @@ class Notifier:
                     sent, error = False, f"{type(exc).__name__}: {exc}"
                 status = "sent" if sent else "failed"
             if status == "failed" or error:
-                logger.warning("schedule %s: the %s message to %s could not be sent", schedule["id"], kind.value, channel)
+                logger.warning("schedule %s: the %s message to %s could not be sent", schedule["id"], Kind.RUN.value,
+                               channel)
+        await self._record_outbox(schedule, Kind.RUN.value, text, run_id, channel, chat, status, error)
+        return status
+
+    async def _enqueue_notice(self, schedule: Mapping[str, Any], kind: Kind, text: str, *,
+                              run_id: str | None) -> str:
+        """Open this alert or recovery as ``pending`` and due now. The retry pass sends it."""
+        from .schedules import notify_targets
+
+        channel, chat = schedule.get("notify_channel"), schedule.get("notify_chat")
+        status, error = "dashboard", None
+        dashboard_alert = schedule.get("notify_format") == "deliverable"
+        unconfirmed = await _held_back(schedule, run_id)
+        if channel and chat and schedule["notify"] != "never" and not dashboard_alert and not unconfirmed:
+            if not any((t["channel"], t["chat"]) == (channel, chat) for t in await notify_targets()):
+                error = ("the notification target is unavailable: "
+                         "its allowlist entry or chat binding was removed")
+            elif self._sender is None:
+                error = "this server cannot send messages"
+            else:
+                return await self._open_notice(schedule, kind, text, run_id=run_id, channel=channel, chat=chat)
+            if error:
+                logger.warning("schedule %s: the %s message to %s could not be sent", schedule["id"], kind.value,
+                               channel)
+        await self._record_outbox(schedule, kind.value, text, run_id, channel, chat, status, error)
+        return status
+
+    async def _open_notice(self, schedule: Mapping[str, Any], kind: Kind, text: str, *, run_id: str | None,
+                           channel: str, chat: str) -> str:
+        mapped = _family_role(kind)
+        if mapped is None:
+            return "failed"
+        family, role = mapped
+        now = self._clock()
+        pool = db_connection.get_pool()
+        try:
+            if role == "alert":
+                failures = int(schedule["consecutive_failures"]) if kind is Kind.FAILURES_ALERT else None
+                row = await db_notice.open_alert(
+                    pool, schedule_id=schedule["id"], kind=family, run_id=run_id, text=text, channel=channel,
+                    chat=chat, failures=failures, now=now)
+            else:
+                row = await db_notice.open_recovery(
+                    pool, schedule_id=schedule["id"], kind=family, run_id=run_id, text=text, channel=channel,
+                    chat=chat, now=now)
+        except asyncpg.ForeignKeyViolationError:
+            logger.info("schedule %s was deleted: its %s message is not recorded", schedule["id"], kind.value)
+            return "failed"
+        if row is None:
+            if await db_schedules.get_schedule(schedule["id"]) is None:
+                logger.info("schedule %s was deleted: its %s message is not recorded", schedule["id"], kind.value)
+            return "failed"
+        return "pending"
+
+    async def _call_sender(self, channel: str, chat: str, text: str, run_id: str | None,
+                           schedule: Mapping[str, Any]) -> tuple[PostOutcome, str | None] | None:
+        """None when the send was cancelled and the claim must stay ``sending``."""
+        from .subscription_runs import push_target
+
+        assert self._sender is not None
+        try:
+            with turn_metrics.proactive_send(turn_metrics.ProactiveSource.SCHEDULE, run_id, schedule.get("manager_id"),
+                                             group=push_target(channel, chat).group):
+                result = await self._sender(builtin_channel_id(channel), chat, text)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+            return None
+        except Exception as exc:  # in the channel's hands: it may have gone
+            return PostOutcome.UNKNOWN, f"{type(exc).__name__}: {exc}"
+        return _outcome(result)
+
+    async def _finish(self, row: Any, schedule: Mapping[str, Any], channel: str, chat: str, text: str,
+                      outcome: PostOutcome, error: str | None, now: datetime) -> str:
+        if outcome is PostOutcome.REJECTED and not error:
+            error = "the channel refused the send"
+        state, nxt = _retry_state(outcome, int(row["retries"]), now)
+        kind = _outbox_kind(row)
+        await db_notice.finish_send(
+            db_connection.get_pool(), int(row["id"]), outcome=outcome.value,
+            error=None if outcome is PostOutcome.SENT else error, now=now, rejected_state=state, rejected_at=nxt)
+        status = "sent" if outcome is PostOutcome.SENT else "failed"
+        await self._record_outbox(schedule, kind, text, row["run_id"], channel, chat, status,
+                                  None if outcome is PostOutcome.SENT else error)
+        if outcome is not PostOutcome.SENT:
+            logger.warning("schedule %s: the %s message to %s could not be sent", schedule["id"], kind, channel)
+        return status
+
+    async def _record_outbox(self, schedule: Mapping[str, Any], kind: str, text: str, run_id: str | None,
+                             channel: str | None, chat: str | None, status: str, error: str | None) -> None:
         try:
             await db_schedules.insert_notification(
-                db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=kind.value, channel=channel,
-                chat=chat, text=text, status=status, error=error,
-            )
+                db_connection.get_pool(), schedule_id=schedule["id"], run_id=run_id, kind=kind, channel=channel,
+                chat=chat, text=text, status=status, error=error)
         except asyncpg.ForeignKeyViolationError:
             # Deleted since the message was written: its outbox went with it.
-            logger.info("schedule %s was deleted: its %s message is not recorded", schedule["id"], kind.value)
-        return status
+            logger.info("schedule %s was deleted: its %s message is not recorded", schedule["id"], kind)

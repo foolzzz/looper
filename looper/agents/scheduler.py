@@ -474,6 +474,8 @@ class Scheduler:
         self._adopted: set[str] = set()
         # Gates and messages under way; stopping cancels them.
         self._background: set[asyncio.Task[Any]] = set()
+        # The one notice-retry task. The loop does not wait for it.
+        self._notice_retries: asyncio.Task[Any] | None = None
         self._drain = drain
         self._starting = 0
         self._gates = 0
@@ -543,11 +545,13 @@ class Scheduler:
     async def start(self) -> None:
         if self._commands is not None:
             await asyncio.to_thread(self._commands.prepare)
-        # A gate cannot outlive the server that ran it.
+        # A gate cannot outlive the server that ran it. A notice claimed as sending cannot be told from one the
+        # channel already accepted, so it is uncertain and is not sent again.
         async with db_connection.transaction() as conn:
             if count := await db_schedules.fail_gating_runs(conn, self._clock()):
                 logger.warning("%d schedule run(s) were checking their gate when the server stopped: gate_failed",
                                count)
+        await self._notifier.settle_stopped()
         self._loop_task = asyncio.create_task(self._loop())
         logger.info("scheduler started: checks the schedules every %g s", self._tick_seconds)
 
@@ -580,9 +584,51 @@ class Scheduler:
         }
 
     async def idle(self) -> None:
-        """Wait for the gates and messages under way, and those they start."""
+        """Wait for the gates and messages under way, and those they start.
+
+        When this scheduler sends notices, also send the retries that are due, after that wait. A recovery is
+        claimed only once its alert is no longer sending, so the recovery can say whether the alert was
+        delivered. A scheduler with no sender (a message backup and nothing else) does not query the database
+        for this. The running loop does not wait: it keeps one retry task in the background.
+        """
         while self._background:
             await asyncio.gather(*list(self._background), return_exceptions=True)
+        if self._notifier._sender is None:
+            return
+        await self._retry_notices()
+
+    def _notice_retries_paused(self) -> bool:
+        return self._drain is not None and self._drain.draining
+
+    async def _retry_notices(self) -> None:
+        if self._notice_retries_paused():
+            return
+        await self._notifier.retry_due(self._clock(), paused=self._notice_retries_paused)
+
+    def _kick_notice_retries(self) -> None:
+        """Start the one background retry pass. A pass already running is left to finish."""
+        if self._notifier._sender is None:
+            return
+        current = self._notice_retries
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(self._retry_notices_background())
+        self._notice_retries = task
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._forget_notice_retries)
+
+    async def _retry_notices_background(self) -> None:
+        try:
+            await self._retry_notices()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("scheduler notice retries failed")
+
+    def _forget_notice_retries(self, task: asyncio.Task[Any]) -> None:
+        if self._notice_retries is task:
+            self._notice_retries = None
 
     def _spawn(self, job: Any, *, gate: bool = False) -> None:
         task = asyncio.ensure_future(job)
@@ -601,6 +647,8 @@ class Scheduler:
             try:
                 await self.tick()
                 self._last_tick_at = self._last_ok_tick_at = self._clock()
+                # Waiting here would let one stuck send stop the ticks.
+                self._kick_notice_retries()
             except asyncio.CancelledError:
                 raise
             except Exception:

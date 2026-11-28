@@ -324,18 +324,24 @@ class TelegramChannelAdapter(ChannelAdapter):
     async def notify(self, chat: str, text: str, *, idempotency_key: str | None = None) -> DeliveryReceipt:
         """Send ``text`` as plain text to Telegram chat ``chat`` (a user's private chat has the user's id)."""
         if self._app is None:
-            return DeliveryReceipt(channel="telegram", success=False, error="the Telegram bot is not started")
+            return DeliveryReceipt(channel="telegram", success=False, error="the Telegram bot is not started",
+                                   outcome=PostOutcome.REJECTED)
         text = self._redact(text)
         if chat_settings.outbound_enabled():
             receipt = await self._outbox_messages(chat, text, key=idempotency_key, source=OutboxSource.NOTIFY)
             return self._delivery_receipt(receipt)
+        sent_id: str | None = None
         try:
             for chunk in self._split_message(text, max_len=4000):
                 msg = await self._app.bot.send_message(chat_id=int(chat), text=chunk)
-            return DeliveryReceipt(channel="telegram", success=True, external_id=str(msg.message_id))
+                sent_id = str(msg.message_id)
+            return DeliveryReceipt(channel="telegram", success=True, external_id=sent_id)
         except Exception as exc:
             logger.warning("telegram notification to %s failed: %s", chat, exc)
-            return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)), outcome=_post_outcome(exc))
+            # A later part failing after an earlier one left is not a refusal: that message may be in the chat.
+            outcome = PostOutcome.UNKNOWN if sent_id is not None else _post_outcome(exc)
+            return DeliveryReceipt(channel="telegram", success=False, error=redact(str(exc)),
+                                   external_id=sent_id, outcome=outcome)
 
     async def post(self, target: NotifyTarget, text: str, *, reply_to: str | None = None,
                    idempotency_key: str | None = None) -> PostReceipt:
@@ -576,9 +582,14 @@ class TelegramChannelAdapter(ChannelAdapter):
 
     @staticmethod
     def _delivery_receipt(receipt: PostReceipt) -> DeliveryReceipt:
+        # A failure that names nothing is unknown (it may have been queued). Any id already kept means a part left.
+        outcome = None
+        if not receipt.success:
+            outcome = PostOutcome.UNKNOWN if receipt.external_ids else receipt.result
         return DeliveryReceipt(channel='telegram', success=receipt.success,
                                external_id=receipt.external_ids[-1] if receipt.external_ids else None,
-                               error=redact(receipt.error) if receipt.error else None)
+                               error=redact(receipt.error) if receipt.error else None,
+                               outcome=outcome)
 
     async def _outbox_messages(self, chat: str, text: str, *, key: str | None = None,
                                message_id: str | None = None, reply_to: int | None = None,
@@ -606,7 +617,10 @@ class TelegramChannelAdapter(ChannelAdapter):
                                                          replace_rejected=True)
             sent.extend(receipt.external_ids)
             if not receipt.success:
-                return replace(receipt, external_ids=tuple(sent), error=redact(receipt.error or 'delivery failed'))
+                # Any part already handed over may be in the chat, so the whole message is not asked again.
+                outcome = PostOutcome.UNKNOWN if sent else receipt.outcome
+                return replace(receipt, external_ids=tuple(sent),
+                               error=redact(receipt.error or 'delivery failed'), outcome=outcome)
         return PostReceipt(True, external_ids=tuple(sent))
 
     async def _send_answer(self, chat_id: int, text: str, *, message_id: str | None = None,

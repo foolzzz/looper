@@ -255,7 +255,8 @@ def test_ineligible_outputs_and_run_alerts_bypass_delivery(monkeypatch, tmp_path
         else:
             sender = with_sender(env)
             schedule = await db_schedules.get_schedule(sid)
-            assert await env.scheduler._notifier._deliver(schedule, Kind.FAILURES_ALERT, TEXT) == "sent"
+            assert await env.scheduler._notifier._deliver(schedule, Kind.FAILURES_ALERT, TEXT) == "pending"
+            await env.scheduler.idle()
             assert sender.sent == [("channel-lark", DM, TEXT)]
             return
         await fire(env, sid)

@@ -725,6 +725,7 @@ def test_serve_loads_wait_settings_and_owns_wait_service_lifecycle(
                 value.bus = bus  # the Manager fleet's bus
             if name == "ChannelRegistry":
                 value.register = AsyncMock()
+                value.notify_outcome = AsyncMock()
                 value.prepare_stop_all = MagicMock(side_effect=lambda: events.append("registry.prepare_stop_all"))
             if name == "Scheduler":
                 value.day_start = lambda now: now

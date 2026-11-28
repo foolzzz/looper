@@ -50,6 +50,60 @@ class PostOutcome(StrEnum):
     UNKNOWN = "unknown"
 
 
+class NotifyAnswer:
+    """``(sent, error)`` plus the :class:`PostOutcome`. A tuple cannot carry the outcome (a subtype may not add
+    slots), so this unpacks and compares as that pair. A schedule retry reads ``outcome`` so a send that may have
+    gone is not asked again."""
+
+    __slots__ = ("outcome", "_pair")
+
+    def __init__(self, outcome: PostOutcome, error: str | None = None) -> None:
+        sent = outcome is PostOutcome.SENT
+        self.outcome = outcome
+        self._pair = (sent, None if sent else error)
+
+    def __iter__(self):
+        return iter(self._pair)
+
+    def __len__(self) -> int:
+        return 2
+
+    def __getitem__(self, index: int):
+        return self._pair[index]
+
+    @property
+    def error(self) -> str | None:
+        return self._pair[1]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, NotifyAnswer):
+            return self.outcome is other.outcome and self._pair == other._pair
+        if isinstance(other, tuple):
+            return self._pair == other
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(self._pair)
+
+    def __repr__(self) -> str:
+        return f"NotifyAnswer({self.outcome.value}, error={self._pair[1]!r})"
+
+
+def notice_answer(success: bool, error: str | None, outcome: PostOutcome | None, *,
+                  sent_any: bool = False) -> NotifyAnswer:
+    """How a schedule retry reads a channel send.
+
+    A missing outcome, or any part that already left, may have been accepted: ``UNKNOWN``, and it is not asked
+    again. Only an explicit refusal before anything was sent is ``REJECTED`` and may be retried. ``notify`` itself
+    stays a ``(sent, error)`` pair; the schedule path is the caller of this.
+    """
+    if success:
+        return NotifyAnswer(PostOutcome.SENT)
+    if sent_any or outcome is None or outcome is PostOutcome.SENT:
+        return NotifyAnswer(PostOutcome.UNKNOWN, error)
+    return NotifyAnswer(outcome, error)
+
+
 @dataclass(frozen=True)
 class PostReceipt:
     """What posting a message to a chat did: the ids of the channel messages sent (several when it was split), or

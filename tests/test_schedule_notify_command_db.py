@@ -79,6 +79,7 @@ def test_daily_command_deadline_alert_and_manual_recovery(monkeypatch, tmp_path)
         env.clock.now = today.replace(hour=8, second=15).astimezone(UTC)
         for _ in range(3):
             await env.scheduler.tick()
+        await env.scheduler.idle()
         assert [n["kind"] for n in await notices(env, sid)] == ["run", "deadline_alert"]
         await env.pool.execute("UPDATE schedules SET command='true' WHERE id=$1", sid)
         assert (await ended_command(env, sid))["status"] == "succeeded"
@@ -99,6 +100,7 @@ def test_deadline_only_covers_fires_after_enable(monkeypatch, tmp_path, weekday_
         env.clock.now = local(enabled_day, enabled_hour)
         sid = await configured(env, success_deadline="08:00", cron="30 5 * * 1-5" if weekday_only else "30 5 * * *")
         await env.scheduler._notifier.check_deadlines(local(check_day, 8))
+        await env.scheduler.idle()
         assert [n["kind"] for n in await notices(env, sid)] == (["deadline_alert"] if expected else [])
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -116,6 +118,7 @@ def test_deadline_describes_open_or_last_run_and_accepts_gate_success(monkeypatc
         if status == "skipped_gate":
             await db_schedules.count_outcome(env.pool, sid, status, local(15, 5, 30))
         await env.scheduler._notifier.check_deadlines(local(15, 8))
+        await env.scheduler.idle()
         rows = await notices(env, sid)
         if status == "skipped_gate":
             assert rows == []
@@ -136,6 +139,7 @@ def test_failure_threshold_defaults_and_override(monkeypatch, tmp_path, kind, th
                                                    trigger="manual", status="failed", finished_at=env.clock.now)
             await db_schedules.count_outcome(env.pool, sid, "failed", env.clock.now)
             await asyncio.gather(*(env.scheduler._notifier.run_ended(run_id) for _ in range(2)))
+            await env.scheduler.idle()
             assert len(await notices(env, sid)) == int(n >= (threshold or 3))
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -150,6 +154,7 @@ def test_stale_window_exact_boundary(monkeypatch, tmp_path):
         await env.scheduler._notifier.check_stale(local(15, 5, 30) + timedelta(seconds=599))
         assert await notices(env, sid) == []
         await env.scheduler._notifier.check_stale(local(15, 5, 40))
+        await env.scheduler.idle()
         assert [n["kind"] for n in await notices(env, sid)] == ["stale_alert"]
     run_scheduled(test, monkeypatch, tmp_path)
 
@@ -219,6 +224,7 @@ def test_deadline_alert_is_atomic_dashboard_visible_and_suppressed_when_never(mo
         sid = await configured(env, success_deadline="08:00", notify=notify)
         env.clock.now = local(15, 8)
         await asyncio.gather(*(env.scheduler._notifier.check_deadlines(env.clock.now) for _ in range(2)))
+        await env.scheduler.idle()
         [notice] = await notices(env, sid)
         assert notice["status"] == ("dashboard" if notify == "never" else "sent")
         assert len(sender.sent) == (0 if notify == "never" else 1)
@@ -261,6 +267,7 @@ def test_changing_deadline_starts_a_new_window(monkeypatch, tmp_path):
         await env.scheduler._notifier.check_deadlines(env.clock.now)
         assert await notices(env, sid) == []
         await env.scheduler._notifier.check_deadlines(local(16, 8))
+        await env.scheduler.idle()
         assert [n["kind"] for n in await notices(env, sid)] == ["deadline_alert"]
         await schedules.update_schedule(sid, {"enabled": False}, now=local(16, 9))
         await env.pool.execute("UPDATE schedules SET deadline_alert_at=NULL WHERE id=$1", sid)
@@ -278,6 +285,7 @@ def test_deadline_in_daylight_saving_gap_uses_the_next_valid_instant(monkeypatch
         await env.scheduler._notifier.check_deadlines(due - timedelta(seconds=1))
         assert await notices(env, sid) == []
         await env.scheduler._notifier.check_deadlines(due)
+        await env.scheduler.idle()
         [notice] = await notices(env, sid)
         assert notice["kind"] == "deadline_alert" and "03:00 PDT" in notice["text"]
     run_scheduled(test, monkeypatch, tmp_path)

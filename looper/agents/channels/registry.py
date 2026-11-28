@@ -22,7 +22,7 @@ from ..message import parse_channel_id
 from ..task_notice import NotifyTarget
 from ..ops.leads import for_group
 from ..log_redaction import redact
-from .base import ChannelAdapter, PostOutcome, PostReceipt
+from .base import ChannelAdapter, NotifyAnswer, PostOutcome, PostReceipt, notice_answer
 from .proactive import store_body
 from .chat_routing import RouteDecision, RoutingSnapshot, load_snapshot
 from .lark_quote import QuoteRead, QuoteReader, QuoteRef, QuoteUnavailable
@@ -227,6 +227,44 @@ class ChannelRegistry:
                                           group=group,
                                           external_id=receipt.external_id, outcome=receipt.result.value, dedupe_key=record_key)
         return receipt.success, receipt.error
+
+    async def notify_outcome(self, channel_id: str, chat: str, text: str, *,
+                             idempotency_key: str | None = None, proactive: ProactiveRef | None = None,
+                             group: bool = False) -> NotifyAnswer:
+        """``notify`` for a schedule retry: the same send, plus whether it was refused or may have been accepted.
+
+        A missing outcome, and a send of which any part already left, are unknown and are not asked again. Only a
+        refusal before anything was sent is rejected. Every other caller keeps ``notify``'s ``(sent, error)`` pair.
+        """
+        context_ref, context_group = turn_metrics.current_proactive()
+        proactive = proactive or context_ref
+        group = group or context_group
+        record_key = (proactive.dedupe_key or idempotency_key or str(uuid4())) if proactive else idempotency_key
+        adapter = self._channels.get(channel_id)
+        if adapter is None:
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
+                                              group=group, external_id=None,
+                                              outcome=PostOutcome.REJECTED.value, dedupe_key=record_key)
+            return notice_answer(False, self._not_running(channel_id), PostOutcome.REJECTED)
+        await store_body(proactive, text, channel_id=channel_id, chat=chat,
+                         group=group, dedupe_key=record_key or "")
+        try:
+            receipt = await adapter.notify(chat, text, **({"idempotency_key": idempotency_key}
+                                                        if idempotency_key is not None else {}))
+        except Exception:
+            self.record_delivery(channel_id, False)
+            if proactive is not None:
+                turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat, group=group,
+                                              external_id=None, outcome=PostOutcome.UNKNOWN.value, dedupe_key=record_key)
+            raise
+        self.record_delivery(channel_id, receipt.success)
+        if proactive is not None:
+            turn_metrics.record_proactive(proactive, channel_id=channel_id, chat=chat,
+                                          group=group,
+                                          external_id=receipt.external_id, outcome=receipt.result.value, dedupe_key=record_key)
+        sent_any = bool(receipt.external_id) and not receipt.success
+        return notice_answer(receipt.success, receipt.error, receipt.outcome, sent_any=sent_any)
 
     async def post(self, channel_id: str, target: NotifyTarget, text: str, *,
                    reply_to: str | None = None, idempotency_key: str | None = None,
