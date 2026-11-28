@@ -315,4 +315,4 @@ def _git(cwd: Path, *args: str, input: str | None = None) -> subprocess.Complete
 def _failure(command: str, run: subprocess.CompletedProcess[bytes] | None) -> str:
     if run is None:
         return f"git {command} did not run in {GIT_TIMEOUT_SEC} s"
-    return f"git {command} failed: {(run.stderr or run.stdout).decode('utf-8', 'replace').strip()[:200]}"
+    return str(git_safe.GitFailure.of(command.split(), run.returncode))

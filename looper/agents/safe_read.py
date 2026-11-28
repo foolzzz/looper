@@ -25,7 +25,7 @@ import os
 import stat
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -43,10 +43,12 @@ class Skip(StrEnum):
 
 @dataclass(frozen=True)
 class Content:
-    """The first ``limit`` bytes of the file and its size when it was opened."""
+    """The first ``limit`` bytes of the file, its size when it was opened, and which file it was: the ``(st_dev,
+    st_ino)`` of the descriptor that was read, so a caller can tell two names of one file apart from two files."""
 
     data: bytes
     size: int
+    identity: tuple[int, int] = field(default=(0, 0), compare=False)
 
 
 @dataclass(frozen=True)
@@ -169,7 +171,7 @@ def _read_opened(directory: int, fd: int, name: str, limit: int, clip: bool) -> 
         return _io_error(exc)
     if len(data) > limit and not clip:  # it grew after it was measured
         return Skipped(Skip.TOO_LARGE)
-    return Content(data[:limit], max(st.st_size, len(data)))
+    return Content(data[:limit], max(st.st_size, len(data)), (st.st_dev, st.st_ino))
 
 
 @contextmanager

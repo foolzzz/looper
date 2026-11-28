@@ -13,6 +13,7 @@ from ..chat_targets import HTTP_409, ChatTargetError, resolve_chat_target
 from ..ops import ErrorCode, OpError
 from ..tiers.manager import is_new_session_command
 from ..task_manager_settings import ModelSwitchRejection
+from ..task_manager_project_instructions import SKIPPED_NOTICE
 from ..task_manager_refs import NOTICES, Change, NotRestorable
 
 
@@ -65,7 +66,7 @@ SCHEMAS = {
                                                               ["before", "after"], closed=True)]},
                  "own_commits": {"type": "integer", "minimum": 0}, "needs_you": {"type": "boolean"}},
                 ["kind", "message_id", "report_id", "changes", "info", "head", "own_commits", "needs_you"], closed=True),
-        _object({"kind": {"const": "sandbox_notice"}, "notice": {"enum": list(NOTICES)}, "detail": _STR, "message_id": _NULL_STR},
+        _object({"kind": {"const": "sandbox_notice"}, "notice": {"enum": [*NOTICES, SKIPPED_NOTICE]}, "detail": _STR, "message_id": _NULL_STR},
                 ["kind", "notice", "detail"], closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"enum": [

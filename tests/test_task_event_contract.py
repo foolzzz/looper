@@ -60,6 +60,8 @@ def _payloads():
          "info": [], "changes": [{"ref": "refs/heads/dir", "change": "unreadable", "old": None, "new": None,
                                   "restore": None, "not_restorable": "ref_file_unreadable"}]},
         {"kind": "sandbox_notice", "notice": "first_enable_in_place", "detail": "text"},
+        {"kind": "sandbox_notice", "notice": "project_instructions_skipped", "detail": "CLAUDE.md: outside"},
+        {"kind": "sandbox_notice", "notice": "project_instructions_skipped", "detail": "CLAUDE.md: outside", "message_id": "m3"},
         {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text"},
         {"kind": "sandbox_notice", "notice": "refs_unreadable", "detail": "text", "message_id": "m2"},
         {"kind": "refused", "reason": "orchestrated", "status": "running"},

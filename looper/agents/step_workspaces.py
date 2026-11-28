@@ -101,8 +101,9 @@ class IllegalTransition(ValueError):
 
 
 class GitError(Exception):
-    """A git command failed or timed out; the message has its output. ``reason`` is ``repository_refused:<code>``
-    (the codes of ``git_safe.RepositoryRefused``) when Looper would not run git in the directory, else None."""
+    """A git command failed or timed out. The message never has git's output: a failed command is its
+    ``git_safe.GitFailure``. ``reason`` is ``repository_refused:<code>`` (the codes of ``git_safe.RepositoryRefused``)
+    when Looper would not run git in the directory, else None."""
 
     def __init__(self, message: str, reason: str | None = None):
         super().__init__(message)
@@ -127,7 +128,7 @@ class StepWorkspace:
     merge_commit: str | None = None  # written before the branch moves to it
     state: StepWorkspaceState = StepWorkspaceState.ACTIVE
     merge_error: MergeError | None = None  # set when state is unmerged
-    detail: str = ""  # the conflicting or blocking files, or git's error
+    detail: str = ""  # the conflicting or blocking files, or why git failed (never git's output)
     removed_at: datetime | None = None  # its directory and branch are gone
     # The paths, relative to the task directory, linked back to the task directory's in it.
     links: tuple[str, ...] = ()
@@ -258,9 +259,13 @@ async def _git(cwd: str | Path, *args: str, identity: bool = False, check: bool 
     await git_safe.recheck_async(process)
     run = _Run(process.returncode or 0, stdout, stderr)
     if check and run.returncode != 0:
-        output = (stderr or stdout).decode("utf-8", "replace").strip()
-        raise GitError(f"git {' '.join(args[:3])} failed: {output[:500] or f'exit {run.returncode}'}")
+        raise _failed(run, *args)
     return run
+
+
+def _failed(run: _Run, *args: str) -> GitError:
+    """The error for ``git args`` that ran and failed: its reason, none of its output."""
+    return GitError(str(git_safe.GitFailure.of(args, run.returncode)))
 
 
 async def _rev(cwd: str | Path, rev: str) -> str:
@@ -270,7 +275,7 @@ async def _rev(cwd: str | Path, rev: str) -> str:
 async def _is_ancestor(cwd: str | Path, ancestor: str, descendant: str) -> bool:
     run = await _git(cwd, "merge-base", "--is-ancestor", ancestor, descendant, check=False)
     if run.returncode not in (0, 1):
-        raise GitError(f"git merge-base failed: {run.stderr.decode('utf-8', 'replace').strip()[:500]}")
+        raise _failed(run, "merge-base")
     return run.returncode == 0
 
 
@@ -700,7 +705,7 @@ async def _check_frozen_result(workspace: StepWorkspace) -> None:
                             f"the step's checkout is no longer on its branch {prompt_name(workspace.branch)}")
         staged = await _git(path, "diff", "--cached", "--quiet", workspace.result_commit, "--", check=False)
         if staged.returncode not in (0, 1):
-            raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
+            raise _failed(staged, "diff")
         if staged.returncode == 1:
             raise _Unmerged(MergeError.STEP_BRANCH_CHANGED,
                             "the step's index no longer matches its frozen review result")
@@ -717,7 +722,7 @@ async def commit_pending(path: Path, links: Sequence[str], message: str) -> str 
         await _git(path, "rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *(f":(literal){p}" for p in links))
     staged = await _git(path, "diff", "--cached", "--quiet", check=False)
     if staged.returncode not in (0, 1):
-        raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
+        raise _failed(staged, "diff")
     if staged.returncode == 0:
         return None
     await _git(path, "commit", "-q", "--no-verify", "--no-gpg-sign", "-m", message, identity=True)
@@ -738,7 +743,7 @@ async def commit_paths(path: Path, paths: Sequence[str], links: Sequence[str], m
         await _git(path, "add", "-A", "--", *present)
     staged = await _git(path, "diff", "--cached", "--quiet", "--", *chosen, check=False)
     if staged.returncode not in (0, 1):
-        raise GitError(f"git diff --cached failed: {staged.stderr.decode('utf-8', 'replace').strip()[:500]}")
+        raise _failed(staged, "diff")
     if staged.returncode == 0:
         return None
     await _git(path, "commit", "-q", "--no-verify", "--no-gpg-sign", "--only", "-m", message, "--", *chosen,
@@ -799,7 +804,7 @@ async def _merge_into_target(workspace: StepWorkspace, step_key: str, title: str
             raise _Unmerged(MergeError.CONFLICT,
                             f"conflicts with {prompt_name(target)} in {_files_detail(conflicts)}", conflicts)
         if computed.returncode != 0:
-            raise GitError(f"git merge-tree failed: {computed.stderr.decode('utf-8', 'replace').strip()[:500]}")
+            raise _failed(computed, "merge-tree")
         merge_commit = (await _git(
             repo, "commit-tree", "--no-gpg-sign", fields[0], "-p", head, "-p", result,
             "-m", f"looper: merge step {step_key}: {title}" + _trailers(workspace.task_id, step_key),
@@ -817,7 +822,7 @@ async def _merge_into_target(workspace: StepWorkspace, step_key: str, title: str
         if moved.returncode == 0:
             return workspace, tuple(files)
         if await _rev(repo, "HEAD") == head:
-            raise GitError(f"git merge --ff-only failed: {moved.stderr.decode('utf-8', 'replace').strip()[:500]}")
+            raise _failed(moved, "merge")
         # The branch moved meanwhile: compute the merge again on its new tip.
     raise _Unmerged(MergeError.BRANCH_CHANGED, f"{prompt_name(target)} kept moving while the step was merged")
 
@@ -870,8 +875,7 @@ async def branch_checked_out(repo_dir: str, branch: str) -> bool:
     """
     run = await _git(repo_dir, "worktree", "list", "--porcelain", check=False)
     if run.returncode != 0:
-        detail = (run.stderr or run.stdout).decode("utf-8", "replace").strip()[:500]
-        raise GitError(f"git worktree list failed: {detail or f'exit {run.returncode}'}")
+        raise _failed(run, "worktree")
     needle = f"branch refs/heads/{branch}"
     return any(line == needle for line in run.text.splitlines())
 
