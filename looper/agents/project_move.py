@@ -289,9 +289,9 @@ async def _repair(move: ProjectMove, worktrees: list[Any], source: str,
             args = ("--git-dir=.",) if bare else ()
             # The moved checkouts' links are stale: that is what repair fixes, so their layout is not checked.
             run = await step_workspaces._git(repo, *args, "worktree", "repair", *sorted(set(paths)), layout=False)
-            output = (run.stdout + run.stderr).decode("utf-8", "replace").strip()
-            result = {"repository": str(repo), "ok": True, "output": output}
-            logger.info("repaired moved repository %s: %s", repo, output)
+            # What git printed is not passed on (``git_safe.GitFailure``).
+            result = {"repository": str(repo), "ok": True, "output": ""}
+            logger.info("repaired moved repository %s: git worktree (exit %d)", repo, run.returncode)
         except (step_workspaces.GitError, OSError) as exc:
             result = {"repository": str(repo), "ok": False, "output": str(exc)}
             logger.warning("cannot repair moved repository %s: %s", repo, exc)

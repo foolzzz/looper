@@ -198,19 +198,19 @@ async def _repository(workspace: str) -> _Repository | None:
             if where.stderr.startswith((b"fatal: not a git repository (or any of the parent directories):",
                                         b"fatal: this operation must be run in a work tree")):
                 return None
-            raise ws.GitError(where.stderr.decode("utf-8", "replace").strip()[:500] or
-                              f"git repository inspection failed: exit {where.returncode}")
+            raise ws.GitError("git repository inspection failed: "
+                              f"{git_safe.GitFailure.of(('rev-parse',), where.returncode)}")
         lines = where.stdout.decode("utf-8", "surrogateescape").split("\n")
         toplevel, subdir = lines[0], (lines[1] if len(lines) > 1 else "").rstrip("/")
         head = await ws._git(toplevel, "rev-parse", "--verify", "-q", "HEAD^{commit}", check=False)
         if head.returncode != 0:
-            raise ws.GitError(head.stderr.decode("utf-8", "replace").strip()[:500] or
-                              "git HEAD inspection failed: the repository has no readable commit")
+            raise ws.GitError("git HEAD inspection failed: the repository has no readable commit "
+                              f"({git_safe.GitFailure.of(('rev-parse',), head.returncode)})")
         branch = await ws._git(toplevel, "symbolic-ref", "-q", "HEAD", check=False)
         if branch.returncode != 0 and not (branch.returncode == 1 and not branch.stdout and not branch.stderr):
             # symbolic-ref -q exits 1 without output for a detached HEAD.
-            raise ws.GitError(branch.stderr.decode("utf-8", "replace").strip()[:500] or
-                              f"git branch inspection failed: exit {branch.returncode}")
+            raise ws.GitError("git branch inspection failed: "
+                              f"{git_safe.GitFailure.of(('symbolic-ref',), branch.returncode)}")
     except (ws.GitError, OSError, asyncio.TimeoutError) as exc:
         raise TaskWorkspaceError(f"cannot inspect the workspace {workspace}: {exc}") from None
     return _Repository(toplevel, subdir, head.text, branch.text if branch.returncode == 0 else "")
