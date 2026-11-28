@@ -21,6 +21,7 @@ from ..db import llm_records, profile_registry, provider_limits, system_settings
 from . import attempts
 from .agent_settings import AgentType
 from .lanes import Lane
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 _recovery_recheck = None
@@ -263,7 +264,7 @@ class Controller:
                 task.cancel()
         # Notification cancellation can release a database claim; never await
         # its cleanup while holding the account lock or after closing storage.
-        await asyncio.gather(*pending, return_exceptions=True)
+        await cancel_tasks(pending)
         self.background_tasks.difference_update(pending)
 
     async def _send_notices(self) -> None:

@@ -35,6 +35,7 @@ from ..db import message_stream as store
 from . import cron
 from .bridge_reader import BridgeMessage, FileState, baseline_file, scan_file
 from .drain import DrainState
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -459,18 +460,10 @@ class SourceService:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
         collecting = list(self._collect_tasks.values())
-        for running in collecting:
-            running.cancel()
-        await asyncio.gather(*collecting, return_exceptions=True)
+        alert, self._alert_task = self._alert_task, None
+        await cancel_tasks([task, *collecting, alert])
         self._collect_tasks.clear()
-        if self._alert_task is not None:
-            self._alert_task.cancel()
-            await asyncio.gather(self._alert_task, return_exceptions=True)
-            self._alert_task = None
         if self._alerts is not None:
             await self._alerts.stop()
 
@@ -649,8 +642,7 @@ class SourceService:
         try:
             return await asyncio.wait_for(asyncio.shield(started), 5)
         except BaseException:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            await cancel_tasks([task])
             if not started.done():
                 started.cancel()
             elif not started.cancelled():

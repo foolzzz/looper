@@ -33,6 +33,7 @@ from typing import Any
 from .. import child_env
 from ..db import activity as db_activity, projects as db_projects, tasks as db_tasks, waits as db_waits
 from . import proc_tree, waits
+from .supervisor import cancel_tasks
 from .bus import MessageBus
 from .drain import DrainState
 from .message import AgentAddress, MessageEnvelope, MessageType, channel_address, planner_address
@@ -427,9 +428,7 @@ class WaitService:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await cancel_tasks([task])
 
     async def _loop(self) -> None:
         while True:

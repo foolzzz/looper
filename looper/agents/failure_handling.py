@@ -16,6 +16,7 @@ from typing import Any
 from .failures import Failure, FailureClass, FailureTyping, SETTING_KEY
 from ..db import step_failures as store, system_settings
 from ..db.connection import get_pool
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -474,7 +475,4 @@ class FailureHandlingService:
         self._wake_waits()
         tasks = list(self._timers.values())
         self._timers.clear()
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        await cancel_tasks(tasks)

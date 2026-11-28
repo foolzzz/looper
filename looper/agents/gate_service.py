@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from ..db import activity as db_activity, schedules as db_schedules, system_settings as db_settings, tasks as db_tasks
 from ..db import user_gates as db_user_gates
 from .bus import MessageBus
+from .supervisor import cancel_tasks
 from .message import (AgentAddress, MessageEnvelope, MessageType, builtin_channel_id, is_lark, parse_channel_id,
                       planner_address)
 from .projects import RequestError
@@ -467,9 +468,7 @@ class GateReminders:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await cancel_tasks([task])
 
     async def _loop(self) -> None:
         while True:

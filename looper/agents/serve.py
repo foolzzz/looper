@@ -76,7 +76,7 @@ from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
 from .message import MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS, planner_address
 from .runtimes.runner.supervisor import RunnerSupervisor
-from .supervisor import AgentSupervisor
+from .supervisor import AgentSupervisor, cancel_tasks
 from .tiers import triage_background
 from .tiers.manager import ManagerConfig
 from .tiers.task import TaskRouter
@@ -1319,17 +1319,13 @@ async def _run_agent_system_watched(
         try:
             await stop_event.wait()
         finally:
-            proxy_checks.cancel()
-            channel_checks.cancel()
-            await asyncio.gather(proxy_checks, channel_checks, return_exceptions=True)
+            await cancel_tasks([proxy_checks, channel_checks])
 
         # --- Shutdown ---
 
         async def shut_down() -> None:
             await task_managers.shutdown()
-            advisory_checks.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await advisory_checks
+            await cancel_tasks([advisory_checks], raise_errors=True)
             if mode is ShutdownMode.DETACH_KEPT:
                 await worker_pool.detach_kept(epoch=lease.epoch)
                 await explorers.stop(epoch=lease.epoch)
@@ -1393,9 +1389,7 @@ async def _run_agent_system_watched(
             except Exception:
                 logger.warning("request recording proxy shutdown failed", exc_info=True)
         if advisory_checks is not None:
-            advisory_checks.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await advisory_checks
+            await cancel_tasks([advisory_checks], raise_errors=True)
         try:
             if recognition_service is not None:
                 await recognition_service.stop()

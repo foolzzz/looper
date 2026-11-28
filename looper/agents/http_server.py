@@ -42,7 +42,7 @@ from .channels.web import WebChannelAdapter
 from .channels.chat_routing import log_refusal
 from .channels.registry import ChannelRegistry
 from .scheduler import Scheduler
-from .supervisor import AgentSupervisor
+from .supervisor import AgentSupervisor, cancel_tasks
 from .task_roles import record_role
 from .ops import Call, ErrorCode, OpError, PublicOpError, Risk, Tool, check_arguments
 from .ops.clients import DEFAULT_SESSION, ClientOps
@@ -410,8 +410,7 @@ class AgentHTTPServer:
     async def stop(self) -> None:
         attention.use_status_checks(None, owner=self._checks_now)
         if self._summary_task is not None:
-            self._summary_task.cancel()
-            await asyncio.gather(self._summary_task, return_exceptions=True)
+            await cancel_tasks([self._summary_task])
             self._summary_task = None
         if self._server:
             self._server.close()

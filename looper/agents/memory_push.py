@@ -18,6 +18,7 @@ from . import memory_model as model, memory_settings, memory_write, vault
 from .channels.base import PostOutcome
 from .message import LARK_CHANNEL_TYPES
 from .operator_identity import OPERATOR_KEY
+from .supervisor import cancel_tasks
 from .subscription_runs import push_target
 from .subscriptions import strip_mentions
 
@@ -236,10 +237,8 @@ class MemoryPushService:
         global _active
         if _active is self:
             _active = None
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
+        await cancel_tasks([self._task])
+        self._task = None
 
     async def _loop(self):
         while True:

@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .. import child_env
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -824,9 +825,7 @@ class TurnTree:
 
     async def stop_ticker(self) -> None:
         ticker, self._ticker = self._ticker, None
-        if ticker is not None:
-            ticker.cancel()
-            await asyncio.gather(ticker, return_exceptions=True)
+        await cancel_tasks([ticker])
 
     async def _reused(self, table: Table | None = None) -> frozenset[int]:
         """Reject reused identities durably, and unread identities for this observation. Never replace a

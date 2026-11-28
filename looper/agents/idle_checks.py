@@ -36,6 +36,7 @@ from .message import MessageEnvelope, MessageType, channel_thread_id, manager_ad
 from .operator_identity import DmTarget, operator_dm_target
 from .reminders import target as notify_target
 from .session_routing import MAIN_KEY
+from .supervisor import cancel_tasks
 from .turn_metrics import ProactiveSource
 
 logger = logging.getLogger(__name__)
@@ -591,8 +592,8 @@ class IdleCheckService:
         if task is None:
             return
         self._stopping.set()
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        # A check still running after one second is cancelled again: shutdown does not wait out the tick.
+        await cancel_tasks([task])
 
     async def _loop(self) -> None:
         while not self._stopping.is_set():

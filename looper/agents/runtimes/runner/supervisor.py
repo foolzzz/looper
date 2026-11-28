@@ -15,6 +15,7 @@ import time
 import uuid
 
 from ... import proc_tree
+from ...supervisor import RECANCEL_SEC, cancel_tasks
 from ...log_redaction import add_secret, redact
 from ..per_turn import session_dir_name
 from .bridge import CloseState, ConnectionLost, HostLag, RpcFailure, RunnerBridge
@@ -711,12 +712,8 @@ class RunnerSupervisor:
     async def _stop(self) -> None:
         # Initialization holds the kind lock. Interrupt it before waiting for that
         # lock, and keep every spawn/cleanup owned until its process has been reaped.
-        starts = list(self._starts)
-        for starting in starts:
-            if not starting.done() and not starting.cancelling():
-                starting.cancel()
-        if starts:
-            await asyncio.gather(*starts, return_exceptions=True)
+        # A start still spawning is cancelled again after the reap grace, so a swallowed cancel cannot leave it.
+        await cancel_tasks(list(self._starts), again_after=RECANCEL_SEC)
 
         async def close_kind(state):
             async with state.lock:

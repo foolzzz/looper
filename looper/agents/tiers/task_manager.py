@@ -31,6 +31,7 @@ from ..runtimes.cancel import TurnCancel
 from ..system_prompt import SystemPrompt
 from ..task_manager_brief import brief, instructions
 from ..task_commands import history_for_model
+from ..supervisor import RECANCEL_SEC, cancel_tasks
 from ..untrusted import Source, fence
 
 logger = logging.getLogger(__name__)
@@ -924,11 +925,14 @@ class TaskManagerPool:
             self._available.notify_all()
         for request in queued:
             await self._refuse(request, RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
-        self._ticker.cancel()
-        await asyncio.gather(self._ticker, return_exceptions=True)
+        await cancel_tasks([self._ticker])
         for task in running:
             task.cancel()
-        await asyncio.gather(*(a.resident.stop(kill=True) for a in list(self.agents.values())))
-        await asyncio.gather(*running, *closing, return_exceptions=True)
+        await asyncio.gather(
+            cancel_tasks(running, again_after=RECANCEL_SEC),
+            *(a.resident.stop(kill=True) for a in list(self.agents.values())),
+        )
+        if closing:
+            await asyncio.gather(*closing, return_exceptions=True)
         if _pool is self:
             _pool = None

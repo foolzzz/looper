@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .run_usage import CostStatus, cost_status
+from .supervisor import RECANCEL_SEC, cancel_tasks
 from . import git_safe
 from .llmrec import control as llmrec
 from ..db import llm_records as db_llm_records, projects as db_projects, room as db_room, steps as db_steps
@@ -589,10 +590,8 @@ class ConsultService:
 
     async def stop(self) -> None:
         self._stopping = True
-        for task in list(self._running):
-            task.cancel()
-        if self._running:
-            await asyncio.wait(list(self._running))
+        # A consult still ending its process after the reap grace is cancelled again.
+        await cancel_tasks(list(self._running), again_after=RECANCEL_SEC)
 
 
 # The reasons a consult gives up before its run started (its questions went to the Planner without one).
