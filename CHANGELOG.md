@@ -18,6 +18,60 @@ How the agent system works today is described in
 
 ## [Unreleased]
 
+## [2.15.45] - 2026-11-27
+
+Frozen at `946876e38` (the merge of [#1905](https://github.com/foolzzz/looper/pull/1905)): everything merged to main after v2.15.44's freeze `448632f1f`, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. The release body is [docs/releases/v2.15.45.md](docs/releases/v2.15.45.md). Startup adds three migrations: `task_manager_sandbox_policy` (2160), `manager_action_sender` (2170) and `task_manager_refs` (2180). No runtime dependency changes. The task Manager changes apply only while `tasks.conversations.manager_answers` is on; read Before you upgrade in the release body first.
+
+### Security
+
+- **The Manager's action trail records who started each call** ([#1876](https://github.com/foolzzz/looper/pull/1876), [#1885](https://github.com/foolzzz/looper/pull/1885)).
+- **The task Manager's direct session runs inside Claude Code's Bash sandbox** with a fixed tool list ([#1871](https://github.com/foolzzz/looper/pull/1871)), starts only in a checked, unshared in-place directory ([#1872](https://github.com/foolzzz/looper/pull/1872), [#1890](https://github.com/foolzzz/looper/pull/1890)), is read back before every turn ([#1870](https://github.com/foolzzz/looper/pull/1870)), reports changed branches and tags ([#1878](https://github.com/foolzzz/looper/pull/1878), [#1879](https://github.com/foolzzz/looper/pull/1879)), runs with a classified process environment ([#1886](https://github.com/foolzzz/looper/pull/1886)) and reaches only the domains the operator allows per project, with explanations of denied commands ([#1873](https://github.com/foolzzz/looper/pull/1873)). Off by default.
+- **`looper leads eval-export` asks git through the hardened helper** ([#1881](https://github.com/foolzzz/looper/pull/1881)).
+- **Lark cards @-mention only a well-formed open_id** ([#1883](https://github.com/foolzzz/looper/pull/1883)); **very long Lark text is neutralized in one linear pass** ([#1875](https://github.com/foolzzz/looper/pull/1875)).
+- **The ACP preflight runs isolated; API responses carry `X-Content-Type-Options: nosniff`** ([#1884](https://github.com/foolzzz/looper/pull/1884)).
+- **Project instruction files that Looper reads itself are read only from inside the repository** ([#1901](https://github.com/foolzzz/looper/pull/1901)); the work directory is the boundary when the repository root is or holds the home or Looper's runtime root, and a file of a nested repository is left out ([#1907](https://github.com/foolzzz/looper/pull/1907)); upgrade if you run the DSH or pi runtime, or omp outside a repository.
+- **Looper's git calls refuse a repository that borrows another object store, ignore replacement refs and, on a git that honours `GIT_NO_LAZY_FETCH`, fetch no missing object lazily; the direct session's sandbox write-denies `.git/objects/info`** ([#1905](https://github.com/foolzzz/looper/pull/1905)); repack a repository cloned with `--shared` or `--reference` and remove its alternates file before you upgrade, or new tasks there are refused.
+
+### Fixed
+
+- **The profile reader no longer times out on a cold import** ([#1889](https://github.com/foolzzz/looper/pull/1889)).
+- **A runner that answered its health probe is no longer reclaimed after a host stall** ([#1888](https://github.com/foolzzz/looper/pull/1888)).
+- **A task stop survives a failing cleanup step, and a late Planner status no longer overwrites it** ([#1900](https://github.com/foolzzz/looper/pull/1900)).
+- **A Lark channel stop is no longer lost when a send completes as it is cancelled** ([#1903](https://github.com/foolzzz/looper/pull/1903)).
+
+### Internal
+
+- The REST confirmation wording of v2.15.44 ([#1892](https://github.com/foolzzz/looper/pull/1892)); tests, CI and plan sync with no product change ([#1880](https://github.com/foolzzz/looper/pull/1880), [#1882](https://github.com/foolzzz/looper/pull/1882), [#1887](https://github.com/foolzzz/looper/pull/1887), [#1891](https://github.com/foolzzz/looper/pull/1891), [#1893](https://github.com/foolzzz/looper/pull/1893), [#1895](https://github.com/foolzzz/looper/pull/1895), [#1896](https://github.com/foolzzz/looper/pull/1896), [#1897](https://github.com/foolzzz/looper/pull/1897), [#1898](https://github.com/foolzzz/looper/pull/1898), [#1899](https://github.com/foolzzz/looper/pull/1899), [#1902](https://github.com/foolzzz/looper/pull/1902), [#1904](https://github.com/foolzzz/looper/pull/1904), [#1906](https://github.com/foolzzz/looper/pull/1906), [#1908](https://github.com/foolzzz/looper/pull/1908), [#1909](https://github.com/foolzzz/looper/pull/1909)).
+
+## [2.15.44] - 2026-11-26
+
+Frozen at `448632f1f` (the merge of [#1874](https://github.com/foolzzz/looper/pull/1874)): everything merged to main after v2.15.43's freeze `45fc80461`, up to that commit. The release body is [docs/releases/v2.15.44.md](docs/releases/v2.15.44.md). Startup adds one migration, `manager_session_client_kind` (2150). The `test` extra gains `markdown-it-py`; no runtime dependency changes.
+
+### Security
+
+- **API clients get their own Manager session** ([#1858](https://github.com/foolzzz/looper/pull/1858)) with a short task-tool list instead of the operator's `main` session.
+- **Sender identity authorizes high-risk calls and confirmations in every session** ([#1874](https://github.com/foolzzz/looper/pull/1874)). With `manager.turn_context.enabled` off (the code default) or in a routed non-main session, a sender who could reach the Manager was treated as the operator. Every user turn is now classified and an unknown speaker is refused. A bot without an operator sender id has no chat sender that can ask for or confirm a high-risk call while the switch is off; only the dashboard can.
+- **The task Manager loads only allowed MCP servers** ([#1852](https://github.com/foolzzz/looper/pull/1852), [#1862](https://github.com/foolzzz/looper/pull/1862), [#1869](https://github.com/foolzzz/looper/pull/1869)): Looper's own server plus the user-scope servers named in `tasks.conversations.manager_mcp`.
+- **Git in agent-writable directories no longer runs repository-controlled code** ([#1861](https://github.com/foolzzz/looper/pull/1861)).
+- **Looper's MCP server launch ignores the session's working directory** ([#1864](https://github.com/foolzzz/looper/pull/1864)).
+- **The dashboard loads no remote content and links show their host** ([#1866](https://github.com/foolzzz/looper/pull/1866)).
+- **Lark messages carry no remote images or unlisted HTML tags** ([#1867](https://github.com/foolzzz/looper/pull/1867)); **Telegram messages carry no link previews** ([#1865](https://github.com/foolzzz/looper/pull/1865)).
+
+### Fixed
+
+- **`looper service upgrade` installs the target's dependencies before the drain** ([#1849](https://github.com/foolzzz/looper/pull/1849)).
+- **Startup and shutdown:** imports before the event loop ([#1853](https://github.com/foolzzz/looper/pull/1853)), a failed memory drafter side connection no longer stops the service ([#1855](https://github.com/foolzzz/looper/pull/1855)), HTTP shutdown on Python 3.13 and later ([#1851](https://github.com/foolzzz/looper/pull/1851)).
+- **Network pause:** task detail phase read in one statement ([#1847](https://github.com/foolzzz/looper/pull/1847)), an invalid stored maximum warns once per value ([#1843](https://github.com/foolzzz/looper/pull/1843)).
+- **Task Manager, off by default:** a worktree turn commits only its own changes ([#1848](https://github.com/foolzzz/looper/pull/1848)); the task thread shows every refusal reason ([#1859](https://github.com/foolzzz/looper/pull/1859)).
+
+### Added
+
+- **`looper-edit` command, not wired into any agent.** ([#1863](https://github.com/foolzzz/looper/pull/1863))
+
+### Internal
+
+- Task Manager safety boundary RFC ([#1860](https://github.com/foolzzz/looper/pull/1860)); tests, CI and plan sync with no product change ([#1844](https://github.com/foolzzz/looper/pull/1844), [#1846](https://github.com/foolzzz/looper/pull/1846), [#1850](https://github.com/foolzzz/looper/pull/1850), [#1854](https://github.com/foolzzz/looper/pull/1854), [#1856](https://github.com/foolzzz/looper/pull/1856), [#1857](https://github.com/foolzzz/looper/pull/1857)).
+
 ## [2.15.43] - 2026-11-26
 
 Frozen at `45fc80461` (the merge of [#1840](https://github.com/foolzzz/looper/pull/1840)): everything merged to main after v2.15.42's freeze `0ad334847`, up to that commit. Tag this release PR's own head after merge if main has moved beyond the freeze. Startup adds two migrations over v2.15.42: `chat_message_entry_kind` (2100) and `network_pauses` (2120); both run even with optional features off. Adds the runtime dependency `cryptography>=46,<47` (history cursors); a source-checkout upgrade (`looper service upgrade`) installs it while the service is stopped and needs package index access then; an offline or pinned environment must provide it. From v2.15.38 or earlier, also read [v2.15.42](docs/releases/v2.15.42.md), [v2.15.41](docs/releases/v2.15.41.md), [v2.15.40](docs/releases/v2.15.40.md) and [v2.15.39](docs/releases/v2.15.39.md). See [the release notes](docs/releases/v2.15.43.md) for validation and exclusions.

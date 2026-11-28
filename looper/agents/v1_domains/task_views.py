@@ -116,7 +116,9 @@ TASK_DETAIL = _object({
     "supplements": _array(_object({"text": _STR, "via": _STR, "created_at": _STR, "delivered_at": _NULL_STR})),
     "manager_actions": _array(_object({"created_at": _STR, "channel": _STR, "tool": _STR,
         "arguments": _OBJ, "risk": _STR, "status": _STR, "confirmation_id": _NULL_STR,
-        "manager_id": _STR, "client_id": _NULL_STR, "client_name": _NULL_STR})),
+        "manager_id": _STR, "client_id": _NULL_STR, "client_name": _NULL_STR,
+        "sender_id": _NULL_STR, "sender_kind": _NULL_STR, "initiator_sender_id": _NULL_STR,
+        "initiator_kind": _NULL_STR})),
     "steps": _array(_STEP),
     "journal": _array(_object({"id": _INT, "step_id": _STR, "step_key": _STR, "kind": _STR,
         "summary": _STR, "learnings": _array(_STR), "created_at": _STR})),
@@ -173,7 +175,11 @@ OPERATIONS = (
 
 async def run(server, operation, arguments, principal, headers):
     if operation.operation_id == "tasks.detail":
-        return _plain(await answered(projects.task_detail(arguments["task_id"])))
+        detail = _plain(await answered(projects.task_detail(arguments["task_id"])))
+        if principal.kind != "operator":  # channel sender ids (chat user ids) are the operator's to see
+            for row in detail.get("manager_actions") or ():
+                row.update(sender_id=None, initiator_sender_id=None)
+        return detail
     filters = {**arguments}
     if "group" in filters:
         filters["group"] = tasks.TaskGroup(filters["group"])

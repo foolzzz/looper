@@ -46,6 +46,7 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
                 record = await llm_records.start_record(agent_id=f"task-manager-{task_id}", task_id=task_id, pool=db)
                 await llm_records.finish_record(record, status="completed", cost_usd=2, pool=db)
             elif reason == "outbound_review_unavailable":
+                await tasks.update_task_status(task_id, "pending", pool=db)  # a direct session has no review hook
                 monkeypatch.setattr(outbound_hook, "known_enabled", lambda: True)
             elif reason == "workspace":
                 monkeypatch.setattr(task_workspaces, "reopen", AsyncMock(side_effect=task_workspaces.TaskWorkspaceError("unavailable")))
@@ -68,7 +69,8 @@ def test_refusals_start_no_process_and_keep_status(monkeypatch, tmp_path, native
             if reason in ("work_mode_off", "manager_answers_off"):
                 assert await db.fetchval("SELECT count(*) FROM agent_sessions WHERE agent_id LIKE 'task-manager-%'") == 0
                 assert not pool.agent(task_id).resident.started
-            assert (await tasks.get_task(task_id, pool=db))["status"] == "draft"
+            kept = "pending" if reason == "outbound_review_unavailable" else "draft"
+            assert (await tasks.get_task(task_id, pool=db))["status"] == kept
             if reason == "manager_answers_off":
                 assert "tasks.conversations.manager_answers" in sink.finals[0][0] and "task_conversations.update" in sink.finals[0][0]
             if reason == "runtime_unsupported":
@@ -95,8 +97,8 @@ def test_turn_stream_records_and_session(monkeypatch, tmp_path, native):
             assert len(sink.tools) == 2
             first, second = sink.tools
             assert first.tool_use_id == second.tool_use_id == "tool-call"
-            assert first.name == second.name == "Read" and first.result == "" and "contents" in second.result
-            assert "file_path" in first.args and max(len(first.args), len(second.result)) <= 200
+            assert first.name == second.name == "Bash" and first.result == "" and "contents" in second.result
+            assert "command" in first.args and max(len(first.args), len(second.result)) <= 200
             assert any(kind == "turn_summary" and payload["commit"] is None for kind, payload in sink.events)
             assert sink.finals[0][0] == "onetwo"
             records = await llm_records.list_records(task_id=task_id, pool=db)
@@ -130,11 +132,14 @@ def test_unknown_cost_warns_but_allows_turn(monkeypatch, tmp_path, native):
 def test_fifo_stop_then_next_turn_and_start_exclusion(monkeypatch, tmp_path, native):
     async def check(db):
         task_id, _, _ = await native.create(db)
+        # The stand-in sends its init a moment after it records the input; the delay widens that gap.
+        native.transcript.with_name("readback-override.json").write_text('{"init_delay": 0.3}')
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:
             first, second = Sink(), Sink()
             assert (await pool.submit(task_id, "wait", message_id="one", sink=first)).state == "started"
             await until(lambda: len(native.records("input")) == 1)
+            await until(lambda: pool.agent(task_id).session_id is not None)
             assert pool.in_turn(task_id)
             bus = type("Bus", (), {"publish": AsyncMock()})()
             with pytest.raises(project_service.RequestError, match="task Manager is working") as error:
@@ -315,6 +320,9 @@ def test_turn_commits_only_owned_worktree(monkeypatch, tmp_path, native, workspa
         git("add", "README.md")
         git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-q", "--no-gpg-sign", "-m", "Initial")
         head = git("rev-parse", "HEAD")
+        # v1 refuses a direct worktree session. This case still covers the commit rules past that check.
+        if workspace_mode == "worktree":
+            monkeypatch.setattr("looper.agents.task_manager_dirs.check", lambda *args, **kwargs: None)
         task_id, _, _ = await native.create(db, workspace_mode=workspace_mode, path=directory)
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:
@@ -356,6 +364,8 @@ def _run_scoped_turn(monkeypatch, tmp_path, native, message, *, dirty=(), status
 
     async def check(db):
         repository, _ = _scoped_repository(tmp_path)
+        # v1 refuses a direct worktree session. These tests still cover the commit rules past that check.
+        monkeypatch.setattr("looper.agents.task_manager_dirs.check", lambda *args, **kwargs: None)
         task_id, _, _ = await native.create(db, status=status, workspace_mode="worktree", path=repository)
         pool = tm.TaskManagerPool(tmp_path / "runtime", native.executable, max_resident=lambda: 2)
         try:

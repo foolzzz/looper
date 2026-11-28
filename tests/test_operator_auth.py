@@ -1218,3 +1218,21 @@ def test_sessions_do_not_survive_restart(tmp_path: Path, transport: str) -> None
             server._sessions = operator_auth.Sessions()
             assert (await _send(server, "GET /api/nothing-here", credential))[0] == 401
     asyncio.run(run())
+
+
+DASHBOARD_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: blob:; "
+    "connect-src 'self'; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; "
+    "frame-ancestors 'none'; form-action 'self'")
+
+
+@pytest.mark.parametrize("path", ["/", "/index.html", "/tasks/task-1", "/assets/app.js"])
+def test_dashboard_responses_restrict_remote_content(tmp_path: Path, transport: str, path: str) -> None:
+    async def run() -> None:
+        async with _login_server(tmp_path, transport) as server:
+            status, headers, _ = await _send(server, f"GET {path}", {"Authorization": f"Bearer {TOKEN}", **NAVIGATE})
+            assert status == 200
+            assert headers["content-security-policy"] == DASHBOARD_POLICY
+            assert headers["referrer-policy"] == "same-origin"
+
+    asyncio.run(run())

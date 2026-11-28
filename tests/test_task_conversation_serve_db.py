@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -26,6 +27,7 @@ from looper.db import projects, tasks
 from looper.db.chat import task_thread
 from tests.db_support import DSN, fresh_database_without_recording
 from tests.fake_claude import fake_claude
+from evals.prompt_regression.fake_readback import SOURCE as READBACK_SOURCE
 from tests.runner_support import require_disposable_database
 
 pytestmark = pytest.mark.skipif(
@@ -50,7 +52,7 @@ _OTHER_CLIS = (
     "lark-cli",
 )
 # A resident that emits one tool and then blocks until the stop control request.
-_CLAUDE = r"""
+_CLAUDE = "exec(%r)\n" % READBACK_SOURCE + r"""
 import json, sys
 if "--version" in sys.argv:
     print("2.1.332")
@@ -70,6 +72,11 @@ for raw in sys.stdin:
         data = json.loads(raw)
     except json.JSONDecodeError:
         continue
+    if data.get("type") == "control_request" and data["request"]["subtype"] in READBACK_SUBTYPES:
+        kind, body = readback_answer(data["request"], "/nonexistent")
+        print(json.dumps({"type": "control_response", "response": {
+            "subtype": kind, "request_id": data.get("request_id"), "response": body}}), flush=True)
+        continue
     if data.get("type") == "control_request":
         print(json.dumps({"type": "control_response", "response": {
             "subtype": "success", "request_id": data.get("request_id")}}), flush=True)
@@ -78,10 +85,11 @@ for raw in sys.stdin:
         continue
     if data.get("type") != "user":
         continue
-    print(json.dumps({"type": "system", "subtype": "init", "session_id": session}), flush=True)
+    print(json.dumps({"type": "system", "subtype": "init", "session_id": session,
+                      **init_fields("/nonexistent")}), flush=True)
     print(json.dumps({"type": "assistant", "message": {"content": [{
-        "type": "tool_use", "id": "tool-1", "name": "Read",
-        "input": {"file_path": "README.md"}}]}}), flush=True)
+        "type": "tool_use", "id": "tool-1", "name": "Bash",
+        "input": {"command": "cat README.md"}}]}}), flush=True)
 """
 
 
@@ -223,6 +231,10 @@ def test_served_task_conversation_streams_a_tool_then_stop_reloads_history(monke
         bin_dir.mkdir()
         work.mkdir()
         (work / "README.md").write_text("notes\n", encoding="utf-8")
+        # A direct session needs a git repository root as its task directory.
+        for args in (["init", "-q"], ["add", "README.md"], ["-c", "user.name=Probe", "-c", "user.email=probe@example.invalid",
+                                                              "commit", "-qm", "Initial"]):
+            subprocess.run(["git", *args], cwd=work, check=True, capture_output=True)
         fake_claude(bin_dir / "claude", _CLAUDE)
         stub = f"#!{sys.executable}\nimport sys\nsys.exit(76)\n"
         for name in _OTHER_CLIS:
@@ -240,6 +252,9 @@ def test_served_task_conversation_streams_a_tool_then_stop_reloads_history(monke
             "CLAUDE_CODE_SIMPLE": "",
         }
         log_path = root / "serve.log"
+        stale = runtime / "task-managers" / "crashed-task" / "mcp" / "left-by-a-crash.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("{}")  # a generated MCP config (it can hold secrets) that a killed server never removed
         with fresh_database_without_recording(_admin_url()) as (url, _offset):
             require_disposable_database(url, served=True)
             asyncio.run(_seed(url, work))
@@ -259,6 +274,7 @@ def test_served_task_conversation_streams_a_tool_then_stop_reloads_history(monke
                     runtime / ops_config.FILE, required=True
                 ).get("port")
                 assert bound == port and stored == port and port != _RESERVED_PORT
+                assert not stale.exists()  # service start sweeps the task Managers' stale MCP configs
                 api.timeout = 60
                 switches = _result(api.post("/api/v1/task_conversations/get", {}))
                 assert (switches["enabled"], switches["manager_answers"]) == (True, True)
@@ -277,6 +293,22 @@ def test_served_task_conversation_streams_a_tool_then_stop_reloads_history(monke
                 )
                 stream = _Stream(api, sent["correlation_id"])
                 try:
+                    if sys.platform != "darwin":
+                        # A direct session runs inside Claude Code's Bash sandbox, verified on macOS only: here the
+                        # served turn is refused with a typed reason, the scripted CLI is never started, and no tool
+                        # event appears. The streaming flow below is asserted on macOS.
+                        def refused():
+                            for kind, payload in stream.snapshot():
+                                if kind == "task.event" and payload.get("kind") == "refused":
+                                    return payload
+                            return None
+
+                        def not_refused():
+                            return _public(f"no refusal in {stream.snapshot()!r}\n{stream.error}\n{_tail(log_path)}")
+
+                        assert _wait(refused, 30, not_refused)["reason"] == "sandbox_unavailable"
+                        assert not any(kind == "agent.tool" for kind, _ in stream.snapshot())
+                        return
 
                     def tool_event():
                         for kind, payload in stream.snapshot():
@@ -295,7 +327,7 @@ def test_served_task_conversation_streams_a_tool_then_stop_reloads_history(monke
                         )
 
                     tool = _wait(tool_event, 30, failed)
-                    assert tool["tool_use_id"] == TOOL_ID and tool["name"] == "Read"
+                    assert tool["tool_use_id"] == TOOL_ID and tool["name"] == "Bash"
                     stopped = _result(
                         api.post(
                             "/api/v1/operator_chat/stop", {"message_id": MESSAGE_ID}

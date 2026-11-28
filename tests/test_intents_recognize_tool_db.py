@@ -8,6 +8,7 @@ import pytest
 
 from looper.agents import intent_recognition
 from looper.agents.ops import Call, ErrorCode, OpError, Turn
+from looper.agents.turn_context import SpeakerKind
 from looper.agents.ops import intents_recognize as tool
 from looper.agents.ops.service import ManagerOps, Platform
 from tests.db_support import run_with_channel_configs
@@ -58,13 +59,14 @@ def test_recognize_tool_runs_only_in_the_operators_turns_and_asks_first(monkeypa
             answer = await _call(ops, turn, tool.TOOL_NAME, {"action": "preview", "chat": "Synthetic product"})
             assert answer["error"]["code"] == "forbidden", answer
         own = Turn(channel=channel, channel_id="channel-lark" if channel == "lark" else None,
-                   chat="oc_dm" if channel == "lark" else "web", sender="ou_synthetic", message_id="ask")
+                   chat="oc_dm" if channel == "lark" else "web", sender="ou_synthetic", message_id="ask",
+                   speaker=SpeakerKind.OPERATOR)
         assert tool.TOOL_NAME in {item["name"] for item in await ops.current_listing(own)}
         asked = await _call(ops, own, tool.TOOL_NAME, {"action": "start", "chat": "Synthetic product"})
         assert asked["status"] == "needs_confirmation" and ran == []
         assert "42" in own.blocks[0] and "$0.01–$0.05" in own.blocks[0] and "上限 $1" in own.blocks[0]
         confirming = Turn(channel=own.channel, channel_id=own.channel_id, chat=own.chat, sender=own.sender,
-                          message_id="confirm")
+                          message_id="confirm", speaker=SpeakerKind.OPERATOR)
         confirmed = await _call(ops, confirming, "looper_confirm", {"confirmation_id": asked["confirmation_id"]})
         assert confirmed["status"] == "ok", confirmed
         assert len(ran) == 1 and ran[0] == {

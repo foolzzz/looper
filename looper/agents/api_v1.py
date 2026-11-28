@@ -42,6 +42,7 @@ STATUS: dict[ErrorCode, str] = {
     ErrorCode.TASK_MANAGER_OFF: "409 Conflict",
     ErrorCode.TASK_MANAGER_BUSY: "409 Conflict",
     ErrorCode.TASK_MANAGER_RUNTIME_UNSUPPORTED: "400 Bad Request",
+    ErrorCode.NETWORK_POLICY_INVALID: "400 Bad Request",
     ErrorCode.EXPIRED: "410 Gone",
     ErrorCode.RATE_LIMITED: "429 Too Many Requests",
     ErrorCode.UNAVAILABLE: "503 Service Unavailable",
@@ -385,7 +386,7 @@ def operations(tools: Sequence[Tool] | None = None) -> list[Operation]:
         tools = CLIENT_TOOLS
     registered = [*tool_operations(tools), *HAND_OPERATIONS, WHOAMI, *ONLINE_OPERATIONS]
     registered.extend(op for domain in domains() for op in domain.OPERATIONS)
-    description = "Run the operation this client was asked to confirm in this session."
+    description = "The calling client confirms its own pending request in this session; not an operator approval."
     registered.append(Operation("confirm", "POST", f"{PREFIX}/confirm", description, description,
         _object({"confirmation_id": {"type": "string", "minLength": 1}}, closed=True),
         {"description": "The result of the confirmed operation; compatible result shapes may overlap.",
@@ -513,7 +514,8 @@ def _responses(operation: Operation) -> dict[str, Any]:
             {"$ref": "#/components/schemas/OpOk"}, {"type": "object", "properties": {"result": dict(operation.result)}}]}}}}
     responses: dict[str, Any] = {"200": ok}
     if operation.confirms:
-        responses["202"] = {"description": "needs_confirmation: POST /confirm with the confirmation_id",
+        responses["202"] = {"description": "needs_confirmation: the calling client confirms its own request with POST /confirm "
+                                            "and the confirmation_id; this is not an operator approval",
                             "content": {"application/json": {"schema": {
                                 "$ref": "#/components/schemas/OpNeedsConfirmation"}}}}
     responses["default"] = {"description": "error", "content": {"application/json": {"schema": {

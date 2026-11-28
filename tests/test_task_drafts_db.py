@@ -334,6 +334,8 @@ def test_work_mode_off_freeze(monkeypatch, tmp_path):
     assert ids - old == {
         "tasks.create_draft", "task_conversations.get", "task_conversations.update", "tasks.done",
         "tasks.task_manager_profile_get", "tasks.task_manager_profile_set",
+        "tasks.task_manager_branch_set", "tasks.task_manager_ref_report_resolve",  # operator-only, no Manager tool
+        "projects.task_manager_sandbox_get", "projects.task_manager_sandbox_update",  # operator-only, no Manager tool
         "network_pause.get", "network_pause.update",
         # worker.interrupted_hint.enabled (default off; these only read and store it)
         "worker_interrupted_hint.get", "worker_interrupted_hint.update",

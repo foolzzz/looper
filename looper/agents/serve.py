@@ -779,10 +779,12 @@ async def _run_agent_system_watched(
     from ..db import init_pool, ensure_schema, close_pool
 
     from . import chat_settings, links, operator_notes, persona, projects, scheduler_settings, waits
+    from .runtimes import instructions
     host, port = ops.host, ops.port
     dashboard_url = links.dashboard_url(host=host, port=port, public_url=ops.public_url)
     operator_notes.configure_root(ops.operator_notes_root)
     projects.configure_root(ops.projects_root)
+    instructions.configure_runtime_root(runtime_root)
     from .. import _PROCESS_STARTED_AT
     startup = _StartupSteps(_PROCESS_STARTED_AT)
     if ops.projects_root:
@@ -941,10 +943,17 @@ async def _run_agent_system_watched(
                 logger.exception("could not sweep the task worktrees")
 
         from . import task_conversations_settings, task_manager_settings
+        from . import operator_mcp
         from .tiers.task_manager import TaskManagerPool
         await task_manager_settings.seed_defaults(pool=pool)
+        try:
+            if swept := await asyncio.to_thread(operator_mcp.sweep_orphans, runtime_root):
+                logger.info("removed %d task Manager MCP configuration(s) a crashed server left", swept)
+        except Exception:
+            logger.exception("could not sweep the task Manager MCP configurations")
         task_managers = TaskManagerPool(runtime_root, claude_bin,
-                                        max_resident=task_conversations_settings.max_resident)
+                                        max_resident=task_conversations_settings.max_resident,
+                                        config_file=ops.path)
         if ownership is not None:
             ownership.push_async_callback(task_managers.shutdown)
 

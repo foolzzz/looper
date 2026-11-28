@@ -56,7 +56,7 @@ _DSH_VERSION = "0.2.2-rc.5"
 
 
 def _prompt_text(looper_prompt: str, launch: Launch, *, cwd: str | Path | None = None) -> str:
-    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label)
+    project = (instructions.injected_section(launch.runtime.instruction_files(cwd), launch.runtime.label, cwd)
                if cwd is not None else "")
     notes = dsh.runtime_notes()
     if not launch.consult:

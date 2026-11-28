@@ -58,6 +58,7 @@ from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
 from .. import admission, attempts, cost_guard, cost_dispatch, failures, outbound_hook, proc_tree, reported_files, vault
+from .. import git_safe
 from ...db import tasks as db_tasks
 from ...db import memory_lesson_injection as db_lesson_injection
 from .. import memory_lesson_injection as lesson_injection
@@ -334,10 +335,9 @@ def _severity_verdict(verdict: dict[str, Any]) -> dict[str, Any]:
 
 def _git_head(work_dir: str | Path) -> str | None:
     try:
-        result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=work_dir,
-                                capture_output=True, text=True, timeout=10)
+        result = git_safe.run(work_dir, "rev-parse", "HEAD", capture_output=True, text=True, timeout=10)
         return result.stdout.strip() if result.returncode == 0 else None
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.SubprocessError):  # including a repository git_safe refuses
         return None
 
 
@@ -742,21 +742,22 @@ class RunContext:
     lesson_delivered: bool = False
 
 
+@git_safe.cached_operation
 def _verification_paths(work_dir: str) -> tuple[Path, list[str]]:
-    root = subprocess.run(["git", "-C", work_dir, "rev-parse", "--show-toplevel"],
-                          capture_output=True, check=True, timeout=5).stdout.decode().strip()
-    paths = subprocess.run(["git", "-C", root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-                           capture_output=True, check=True, timeout=5).stdout
+    root = git_safe.run(work_dir, "rev-parse", "--show-toplevel",
+                        capture_output=True, check=True, timeout=5).stdout.decode().strip()
+    paths = git_safe.run(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+                         capture_output=True, check=True, timeout=5).stdout
     return Path(root), sorted(set(os.fsdecode(p) for p in paths.split(b"\0") if p))
 
 
 def _verification_gitlinks(root: Path) -> dict[str, bytes]:
-    entries = subprocess.run(["git", "-C", str(root), "ls-files", "--stage", "-z"],
-                             capture_output=True, check=True, timeout=5).stdout
+    entries = git_safe.run(root, "ls-files", "--stage", "-z", capture_output=True, check=True, timeout=5).stdout
     return {os.fsdecode(name): metadata.split()[1] for entry in entries.split(b"\0") if entry
             for metadata, name in [entry.split(b"\t", 1)] if metadata.startswith(b"160000 ")}
 
 
+@git_safe.cached_operation
 def _verification_write_paths(work_dir: str) -> tuple[Path, list[str]]:
     root, paths = _verification_paths(work_dir)
     gitlinks = _verification_gitlinks(root)
@@ -772,9 +773,10 @@ def _verification_write_paths(work_dir: str) -> tuple[Path, list[str]]:
     return root, watched
 
 
+@git_safe.cached_operation
 def _verification_snapshot(work_dir: str) -> dict[str, Any]:
     def git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", "-C", work_dir, *args], capture_output=True, timeout=5)
+        return git_safe.run(work_dir, *args, capture_output=True, timeout=5)
 
     try:
         if git("rev-parse", "--is-inside-work-tree").stdout.strip() != b"true":
@@ -817,6 +819,7 @@ def _verification_snapshot(work_dir: str) -> dict[str, Any]:
         return {"git": False, "head": None, "status_sha256": None, "error": "git_snapshot_unavailable"}
 
 
+@git_safe.cached_operation
 def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
     """Keep the run's baseline on disk, including uncommitted work and the index."""
     manifest = backup / "baseline.json"
@@ -843,12 +846,11 @@ def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target, follow_symlinks=False)
             saved.append(name)
-    index = Path(subprocess.run(["git", "-C", str(root), "rev-parse", "--path-format=absolute", "--git-path", "index"],
-                               check=True, capture_output=True, timeout=5).stdout.decode().strip())
+    index = Path(git_safe.run(root, "rev-parse", "--path-format=absolute", "--git-path", "index",
+                              check=True, capture_output=True, timeout=5).stdout.decode().strip())
     if index.exists():
         shutil.copy2(index, backup / "index")
-    ref = subprocess.run(["git", "-C", str(root), "symbolic-ref", "-q", "HEAD"],
-                         capture_output=True, timeout=5).stdout.decode().strip()
+    ref = git_safe.run(root, "symbolic-ref", "-q", "HEAD", capture_output=True, timeout=5).stdout.decode().strip()
     if _verification_snapshot(work_dir) != current:
         return {**current, "error": "verification_baseline_changed"}
     manifest.write_text(json.dumps({"snapshot": current, "paths": saved, "ref": ref,
@@ -857,6 +859,7 @@ def _verification_baseline(work_dir: str, backup: Path) -> dict[str, Any]:
     return current
 
 
+@git_safe.cached_operation
 def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False) -> bool:
     """Undo only the verifier's changes; preserve the developer's dirty files and staging."""
     try:
@@ -884,8 +887,7 @@ def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(backup / "files" / name, target, follow_symlinks=False)
         def git(*args: str) -> bytes:
-            return subprocess.run(["git", "-C", str(root), *args], check=True,
-                                  capture_output=True, timeout=5).stdout
+            return git_safe.run(root, *args, check=True, capture_output=True, timeout=5).stdout
         ref, head = "" if detached else before["ref"], before["snapshot"]["head"]
         if ref:
             git("symbolic-ref", "HEAD", ref)
@@ -907,6 +909,7 @@ def _restore_verification(work_dir: str, backup: Path, *, detached: bool = False
         return False
 
 
+@git_safe.cached_operation
 def _verification_checkout(work_dir: str, backup: Path, runtime_paths: Collection[str] = ()) -> str:
     """Seed a private Git checkout with the source's staged, unstaged and untracked files.
 
@@ -924,11 +927,10 @@ def _verification_checkout(work_dir: str, backup: Path, runtime_paths: Collectio
 
         def clone(source: Path, target: Path, saved: Path) -> None:
             # Copy even uncommitted index objects, without hardlinks or inherited alternates.
-            subprocess.run(["git", "clone", "--no-hardlinks", "--dissociate", "--no-checkout", "--",
-                            str(source), str(target)],
-                           check=True, capture_output=True, timeout=30)
-            subprocess.run(["git", "-C", str(target), "remote", "remove", "origin"],
-                           check=True, capture_output=True, timeout=5)
+            git_safe.check_repository(source)  # the clone reads the source: refuse a layout that could run its code
+            git_safe.run(None, "clone", "--no-hardlinks", "--dissociate", "--no-checkout", "--",
+                         str(source), str(target), check=True, capture_output=True, timeout=30)
+            git_safe.run(target, "remote", "remove", "origin", check=True, capture_output=True, timeout=5)
             manifest = json.loads((saved / "baseline.json").read_text())
             for name in manifest.get("submodules", []):
                 clone(source / name, target / name, saved / "submodules" / name)
@@ -970,8 +972,8 @@ def _verification_repository_relocations(repository_roots: tuple[Path, Path]) ->
     replacements = {str(root): str(checkout)}
     # A task worktree often links the main worktree's environment. Its editable
     # install names that main worktree, rather than the task directory.
-    worktrees = subprocess.run(["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
-                              check=True, capture_output=True, text=True, timeout=5)
+    worktrees = git_safe.run(root, "worktree", "list", "--porcelain", "-z",
+                             check=True, capture_output=True, text=True, timeout=5)
     for field in worktrees.stdout.split("\0"):
         if field.startswith("worktree "):
             path = field.removeprefix("worktree ")
@@ -2246,20 +2248,22 @@ class WorkerPool:
                 return {"status": "failed", "failure": "verification_changed_code", "error": error,
                         "summary": error, "verification": {"restored": restored}}
             try:
-                source = await asyncio.to_thread(_verification_snapshot, work_dir)
-                if source.get("error"):
-                    raise OSError(source["error"])
-                if source["git"]:
-                    # New attempts get current source; only this run's profile fallback reuses its checkout.
-                    execution = ProjectExecution.from_row(project)
-                    backup = self._verification_backup(parent_task_id, worker_id, work_dir)
-                    work_dir = await asyncio.to_thread(_verification_checkout, work_dir,
-                        backup, (*execution.link_paths, *(execution.verification_paths or ())))
-                    copied = json.loads((backup / "runtime-paths.json").read_text())
-                    await self._activity(parent_task_id, worker_id, "phase",
-                        "Verification runtime inputs copied read-only: " + (", ".join(copied) or "none"))
-                verification = await asyncio.to_thread(_verification_baseline, work_dir,
-                    self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
+                # Before the agent starts nothing writes these directories: each is checked once.
+                with git_safe.cached(), git_safe.running_for(parent_task_id, payload.get("task_id")):
+                    source = await asyncio.to_thread(_verification_snapshot, work_dir)
+                    if source.get("error"):
+                        raise OSError(source["error"])
+                    if source["git"]:
+                        # New attempts get current source; only this run's profile fallback reuses its checkout.
+                        execution = ProjectExecution.from_row(project)
+                        backup = self._verification_backup(parent_task_id, worker_id, work_dir)
+                        work_dir = await asyncio.to_thread(_verification_checkout, work_dir,
+                            backup, (*execution.link_paths, *(execution.verification_paths or ())))
+                        copied = json.loads((backup / "runtime-paths.json").read_text())
+                        await self._activity(parent_task_id, worker_id, "phase",
+                            "Verification runtime inputs copied read-only: " + (", ".join(copied) or "none"))
+                    verification = await asyncio.to_thread(_verification_baseline, work_dir,
+                        self._verification_backup(parent_task_id, payload.get("task_id"), work_dir))
             except (OSError, ValueError, subprocess.SubprocessError):
                 verification = {"git": True, "error": "git_snapshot_unavailable"}
             if verification.get("error"):

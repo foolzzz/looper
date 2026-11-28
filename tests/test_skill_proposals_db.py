@@ -31,6 +31,13 @@ OFF_BASELINE = json.loads((Path(__file__).parent / "fixtures" / "skill_proposals
 FIXED_ROW = {"id": "proj-fixed", "created_at": "2026-11-20T12:00:00+00:00", "updated_at": "2026-11-20T12:00:00+00:00"}
 
 
+@pytest.fixture(autouse=True)
+def _clock_inside_the_validity_window(monkeypatch):
+    # Calls without an explicit now= read the module clock. Pin it one day after T0 so these tests do not
+    # depend on the wall clock (proposals made at T0 expire at T0 + EXPIRY, which real time has passed).
+    monkeypatch.setattr(sp, "_now", lambda: T0 + timedelta(days=1))
+
+
 def _item(**over: Any) -> dict[str, Any]:
     item = {"action": "create", "name": "release-check", "description": "Use before cutting a release.",
             "content": "# Release check\n1. Run the tests.\n", "why": "Three tasks re-derived these steps."}

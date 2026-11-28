@@ -6,6 +6,7 @@ import asyncio
 from typing import Any
 
 from looper.agents.ops import Call, Risk, Tool, Turn
+from looper.agents.turn_context import SpeakerKind
 from looper.agents.ops.service import ManagerOps, Platform
 
 
@@ -25,12 +26,14 @@ def _ops(ran: list[Any]) -> ManagerOps:
 
 
 async def _ask_then_confirm(ops: ManagerOps, asked_via: str | None, confirmed_via: str | None) -> dict[str, Any]:
-    asking = Turn(channel="telegram", chat="42", message_id="m1", sender="42", channel_id=asked_via)
+    asking = Turn(channel="telegram", chat="42", message_id="m1", sender="42", channel_id=asked_via,
+                  speaker=SpeakerKind.OPERATOR)
     ops.begin_turn(asking)
     asked = await ops.call("t_delete", {})
     assert asked["status"] == "needs_confirmation"
     ops.end_turn(asking)
-    confirming = Turn(channel="telegram", chat="42", message_id="m2", sender="42", channel_id=confirmed_via)
+    confirming = Turn(channel="telegram", chat="42", message_id="m2", sender="42", channel_id=confirmed_via,
+                      speaker=SpeakerKind.OPERATOR)
     told = ops.begin_turn(confirming)
     assert bool(told) is (asked_via == confirmed_via)
     answer = await ops.call("looper_confirm", {"confirmation_id": asked["confirmation_id"]})

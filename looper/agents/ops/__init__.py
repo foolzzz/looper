@@ -74,6 +74,7 @@ class ErrorCode(str, Enum):
     TASK_MANAGER_OFF = "task_manager_off"  # tasks.conversations.manager_answers is off: no message goes to a task Manager
     TASK_MANAGER_BUSY = "task_manager_busy"  # stop the task Manager's active turn before changing its profile
     TASK_MANAGER_RUNTIME_UNSUPPORTED = "task_manager_runtime_unsupported"  # v0 requires Claude Code
+    NETWORK_POLICY_INVALID = "network_policy_invalid"  # a task Manager sandbox allowlist entry validation refused
     EXPIRED = "expired"  # a confirmation past its time or its turn
     STOPPED = "stopped"  # the user stopped the turn the call came in
     NOT_THIS_TURN = "not_this_turn"  # a write call no tool_use of the running turn's stream matches
@@ -171,10 +172,14 @@ class Turn:
     channel_id: str | None = None  # the bot the message came through (``channel-telegram-2``)
     # Why the turn runs; by default a user's when it answers a message, else Claude's own.
     origin: TurnOrigin | None = None
-    # Set only with per-turn context enabled; None preserves the existing authorization behavior.
+    # Who sent a user turn, set for every user turn (``manager_turn_context.identify``); None only for a background
+    # turn or a path that did not classify it, which a bot channel's authorization refuses.
     speaker: SpeakerKind | None = None
     principal: Principal | None = None
     operator_id_missing: bool = False
+    # The audience class recorded on the audit rows of its calls, when ``speaker`` is not the source: a card press
+    # takes the asker's when the presser is the asker (``service.sender_kind``).
+    recorded_kind: str | None = None
     # Initialized explicitly by delivery-guard wiring; absent when disabled.
     debt: DeliveryDebt | None = None
     # The outside content its calls brought in (source, text), as the outbound review reads it: the leads it found.

@@ -65,7 +65,7 @@ import asyncio
 import json
 from dataclasses import replace
 import subprocess
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -431,20 +431,27 @@ class ClaudeCodeRuntime(RuntimeAdapter):
         ]
 
     def operator_resident_command(self, executable: str, *, cwd: str | Path, prompt_file: Path,
-                                  launch: Launch, settings_dir: Path) -> list[str]:
-        """A task Manager's direct session keeps the operator's settings, memory and skills; its MCP servers are only
-        the ``--mcp-config`` file's."""
+                                  launch: Launch, settings_dir: Path, allowed_domains: Sequence[str] = (),
+                                  read_deny: Sequence[str] = ()) -> list[str]:
+        """A task Manager's direct session: the operator's user-level settings and memory (not the task directory's;
+        ``Skill`` is not an allowlisted tool), inside Claude Code's Bash sandbox with every loosening key pinned (``task_manager_sandbox``).
+        Its MCP servers are only the ``--mcp-config`` file's. The fixed items never come from ``launch``."""
+        from .. import task_manager_sandbox
         from ..claude_cli import budget_args, operator_settings_args, peer_args, permission_args, system_prompt_args
 
+        if launch.tool_hook is not None:
+            raise ValueError("a direct session carries no Looper hook: the sandbox is its boundary")
         provider = launch.profile.provider
-        hook = launch.tool_hook
         return [
             executable, "--print", "--verbose", "--output-format", "stream-json",
             "--input-format", "stream-json", "--include-partial-messages", "--replay-user-messages",
             # Only the servers of the generated --mcp-config load, not the operator's others (user, local, project
             # scope); the operator allows some by name (``operator_mcp``). Plugins' own servers do not load either.
             "--strict-mcp-config",
-            *operator_settings_args(settings_dir, hook.settings() if hook is not None else None),
+            # F7 (no project or local settings layer) and F9 (the built-in tool allowlist).
+            *task_manager_sandbox.launch_args(),
+            *operator_settings_args(settings_dir, task_manager_sandbox.settings_content(
+                Path(cwd), allowed_domains=allowed_domains, read_deny=read_deny)),
             *system_prompt_args(prompt_file), *permission_args(), *peer_args(False),
             "--model", launch.model, *(["--effort", launch.effort] if launch.effort else []),
             *(["--mcp-config", launch.library.mcp_config] if launch.library.mcp_config else []),

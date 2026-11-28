@@ -219,8 +219,15 @@ describe("task conversation", () => {
       { kind: "turn_summary", files: ["src/b.ts"], commit: null, mode: "direct", uncommitted: ["src/b.ts"] },
       { kind: "turn_summary", files: ["src/c.ts"], commit: null, mode: "direct", unverified: ["src/c.ts"] },
       { kind: "refused", reason: "orchestrated", status: "running" },
-      ...["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified"].map((reason) => ({ kind: "refused", reason })),
+      ...["work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace", "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved", "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"].map((reason) => ({ kind: "refused", reason })),
       { kind: "queued", reason: "cap", position: 1, active: 6, type: "queued" },
+      { kind: "sandbox_denial", tool_use_id: "tu-a", category: "network", case: "not_allowed", target: "blocked.example:443", client: null, command_name: "curl" },
+      { kind: "sandbox_denial", tool_use_id: "tu-b", category: "network", case: "unsupported_client", target: "api.example:443", client: "go_tls", command_name: "gh" },
+      { kind: "sandbox_denial", tool_use_id: "tu-c", category: "network", case: "unsupported_client", target: null, client: "go_tls", command_name: "terraform" },
+      { kind: "sandbox_denial", tool_use_id: "tu-d", category: "other", case: "unknown", target: null, client: null, command_name: "ls" },
+      { kind: "sandbox_denial", tool_use_id: "tu-e", category: "write", case: "not_allowed", target: "/var/data/x", client: null, command_name: "touch" },
+      { kind: "sandbox_denial", tool_use_id: "tu-g", category: "network", case: "not_allowable", target: "10.0.0.1:443", client: null, command_name: "curl" },
+      { kind: "sandbox_denial", tool_use_id: "tu-f", category: "network", case: "unknown", target: "blocked.example:443", client: null, command_name: "x" },
     ];
     const messages = [
       row("asst", "assistant", "模型已切换：a → b", "2026-11-25T00:00:00Z"),
@@ -250,6 +257,31 @@ describe("task conversation", () => {
     expect(text).toContain("direct · src/a.ts · abc123");
     expect(text).toContain("已拒绝（orchestrated：running）");
     expect(text).toContain("已拒绝（budget）");
+    expect(text).toContain("已拒绝（manager_answers_off）");
+    expect(text).toContain("已拒绝（mcp_unresolved）");
+    for (const reason of ["sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"]) {
+      expect(text).toContain(`已拒绝（${reason}）`);
+    }
+    expect(text).toContain("命令 curl 访问 `blocked.example:443` 被拒绝；该域名不在本项目的白名单里，操作者可在项目的任务管家沙箱设置里放行");
+    expect(text).toContain("gh 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
+    expect(text).toContain("terraform 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
+    // A known client is unsupported whether or not the host is on the allowlist, so the row never claims it is listed.
+    const unsupportedClient = [...container.querySelectorAll('[data-feed-key^="task-event:"]')]
+      .filter((item) => item.textContent?.includes("这类命令在 v1 的管家会话里不受支持"));
+    expect(unsupportedClient).toHaveLength(2);
+    for (const item of unsupportedClient) {
+      expect(item.textContent).not.toContain("在白名单里");
+    }
+    expect(text).toContain("命令 touch 写 `/var/data/x` 被拒绝：管家会话只能写任务目录");
+    expect(text).toContain("命令 curl 访问 `10.0.0.1:443` 被拒绝：v1 不能放行这类目的地");
+    const notAllowable = [...container.querySelectorAll('[data-feed-key^="task-event:"]')].find((row) => row.textContent?.includes("10.0.0.1:443"));
+    expect(notAllowable?.textContent).not.toContain("操作者可在项目的任务管家沙箱设置里放行");
+    expect(text).toContain("被沙箱拒绝（other）");
+    // An unknown denial names no host and does not suggest that allowing one helps.
+    const unknown = [...container.querySelectorAll('[data-feed-key^="task-event:"]')].find((row) => row.textContent?.includes("被沙箱拒绝（network）"));
+    expect(unknown).toBeDefined();
+    expect(unknown?.textContent).not.toContain("blocked.example");
+    expect(unknown?.textContent).not.toContain("放行");
     expect(text).toContain("无法读取这条事件");
     expect(text).not.toContain("模型已切换：hidden");
     expect(container.querySelector('[data-role="assistant"]')?.textContent).toContain("已停止");
@@ -257,6 +289,76 @@ describe("task conversation", () => {
     expect(command?.textContent).toContain("/pause");
     expect(command?.querySelector("button")).toBeNull();
     expect(container.querySelector('[data-role="assistant"]')?.textContent).toContain("模型已切换：a → b");
+  });
+
+  it("explains an unsupported client without claiming an unlisted host is allowlisted", async () => {
+    const denial = {
+      kind: "sandbox_denial", tool_use_id: "tu-unlisted", category: "network",
+      case: "unsupported_client", target: "unlisted.example:443", client: "go_tls", command_name: "gh",
+    };
+    api.fetchChatHistory.mockResolvedValue(idle([
+      row("e1", "event", JSON.stringify(denial), "2026-11-25T00:00:00Z"),
+    ]));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    const item = container.querySelector('[data-feed-key="task-event:e1"]');
+    expect(item?.textContent).toContain("gh 这类命令在 v1 的管家会话里不受支持，放行域名不会让它可用");
+    expect(item?.textContent).not.toContain("在白名单里");
+    expect(item?.textContent).not.toContain("unlisted.example");
+  });
+
+  it("renders ref reports and the first-enable notice, and rejects malformed variants", async () => {
+    const old = "a".repeat(40), moved = "b".repeat(40);
+    const change = (ref: string, kind: string, from: string | null, to: string | null, restore: string) =>
+      ({ ref, change: kind, old: from, new: to, restore });
+    const good = [
+      { kind: "sandbox_notice", notice: "first_enable_in_place", detail: "server detail" },
+      { kind: "sandbox_notice", notice: "refs_unreadable", detail: "server detail" },
+      { kind: "ref_report", message_id: "turn-1", report_id: 7, own_commits: 2, needs_you: true,
+        head: { before: "refs/heads/main", after: null }, info: [change("refs/heads/looper/t2/task", "moved", old, moved, "git update-ref refs/heads/looper/t2/task A B")],
+        changes: [change("refs/heads/oth\\u202eer", "moved", old, moved, `git update-ref refs/heads/other ${old} ${moved}`),
+          change("refs/heads/main", "non_fast_forward", moved, old, `git update-ref refs/heads/main ${moved} ${old}`)] },
+    ];
+    const bad = [
+      { kind: "sandbox_notice", notice: "other", detail: "x" },
+      { kind: "ref_report", report_id: "7", own_commits: 0, needs_you: false, head: null, info: [], changes: [] },
+      { kind: "ref_report", report_id: null, own_commits: 0, needs_you: false, head: null, info: [],
+        changes: [change("refs/heads/x", "renamed", null, null, "x")] },
+    ];
+    const messages = [...good, ...bad].map((event, index) =>
+      row(`r${index}`, "event", JSON.stringify(event), `2026-11-25T00:00:0${index}Z`));
+    api.fetchChatHistory.mockResolvedValue(idle(messages));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    const text = container.textContent ?? "";
+    expect(text).toContain("管家在你的真实检出目录里直接改文件；v1 只报告分支和标签的变化，不会恢复，删掉的对象也找不回来，建议先把重要分支推送或备份。");
+    expect(text).toContain("本轮结束后没能重新读取分支和标签");
+    const report = container.querySelector('[data-feed-key="task-event:r2"]')!;
+    expect(report.textContent).toContain("refs/heads/oth\\u202eer 被移动（aaaaaaaa → bbbbbbbb）");
+    expect(report.textContent).toContain("refs/heads/main 被改写（不是快进）");
+    expect(report.textContent).toContain("reset --hard、rebase 或 commit --amend");
+    expect(report.textContent).toContain("属于另一个 Looper 任务");
+    expect(report.textContent).toContain("已列入「需要你处理」");
+    expect(report.textContent).toContain("HEAD 从 refs/heads/main 变成 detached，不会自动切回");
+    expect(report.textContent).toContain("本轮有 2 个提交由任务管家自己做");
+    expect(Array.from(report.querySelectorAll("code"), (node) => node.textContent)).toEqual([
+      `git update-ref refs/heads/other ${old} ${moved}`, `git update-ref refs/heads/main ${moved} ${old}`,
+      "git update-ref refs/heads/looper/t2/task A B"]);
+    for (const index of [3, 4, 5]) expect(container.querySelector(`[data-feed-key="task-event:r${index}"]`)?.textContent).toContain("无法读取这条事件");
+  });
+
+  it("keeps repeated identical sandbox notices of different turns apart, and folds one turn's copy", async () => {
+    const notice = (messageId: string) => ({ kind: "sandbox_notice", notice: "refs_unreadable", detail: "d", message_id: messageId });
+    api.fetchChatHistory.mockResolvedValue(idle([
+      row("n1", "event", JSON.stringify(notice("turn-1")), "2026-11-25T00:00:01Z"),
+      row("n2", "event", JSON.stringify(notice("turn-2")), "2026-11-25T00:00:02Z"),
+    ]));
+    await show(<TaskWorkConversation taskId="t1" task={taskOf("t1")} />);
+    await flush();
+    expect(container.querySelectorAll('[data-feed-key^="task-event:"]')).toHaveLength(2);
+    act(() => threadEmit({ kind: "task.event", payload: notice("turn-2") }));
+    await flush();
+    expect(container.querySelectorAll('[data-feed-key^="task-event:"]')).toHaveLength(2);
   });
 
   it("shows a live model switch without sending, and reloads it as the same row", async () => {

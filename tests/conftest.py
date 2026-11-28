@@ -143,12 +143,23 @@ def _staged_dashboard_environment():
         yield
 
 
+def _require_staged_dashboard(directory: Path) -> Path:
+    if not (directory / "index.html").is_file():
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            # A skip would leave the job green even though no browser/serve test ran.
+            pytest.fail(
+                "staged dashboard missing at "
+                f"{directory / 'index.html'}; the 'Build the dashboard' step "
+                "(scripts/stage-dashboard.sh) must produce it before pytest"
+            )
+        pytest.skip("UNTESTED: staged dashboard missing; run scripts/stage-dashboard.sh")
+    return directory
+
+
 @pytest.fixture(scope="session")
 def staged_dashboard_dir() -> Path:
     """Use the wheel's dashboard, built once before pytest, never rebuild it in workers."""
-    directory = _STAGED_DASHBOARD_DIR
-    assert (directory / "index.html").is_file(), "Run scripts/stage-dashboard.sh before browser tests"
-    return directory
+    return _require_staged_dashboard(_STAGED_DASHBOARD_DIR)
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
@@ -781,6 +792,29 @@ def _gate_command_state(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_cost_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The process-wide cost guard is created lazily from the cached settings; a test that enforces a budget must not
+    leave that guard behind for later tests in the same worker."""
+    cost_guard = sys.modules.get("looper.agents.cost_guard")
+    if cost_guard is None:
+        return
+
+    monkeypatch.setattr(cost_guard, "_guard", None)
+
+
+@pytest.fixture(autouse=True)
+def _own_task_end_listeners(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task-end listeners live in a module-level list that the server fills once at startup. A test that starts the
+    server in-process and does not reach its shutdown leaves a listener bound to a closed loop and pool; every task end
+    in a later test of the same worker then logged "a task-end listener failed". Each test gets its own empty list."""
+    task_rows = sys.modules.get("looper.db.tasks")
+    if task_rows is None:
+        return
+
+    monkeypatch.setattr(task_rows, "task_ended_listeners", [])
+
+
+@pytest.fixture(autouse=True)
 def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     """The runs going on now and their token windows belong to one test, not to earlier recorders in this worker."""
     live_runs = sys.modules.get("looper.agents.live_runs")
@@ -793,16 +827,21 @@ def _no_live_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(live_runs, "_ended", [])
 
 
-@pytest.fixture(autouse=True)
-def _own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The resident pool lists the routers of the Managers alive in this process. A Manager an earlier test built with
-    a stand-in session stays in the process-wide pool until the garbage collector frees it, and the metrics API's
-    resident count then failed on the stand-in (503) in whichever test ran next in that worker. Each test gets its own."""
+def own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the process-wide resident pool a new, empty one (the autouse fixture below, and the test that checks it)."""
     manager_routing = sys.modules.get("looper.agents.tiers.manager_routing")
     if manager_routing is None:
         return
 
     monkeypatch.setattr(manager_routing, "pool", manager_routing.ResidentPool())
+
+
+@pytest.fixture(autouse=True)
+def _own_resident_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The resident pool lists the routers of the Managers alive in this process. A Manager an earlier test built with
+    a stand-in session stays in the process-wide pool until the garbage collector frees it, and the metrics API's
+    resident count then failed on the stand-in (503) in whichever test ran next in that worker. Each test gets its own."""
+    own_resident_pool(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -897,8 +936,12 @@ AUTONOMOUS = json.loads({autonomous!r})
 DENIED = json.loads({denied!r})
 WRITES = json.loads({writes!r})
 def log(name, value):
-    with open(os.path.join(STATE, name), 'a') as f:
-        f.write(json.dumps(value) + '\\n')
+    # One write of the whole line, so a reader never sees a record without its newline except mid-write.
+    fd = os.open(os.path.join(STATE, name), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+    try:
+        os.write(fd, (json.dumps(value) + '\\n').encode())
+    finally:
+        os.close(fd)
 log('argv.jsonl', sys.argv[1:])
 log('pids.jsonl', os.getpid())
 # Like Claude resuming a session it no longer has: an error result without an init event.
@@ -1020,7 +1063,8 @@ class FakePlannerClaude:
 
     def _log(self, name: str) -> list[Any]:
         path = self.state / name
-        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        # Only newline-terminated records are committed; a half-written tail is read on the next poll.
+        return [json.loads(line) for line in path.read_text().split("\n")[:-1]] if path.exists() else []
 
     def argvs(self) -> list[list[str]]:
         return self._log("argv.jsonl")

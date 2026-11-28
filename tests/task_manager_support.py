@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
-from looper.agents import outbound_hook, task_conversations_settings, task_manager_safety, task_manager_settings
+from looper.agents import outbound_hook, task_conversations_settings, task_manager_safety, task_manager_sandbox
+from looper.agents import task_manager_settings
 from looper.agents.agent_settings import AgentSettings
 from looper.agents.profile_registry import builtin_resolved_profile
 from looper.db import projects, tasks
 from tests.db_support import until
+from evals.prompt_regression.fake_readback import SOURCE as READBACK_SOURCE
 from tests.fake_claude import fake_claude
 
 
@@ -42,6 +46,8 @@ class NativeTaskManager:
         monkeypatch.setattr(task_conversations_settings, "_manager_mcp", ())
         monkeypatch.setattr(outbound_hook, "known_enabled", lambda: False)
         monkeypatch.setattr(task_manager_safety, "gate", AsyncMock(return_value=None))
+        # The direct session runs on macOS only; these lifecycle tests use a scripted CLI on any platform.
+        monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)
 
         async def read_settings(task):
             return self.settings
@@ -58,6 +64,7 @@ def emit(value):
     print(json.dumps(value), flush=True)
 if '--version' in sys.argv:
     print('2.1.332 (Claude Code)'); sys.exit()
+exec({READBACK_SOURCE!r})
 resuming = '--resume' in sys.argv
 record({{'kind':'launch', 'command':sys.argv[1:], 'cwd':os.getcwd(),
          'environment':{{key:os.environ.get(key) for key in ('LOOPER_TASK_MANAGER','LOOPER_AGENT_RUN','SERVER_PRIVATE')}}}})
@@ -76,6 +83,14 @@ def finish(text):
            **({{'usage_complete':False}} if measurement_config.get('unknown_cost') else {{}})}})
 for line in sys.stdin:
     data = json.loads(line)
+    if data.get('type') == 'control_request' and data['request']['subtype'] in READBACK_SUBTYPES:
+        record({{'kind':'control', 'subtype':data['request']['subtype']}})
+        answer = readback_answer(data['request'], str(log.with_name('readback-override.json')))
+        if answer is not None:
+            kind, body = answer
+            emit({{'type':'control_response','response':{{'subtype':kind,'request_id':data['request_id'],
+                  **({{'response':body}} if kind == 'success' else {{'error':body}})}}}})
+        continue
     if data.get('type') == 'control_request':
         emit({{'type':'control_response','response':{{'subtype':'success','request_id':data['request_id']}}}})
         finish('stopped')
@@ -84,7 +99,13 @@ for line in sys.stdin:
     config_path = Path('context-probe.json')
     measurement_config = json.loads(config_path.read_text()) if config_path.exists() else {{}}
     record({{'kind':'input','text':text,'session':session}})
-    emit({{'type':'system','subtype':'init','session_id':session}})
+    override_file = str(log.with_name('readback-override.json'))
+    mode = init_mode(override_file)
+    init_event = {{'type':'system','subtype':'init','session_id':session, **init_fields(override_file)}}
+    if mode == 'normal':
+        import time as _time
+        _time.sleep(init_delay(override_file))
+        emit(init_event)
     if text == 'wait':
         continue
     if text == '/compact':
@@ -116,15 +137,22 @@ for line in sys.stdin:
             os.rename(old, new)
         if text.endswith('!'):
             Path(new).write_text('moved and edited by the turn\\n')
+    if text.startswith('sh:'):
+        subprocess.run(text[3:], shell=True, check=True)
     if text.startswith('revert:'):
         subprocess.run(['git', 'checkout', '--', text[7:]], check=True)
     if text.startswith('edit:'):
         for name in text[5:].split(','):
             Path(name).write_text('changed by the turn\\n')
-    emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})
-    emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'two'}}}}}})
-    emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':'tool-call','name':'Read','input':{{'file_path':'sample'}}}}]}}}})
-    emit({{'type':'user','message':{{'content':[{{'type':'tool_result','tool_use_id':'tool-call','content':'contents'}}]}}}})
+    if mode != 'bare':
+        if partial_tool(override_file):
+            emit({{'type':'stream_event','event':{{'type':'content_block_start','content_block':{{'type':'tool_use','id':'p','name':partial_tool(override_file)}}}}}})
+        emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'one'}}}}}})
+        emit({{'type':'stream_event','event':{{'delta':{{'type':'text_delta','text':'two'}}}}}})
+        emit({{'type':'assistant','message':{{'content':[{{'type':'tool_use','id':'tool-call','name':tool_name(override_file),'input':{{'command':'cat sample'}}}}]}}}})
+        emit({{'type':'user','message':{{'content':[{{'type':'tool_result','tool_use_id':'tool-call','content':'contents'}}]}}}})
+    if mode == 'late':
+        emit(init_event)
     finish('onetwo')
 ''')
 
@@ -133,9 +161,13 @@ for line in sys.stdin:
             return []
         return [row for line in self.transcript.read_text().splitlines() if (row := json.loads(line))["kind"] == kind]
 
-    async def create(self, db, task_id="task-one", *, status="draft", workspace_mode="in_place", path=None):
+    async def create(self, db, task_id="task-one", *, status="draft", workspace_mode="in_place", path=None, git=True):
         directory = path or self.root / task_id
         directory.mkdir(parents=True, exist_ok=True)
+        # A direct session starts only at a non-bare repository root and records its branch.
+        # Callers that need a subdirectory or a plain directory pass git=False.
+        if git and not (directory / ".git").exists():
+            subprocess.run(["git", "init", "-q", "-b", "main", str(directory)], check=True, capture_output=True)
         project = await projects.create_project(name=f"Synthetic project {task_id}", work_dir=str(directory), pool=db)
         await tasks.create_task(task_id=task_id, requirement="Implement the synthetic feature", project_id=project["id"],
             status=status, work_dir=str(directory), workspace_mode=workspace_mode, workspace_dir=str(directory), pool=db)

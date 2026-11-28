@@ -534,7 +534,8 @@ def test_installed_looper_entrypoint_reports_the_current_version(tmp_path: Path)
 
     scripts = {entry.name: entry.value for entry in distribution("looper").entry_points
                if entry.group == "console_scripts"}
-    assert scripts == {"looper": "looper.cli:main", "loopercli": "looper.loopercli:main"}
+    assert scripts == {"looper": "looper.cli:main", "loopercli": "looper.loopercli:main",
+                       "looper-edit": "looper.file_edit:main"}
     proc = subprocess.run([str(Path(sys.executable).with_name("looper")), "--version"], cwd=tmp_path,
                           env=_clean_env(tmp_path), text=True, capture_output=True, timeout=30)
     assert proc.returncode == 0 and proc.stdout.strip() == f"looper {__version__}"

@@ -13,9 +13,14 @@ from ..chat_targets import HTTP_409, ChatTargetError, resolve_chat_target
 from ..ops import ErrorCode, OpError
 from ..tiers.manager import is_new_session_command
 from ..task_manager_settings import ModelSwitchRejection
+from ..task_manager_refs import NOTICES, Change
 
 
 _ID = {"type": "string", "minLength": 1}
+_NULL_STR = {"type": ["string", "null"]}
+_REF_CHANGE = _object({"ref": _STR, "change": {"enum": [change.value for change in Change]},
+                       "old": _NULL_STR, "new": _NULL_STR, "restore": _STR},
+                      ["ref", "change", "old", "new", "restore"], closed=True)
 CHAT_TARGET = {"oneOf": [
     _object({"kind": {"const": "manager"}, "id": _STR}, ["kind"], closed=True),
     _object({"kind": {"const": "planner"}, "task_id": _ID}, closed=True),
@@ -41,14 +46,28 @@ SCHEMAS = {
         _object({"kind": {"const": "session_fresh"}, "reason": {"enum": [
             "context_bound", "read_only_open", "resume_failed"]}, "detail": _STR}, closed=True),
         _object({"kind": {"const": "stopped"}, "method": {"enum": ["control", "cancel", "kill"]}}, closed=True),
+        _object({"kind": {"const": "sandbox_denial"}, "tool_use_id": _STR,
+                 "category": {"enum": ["network", "write", "other"]},
+                 "case": {"enum": ["not_allowed", "unsupported_client", "unknown", "not_allowable"]},
+                 "target": {"type": ["string", "null"]}, "client": {"enum": ["go_tls", None]},
+                 "command_name": _STR}, closed=True),
         _object({"kind": {"const": "turn_summary"}, "files": _array(_STR),
                  "commit": {"type": ["string", "null"]},
                  "mode": {"enum": ["direct", "orchestrated"]},
                  "uncommitted": _array(_STR), "unverified": _array(_STR)}, ["kind", "files", "commit", "mode"], closed=True),
+        _object({"kind": {"const": "ref_report"}, "message_id": _NULL_STR, "report_id": {"type": ["integer", "null"]},
+                 "changes": _array(_REF_CHANGE), "info": _array(_REF_CHANGE),
+                 "head": {"oneOf": [{"type": "null"}, _object({"before": _NULL_STR, "after": _NULL_STR},
+                                                              ["before", "after"], closed=True)]},
+                 "own_commits": {"type": "integer", "minimum": 0}, "needs_you": {"type": "boolean"}},
+                ["kind", "message_id", "report_id", "changes", "info", "head", "own_commits", "needs_you"], closed=True),
+        _object({"kind": {"const": "sandbox_notice"}, "notice": {"enum": list(NOTICES)}, "detail": _STR, "message_id": _NULL_STR},
+                ["kind", "notice", "detail"], closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"const": "orchestrated"}, "status": _STR}, closed=True),
         _object({"kind": {"const": "refused"}, "reason": {"enum": [
             "work_mode_off", "runtime_unsupported", "budget", "outbound_review_unavailable", "workspace",
-            "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved"]}}, closed=True),
+            "shutting_down", "review_hook_disabled", "cli_unverified", "manager_answers_off", "mcp_unresolved",
+            "sandbox_unavailable", "readback_unavailable", "launch_setting_mismatch", "mcp_set_mismatch", "mcp_launcher_unsafe", "network_policy_invalid", "workspace_not_repo_root", "workspace_is_home", "workspace_contains_trusted_config", "workspace_in_system_dir", "workspace_overlaps_session", "workspace_unavailable", "worktree_unsupported", "head_moved", "head_detached"]}}, closed=True),
     ]},
     "OperatorChatMessage": _object({"message_id": _STR, "role": {"const": "assistant"},
         "content": _STR, "created_at": _STR}, closed=True),
@@ -162,7 +181,7 @@ async def stream(server, operation, arguments, principal, headers, writer):
         if owner := await server._thread_owner_elsewhere(session_id, arguments.get("manager") or "manager"):
             raise await server._foreign_thread_error(owner)
     writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\n"
-                 b"Connection: close\r\nX-Accel-Buffering: no\r\n\r\n")
+                 b"X-Content-Type-Options: nosniff\r\nConnection: close\r\nX-Accel-Buffering: no\r\n\r\n")
     events = (server._web_adapter.iter_chat_events(session_id) if correlation_id is None
               else server._web_adapter.iter_sse_events(correlation_id))
     try:

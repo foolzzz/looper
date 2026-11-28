@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -16,12 +17,16 @@ from typing import Any, Literal, Protocol
 
 from ...db import activity, agent_sessions, projects, tasks
 from .. import operator_mcp, outbound_hook, step_workspaces, task_budget, task_conversations_settings
-from .. import task_manager_safety, task_manager_settings, task_workspaces
+from .. import (task_manager_alerts, task_manager_denials, task_manager_dirs, task_manager_network,
+                task_manager_readback, task_manager_refs, task_manager_safety, task_manager_sandbox,
+                task_manager_settings)
+from .. import task_workspaces
 from ..agent_settings import Access, Launch
 from ..claude_cli import ClaudeRunRecorder, ResidentClaude
 from ..library import EMPTY_LIBRARY
 from ..project_execution import ProjectExecution
 from ..run_usage import Usage
+from ..runtimes import library_mcp_servers
 from ..runtimes.cancel import TurnCancel
 from ..system_prompt import SystemPrompt
 from ..task_manager_brief import brief, instructions
@@ -39,6 +44,9 @@ class TaskManagerEvent(str, Enum):
     STOPPED = "stopped"
     MODEL_SWITCHED = "model_switched"
     MODEL_SWITCH_REJECTED = "model_switch_rejected"
+    SANDBOX_DENIAL = "sandbox_denial"
+    REF_REPORT = "ref_report"
+    SANDBOX_NOTICE = "sandbox_notice"
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,22 @@ class RefuseReason(str, Enum):
     CLI_UNVERIFIED = "cli_unverified"
     MANAGER_ANSWERS_OFF = "manager_answers_off"
     MCP_UNRESOLVED = "mcp_unresolved"
+    # The direct session's sandbox boundary (``task_manager_sandbox``); other cards raise most of these.
+    SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+    READBACK_UNAVAILABLE = "readback_unavailable"
+    LAUNCH_SETTING_MISMATCH = "launch_setting_mismatch"
+    MCP_SET_MISMATCH = "mcp_set_mismatch"
+    MCP_LAUNCHER_UNSAFE = "mcp_launcher_unsafe"
+    NETWORK_POLICY_INVALID = "network_policy_invalid"
+    WORKSPACE_NOT_REPO_ROOT = "workspace_not_repo_root"
+    WORKSPACE_IS_HOME = "workspace_is_home"
+    WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
+    WORKSPACE_IN_SYSTEM_DIR = "workspace_in_system_dir"
+    WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKSPACE_UNAVAILABLE = "workspace_unavailable"
+    WORKTREE_UNSUPPORTED = "worktree_unsupported"
+    HEAD_MOVED = "head_moved"
+    HEAD_DETACHED = "head_detached"
 
 
 def _off_text(reason: RefuseReason) -> str:
@@ -102,9 +126,10 @@ def resume_message(text: str, history: Sequence[Any]) -> str:
 
 
 class Refused(Exception):
-    def __init__(self, reason: RefuseReason, text: str) -> None:
+    def __init__(self, reason: RefuseReason, text: str, kind: task_manager_dirs.Kind | None = None) -> None:
         super().__init__(text)
         self.reason = reason
+        self.kind = kind
 
 
 class _TaskResident(ResidentClaude):
@@ -135,12 +160,16 @@ class _TaskResident(ResidentClaude):
             for path in self.owner.mcp_files:
                 Path(path).unlink(missing_ok=True)
             self.owner.mcp_files.clear()
+            lock, self.owner.dir_lock = self.owner.dir_lock, None
+            if lock is not None:
+                lock.release()
 
 
 @dataclass(frozen=True)
 class Submitted:
     state: Literal["started", "queued", "refused"]
     reason: RefuseReason | None = None
+    kind: task_manager_dirs.Kind | None = None  # the directory refusal's sub-type, typed; not on the event payload
 
 
 @dataclass
@@ -152,6 +181,14 @@ class _Request:
     history: Sequence[Mapping[str, Any] | str]
     admitted: asyncio.Future[Submitted]
     cancel: TurnCancel = field(default_factory=TurnCancel)
+
+
+class _InitMismatch(Exception):
+    """A turn's ``system/init`` lists other tools or another permission mode than the verified launch has."""
+
+    def __init__(self, mismatches: list[task_manager_readback.Mismatch], *, alert: bool = True) -> None:
+        super().__init__("init mismatch")
+        self.mismatches, self.alert = mismatches, alert
 
 
 class _ResumeFailed(Exception):
@@ -248,7 +285,20 @@ class TaskManagerAgent:
         self.loaded = False
         self.context_rotation_pending = False
         self.running: asyncio.Task[None] | None = None
+        self.mcp_fingerprints: dict[str, str] = {}  # of the allowed servers launched, to compare with what ran
         self.mcp_files: set[str] = set()  # generated configs holding the operator's server definitions
+        # What the direct session's launch command carries (``task_manager_sandbox``): the network allowlist (set by
+        # the network policy, empty until then) and the read deny list. The readback builds its expected values
+        # from these same two attributes, so the command and the readback cannot disagree.
+        self.allowed_domains: tuple[str, ...] = ()
+        self.read_deny: tuple[str, ...] = ()
+        self.init_tools: frozenset[str] | None = None  # the MCP tools the readback saw: what a turn's init must list
+        self.started_for_turn: Literal["launch", "resume"] | None = None  # what the turn's ``prepare`` started
+        self.work_dir = ""
+        self.dir_lock: task_manager_dirs.DirectoryLock | None = None
+
+    def _mcp_cwd(self) -> Path:
+        return self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd"
 
     async def prepare(self, *, sink: TurnSink | None = None) -> tuple[Mapping[str, Any], Any, Launch, SystemPrompt]:
         """Read configuration afresh; no launch bypasses the direct-mode review checks."""
@@ -294,13 +344,27 @@ class TaskManagerAgent:
         direct = (tasks.interaction_mode(task["status"]) is tasks.InteractionMode.DIRECT
                   and reopened.mode is task_workspaces.ReopenMode.WRITE)
         self.mode = "direct" if direct else "orchestrated"
+        phase: Literal["launch", "resume"] = "resume" if self.session_id else "launch"
+        if direct and (unsupported := task_manager_sandbox.platform_problem()) is not None:
+            task_manager_safety.record_refusal(task_manager_safety.Reason.SANDBOX_UNAVAILABLE, phase)
+            raise Refused(RefuseReason.SANDBOX_UNAVAILABLE, unsupported)
+        self.project_id, self.allowed_domains = project["id"], ()
+        if direct:
+            try:
+                self.allowed_domains = await task_manager_network.allowed_domains(project["id"])
+            except task_manager_network.PolicyInvalid as exc:
+                task_manager_safety.record_refusal(task_manager_safety.Reason.NETWORK_POLICY_INVALID, phase)
+                raise Refused(RefuseReason.NETWORK_POLICY_INVALID,
+                              f"The project's task Manager network allowlist has an entry this version refuses "
+                              f"({exc}). Fix it with projects.task_manager_sandbox_update.") from exc
         async def configure() -> Launch:
             library, hook = EMPTY_LIBRARY, None
             if self.pool.ops is not None:
                 if self.token is None:
                     self.token = self.pool.ops.issue(self.task_id)
                 library = await self.pool.ops.library_with_server(library, self.pool.runtime_root, self.token)
-            if outbound_hook.known_enabled():
+            # A direct session carries no Looper hook: the sandbox is its boundary (``task_manager_sandbox``).
+            if not direct and outbound_hook.known_enabled():
                 try:
                     hook = (self.pool.ops.tool_hook(self.token, self.task_id, self.pool.runtime_root,
                                                    self.pool.claude_bin, library) if self.pool.ops else None)
@@ -310,34 +374,67 @@ class TaskManagerAgent:
                     raise Refused(RefuseReason.OUTBOUND_REVIEW_UNAVAILABLE, "The outbound review hook is unavailable.")
             run = Launch(settings=settings, library=library, role=None,
                          access=Access.FULL if direct else Access.READ_ONLY, tool_hook=hook)
-            if direct and (allowed := task_conversations_settings.manager_mcp()):
+            if direct:
+                allowed = task_conversations_settings.manager_mcp()
                 try:
+                    # Every stdio server, Looper's own included, starts through ``operator_mcp.wrap``.
                     run = replace(run, library=await operator_mcp.library_with_allowed(
-                        library, self.pool.runtime_root, allowed, cwd=reopened.work_dir,
-                        environment=run.runtime.environment(run)))
+                        library, self.pool.runtime_root, allowed,
+                        environment=run.runtime.environment(run),
+                        cwd=self._mcp_cwd()))
                 except operator_mcp.UnresolvedServers as exc:
                     raise Refused(RefuseReason.MCP_UNRESOLVED, str(exc)) from exc
-                self.mcp_files.add(run.library.mcp_config)
+                except operator_mcp.UnsafeLauncher as exc:
+                    task_manager_safety.record_refusal(task_manager_safety.Reason.MCP_LAUNCHER_UNSAFE, phase)
+                    raise Refused(RefuseReason.MCP_LAUNCHER_UNSAFE, str(exc)) from exc
+                if run.library.mcp_config and run.library.mcp_config != library.mcp_config:
+                    self.mcp_files.add(run.library.mcp_config)
+                self.mcp_fingerprints = operator_mcp.fingerprints(run.library, allowed, self._mcp_cwd().resolve())
+            else:
+                self.mcp_fingerprints = {}
             return run
         # Query newest summaries directly, so a long-lived task never gets its oldest activity as its brief.
         from ...db.connection import get_pool
-        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 ORDER BY seq DESC LIMIT 20",
-                                        self.task_id)
+        # Denial records are for the operator: the model's brief is unchanged by them.
+        recent = await get_pool().fetch("SELECT summary FROM activity WHERE task_id=$1 AND kind <> 'sandbox_denial' "
+                                        "ORDER BY seq DESC LIMIT 20", self.task_id)
         prompt = SystemPrompt(instructions(self.mode) + "\n\n" + brief(task, recent_activity=list(reversed(recent)),
                                                                     reopened=reopened))
         root = self.pool.runtime_root / "task-managers" / self.task_id
         prompt_file = prompt.write_file(root)
         launch = await configure()
+
+        def live_direct() -> list[tuple[str, str]]:
+            return [(agent.task_id, agent.work_dir) for agent in self.pool.agents.values()
+                    if agent is not self and agent.resident.started and agent.mode == "direct"]
+
+        if direct:
+            # Filesystem calls run in a thread so a slow mount does not stall the pool's event loop.
+            problem, checked = await asyncio.to_thread(
+                task_manager_dirs.inspect, task, reopened.work_dir, environment=launch.runtime.environment(launch),
+                runtime_root=self.pool.runtime_root, live=live_direct())
+            if problem is not None:
+                task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
+                raise Refused(RefuseReason(problem.reason.value), problem.text, problem.kind)
+            self.work_dir = reopened.work_dir
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:
+            if direct:
+                self.read_deny = task_manager_sandbox.read_deny_paths(launch.runtime.environment(launch),
+                                                                      self.pool.runtime_root, self.pool.config_file)
             return (launch.runtime.operator_resident_command(executable, cwd=reopened.work_dir, prompt_file=prompt_file,
-                                                             launch=launch, settings_dir=root / "settings")
+                                                             launch=launch, settings_dir=root / "settings",
+                                                             allowed_domains=self.allowed_domains,
+                                                             read_deny=self.read_deny)
                     if direct else launch.runtime.resident_command(executable, cwd=reopened.work_dir,
                                                                    prompt_file=prompt_file, launch=launch))
 
         command = command_for(launch)
-        env = task_manager_safety.environment(launch, self.task_id)
+        env = task_manager_safety.environment(launch, self.task_id,
+                                              drop=task_manager_sandbox.dropped_env(launch) if direct else ())
+        # The file's name is the SHA-256 of its content, so the signature covers the pinned values, the network
+        # allowlist and the read deny list: a change in any of them restarts the session.
         settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
         signature = (self.mode, reopened.work_dir, launch.profile.id, launch.model, launch.effort, launch.profile.provider, prompt.sha256, settings_file,
                      task_conversations_settings.manager_mcp() if direct else ())
@@ -354,23 +451,88 @@ class TaskManagerAgent:
             if self.pool.closing:
                 raise Refused(RefuseReason.SHUTTING_DOWN, "The task Manager is shutting down.")
             restarting = not self.resident.started or self.resident.stale(signature)
+            self.started_for_turn = None
             if restarting:
+                self.started_for_turn = "resume" if self.session_id else "launch"
                 await self.resident.stop()
+                if direct:  # a fresh, empty start directory for the servers of the new process
+                    await asyncio.to_thread(operator_mcp.reset_cwd, self._mcp_cwd())
                 launch = await configure()
                 command = command_for(launch)
-                env = task_manager_safety.environment(launch, self.task_id)
+                env = task_manager_safety.environment(launch, self.task_id,
+                                                      drop=task_manager_sandbox.dropped_env(launch) if direct else ())
+                if direct and (warning := task_manager_sandbox.credential_warning(env)):
+                    logger.warning("task Manager %s: %s", self.task_id, warning)
+                settings_file = command[command.index("--settings") + 1] if "--settings" in command else ""
                 if direct:
                     problem = await task_manager_safety.gate(executable, cwd=reopened.work_dir, environment=launch.runtime.environment(launch),
-                        phase="resume" if self.session_id else "launch", settings_file=Path(settings_file))
+                        phase=phase, settings_file=Path(settings_file), review_hook=False)
                     if problem is not None:
                         await self.resident.stop(kill=True)
                         raise Refused(RefuseReason(problem.reason.value), problem.notice)
+                    if self.dir_lock is not None:
+                        self.dir_lock.release()
+                        self.dir_lock = None
+                    # The lock is taken first; then the directory the lock was taken on must be the checked one, and
+                    # the whole check runs again (including the live-session overlap). The process is then started
+                    # from the path: a same-user writer swapping the path after this point is not detected (RFC 25.5).
+                    lock, problem = await task_manager_dirs.admit_off_loop(
+                        task, reopened.work_dir, self.task_id, environment=launch.runtime.environment(launch),
+                        runtime_root=self.pool.runtime_root, live=live_direct(), expected=checked)
+                    if problem is not None:
+                        task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
+                        await self.resident.stop(kill=True)
+                        raise Refused(RefuseReason(problem.reason.value), problem.text, problem.kind)
+                    self.dir_lock = lock
                 if self.session_id:
                     command += ["--resume", self.session_id]
                 await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
                                           totals=self.totals, price=launch.price, capture_stderr=True)
             self.last_used = self.pool.clock()
         return task, reopened, launch, prompt
+
+    async def _verify(self, launch: Launch, reopened: Any) -> None:
+        """Read back the CLI's effective settings before the turn's user message is written (direct sessions): any
+        difference from what the launch injected, or a readback that cannot be done, refuses the turn and ends the
+        process. At a launch or resume it is the first thing after the process starts."""
+        if self.mode != "direct":
+            return
+        phase = self.started_for_turn or "turn"
+        env = launch.runtime.environment(launch)
+        work_dir = Path(reopened.work_dir)
+        private_dir = (self.pool.runtime_root / "task-managers" / self.task_id / "mcp-cwd").resolve()  # as launch wrapped it
+        expected = task_manager_readback.Expected(
+            private_dir=private_dir,
+            pins=task_manager_sandbox.pins(work_dir, allowed_domains=self.allowed_domains, read_deny=self.read_deny),
+            fs_allow_write=frozenset(),
+            writes_allowed=task_manager_readback.writes_allowed(
+                env.get("HOME") or str(Path.home()), os.getuid(), env.get("CLAUDE_CODE_TMPDIR"), self.read_deny),
+            mcp=task_manager_readback.expected_mcp(library_mcp_servers(launch.library), private_dir),
+            known_tools=task_manager_readback.KNOWN_BUILTIN_TOOLS[task_manager_safety.VERIFIED_CLI_VERSION])
+        self.init_tools = None
+        try:
+            readback = await task_manager_readback.read(self.resident, phase)
+            mismatches = task_manager_readback.compare(readback, expected)
+        except task_manager_readback.ReadbackUnavailable as exc:
+            if phase == "resume" and not self.resident.running:
+                return  # a resume that exited at once is the turn's own ``_ResumeFailed`` (a fresh session follows)
+            mismatches = [task_manager_readback.Mismatch(task_manager_safety.Reason.READBACK_UNAVAILABLE, exc.item,
+                                                         None, None, task_manager_readback.Source.UNKNOWN)]
+        if not mismatches:
+            self.init_tools = task_manager_readback.mcp_tool_names(readback)
+            return
+        await self._refuse(mismatches, phase)
+
+    async def _refuse(self, mismatches: Sequence[task_manager_readback.Mismatch], phase: str, *,
+                      alert: bool = True) -> None:
+        """End the process, count and alert, and refuse with the first mismatch's reason."""
+        reason = mismatches[0].reason
+        task_manager_safety.record_refusal(reason, phase, task_manager_safety.VERIFIED_CLI_VERSION)
+        await self.resident.stop(kill=True)
+        if alert and reason is not task_manager_safety.Reason.SANDBOX_UNAVAILABLE:
+            await task_manager_alerts.invariant_violation(self.task_id, reason.value, mismatches[0].item)
+        raise Refused(RefuseReason(reason.value),
+                      task_manager_readback.notice(mismatches, task_manager_safety.VERIFIED_CLI_VERSION))
 
     async def turn(self, request: _Request) -> None:
         try:
@@ -386,6 +548,11 @@ class TaskManagerAgent:
             await activity.insert_activity(task_id=self.task_id, kind="error",
                 summary="Warning: task Manager cost is unknown for " + ", ".join(gate.unknown_models))
         task, reopened, launch, prompt = await self.prepare()
+        await self._verify(launch, reopened)
+        # An in-place direct session writes the real checkout: record its branches and tags and settle the task branch
+        # (a detached or moved HEAD refuses here, before the message is admitted).
+        refs_before, task_branch = ((await task_manager_refs.begin_turn(task, reopened.work_dir, sink=request.sink, phase="turn"))
+                                    if self.mode == "direct" and task.get("workspace_mode") != "worktree" else (None, ""))
         if not request.admitted.done():
             request.admitted.set_result(Submitted("started"))
         rotating = self.context_rotation_pending
@@ -405,12 +572,34 @@ class TaskManagerAgent:
                 resuming = "--resume" in self.resident.command
                 expected = self.session_id if resuming else None
                 initialized = False
+                listed: frozenset[str] | None = None  # the tools of this turn's passing ``system/init`` (direct)
                 pieces: list[str] = []
                 tools: dict[str, ToolRecord] = {}
+                inputs: dict[str, Any] = {}
+                observer = task_manager_denials.Observer(self.task_id, self.project_id, request.message_id,
+                                                         self.allowed_domains, request.sink)
 
                 async def on_event(event: dict[str, Any]) -> None:
-                    nonlocal initialized
+                    nonlocal initialized, listed
                     await recorder.record(event)
+                    gated = self.mode == "direct" and self.init_tools is not None
+                    if event.get("type") == "system" and event.get("subtype") == "init":
+                        if gated and (bad := task_manager_readback.check_init(event, self.init_tools)):
+                            raise _InitMismatch(bad)  # before anything of this turn is delivered
+                        listed = frozenset(name for name in event.get("tools") or () if isinstance(name, str))
+                    elif gated and listed is None and event.get("type") in ("assistant", "stream_event", "result"):
+                        raise _InitMismatch(task_manager_readback.init_missing())  # nothing before a passing init
+                    block = ((event.get("event") or {}).get("content_block") or {}
+                             if event.get("type") == "stream_event"
+                             and (event.get("event") or {}).get("type") == "content_block_start" else {})
+                    if gated and listed is not None and isinstance(block, dict) and block.get("type") == "tool_use" and (
+                            bad := task_manager_readback.unlisted_tool(str(block.get("name") or ""), listed)):
+                        raise _InitMismatch(bad)  # a tool call that starts as a partial message of the stream
+                    if gated and listed is not None and event.get("type") == "assistant":
+                        for block in (event.get("message") or {}).get("content") or ():
+                            if isinstance(block, dict) and block.get("type") == "tool_use" and (
+                                    bad := task_manager_readback.unlisted_tool(str(block.get("name") or ""), listed)):
+                                raise _InitMismatch(bad)  # a tool the init did not list
                     if event.get("type") == "system" and event.get("subtype") == "init":
                         if expected and event.get("session_id") != expected:
                             raise _ResumeFailed("Claude Code resumed a different session")
@@ -436,12 +625,17 @@ class TaskManagerAgent:
                             record = ToolRecord(str(block.get("id") or ""), name,
                                 (name + " " + json.dumps(block.get("input"), ensure_ascii=False))[:200], "", False)
                             tools[record.tool_use_id] = record
+                            inputs[record.tool_use_id] = block.get("input")
                             await request.sink.tool(record)
                         elif block.get("type") == "tool_result" and block.get("tool_use_id") in tools:
                             record = replace(tools[block["tool_use_id"]],
                                 result=json.dumps(block.get("content"), ensure_ascii=False)[:200],
                                 is_error=bool(block.get("is_error")))
                             await request.sink.tool(record)
+                            if self.mode == "direct" and record.name == "Bash":
+                                await observer.observe(record.tool_use_id, inputs.get(record.tool_use_id),
+                                                       block.get("content"), record.is_error,
+                                                       event.get("tool_result_meta"))
 
                 message = request.text
                 if (attempt or rotating) and request.history:
@@ -455,9 +649,14 @@ class TaskManagerAgent:
                         result = await self.resident.run_turn(message, on_event, tag=request,
                                                               stop=recorder.cap_stop, cancel=request.cancel)
                         written |= result.prompt_sent
+                        if (self.mode == "direct" and self.init_tools is not None and listed is None
+                                and result.prompt_sent and request.cancel.requested):
+                            raise _InitMismatch(task_manager_readback.init_missing(), alert=False)  # stopped before init
                         if resuming and not initialized and not request.cancel.requested:
                             retry_detail = result.stderr or await self.resident.stderr_tail()
                             raise _ResumeFailed(retry_detail or "Claude Code exited before init")
+                    except _InitMismatch as exc:
+                        await self._refuse(exc.mismatches, "turn", alert=exc.alert)
                     except _ResumeFailed as exc:
                         if attempt or request.cancel.requested:
                             raise
@@ -467,6 +666,7 @@ class TaskManagerAgent:
                                                 {"reason": "resume_failed", "detail": str(exc)})
                         # Re-run all configuration and review gates before the one fresh attempt.
                         task, reopened, launch, prompt = await self.prepare()
+                        await self._verify(launch, reopened)
                         continue
                     text = str((result.result_event or {}).get("result") or "".join(pieces))
                     outcome = ("stopped" if result.stopped else "success"
@@ -499,6 +699,14 @@ class TaskManagerAgent:
                     commit = await step_workspaces.commit_paths(Path(reopened.work_dir), own, self.links,
                         f"looper: task Manager turn of task {self.task_id}\n\nLooper-Task: {self.task_id}")
             await request.sink.event(TaskManagerEvent.TURN_SUMMARY, {"files": files, "commit": commit, "mode": self.mode, **summary})
+            if refs_before is not None:
+                try:
+                    await task_manager_refs.end_turn(task, reopened.work_dir, refs_before, task_branch, sink=request.sink,
+                                                     message_id=request.message_id)
+                except Exception as exc:  # the turn's own outcome stands; the missing report is recorded
+                    logger.warning("task Manager %s: ref report failed", self.task_id, exc_info=True)
+                    await activity.insert_activity(task_id=self.task_id, kind="error",
+                        summary=f"Ref report failed: {type(exc).__name__}: {exc}"[:300])
         from . import task_manager_context
         await task_manager_context.maintain(self, request, reopened, launch, prompt, record_id)
         await request.sink.final(text, outcome)
@@ -513,9 +721,11 @@ def current_pool() -> TaskManagerPool | None:
 
 class TaskManagerPool:
     def __init__(self, runtime_root: Path, claude_bin: str, *, ops: Any = None,
-                 max_resident: Callable[[], int], clock: Callable[[], float] = time.monotonic) -> None:
+                 max_resident: Callable[[], int], clock: Callable[[], float] = time.monotonic,
+                 config_file: Path | None = None) -> None:
         global _pool
         self.runtime_root, self.claude_bin, self.ops = runtime_root, claude_bin, ops
+        self.config_file = config_file  # Looper's ops file when it lives outside the runtime root (read deny list)
         self.max_resident, self.clock = max_resident, clock
         self.agents: dict[str, TaskManagerAgent] = {}
         self.closing = False
@@ -553,9 +763,10 @@ class TaskManagerPool:
                 return True
         return False
 
-    async def _refuse(self, request: _Request, reason: RefuseReason, text: str) -> None:
+    async def _refuse(self, request: _Request, reason: RefuseReason, text: str,
+                      kind: task_manager_dirs.Kind | None = None) -> None:
         if not request.admitted.done():
-            request.admitted.set_result(Submitted("refused", reason))
+            request.admitted.set_result(Submitted("refused", reason, kind))
         await request.sink.event(TaskManagerEvent.REFUSED, {"reason": reason})
         await request.sink.final(text, "refused")
 
@@ -600,7 +811,7 @@ class TaskManagerPool:
                 raise Refused(off, _off_text(off))
             await agent.turn(request)
         except Refused as exc:
-            await self._refuse(request, exc.reason, str(exc))
+            await self._refuse(request, exc.reason, str(exc), exc.kind)
         except asyncio.CancelledError:
             if not request.admitted.done():
                 request.admitted.set_result(Submitted("refused", RefuseReason.SHUTTING_DOWN))
