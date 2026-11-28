@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import sys
 import threading
@@ -13,6 +12,8 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import FrameType
+
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +61,7 @@ class LoopWatch:
     async def stop(self) -> None:
         self._stop.set()
         if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+            await cancel_tasks([self._task], raise_errors=True)
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=0.5)
 

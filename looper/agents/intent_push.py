@@ -18,6 +18,7 @@ from .channels.base import PostOutcome
 from .message import builtin_channel_id, channel_thread_id, parse_channel_id
 from .operator_identity import operator_sender_id
 from .subscription_runs import push_target
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 TICK_SECONDS = 10.0
@@ -140,10 +141,8 @@ class IntentPushService:
         global _active
         if _active is self:
             _active = None
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
+        await cancel_tasks([self._task])
+        self._task = None
 
     async def _loop(self) -> None:
         while True:

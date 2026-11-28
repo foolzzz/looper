@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, AsyncIterator
 
 from ..broadcast import Broadcaster
+from ..supervisor import cancel_tasks
 from .. import chat_attachments
 from ..bus import MessageBus
 from ..message import (
@@ -86,11 +87,7 @@ class WebChannelAdapter(ChannelAdapter):
     async def stop(self) -> None:
         self._running = False
         if self._outbound_task:
-            self._outbound_task.cancel()
-            try:
-                await self._outbound_task
-            except asyncio.CancelledError:
-                pass
+            await cancel_tasks([self._outbound_task], raise_errors=True)
         logger.info("web channel adapter stopped")
 
     async def deliver(self, envelope: MessageEnvelope) -> DeliveryReceipt:

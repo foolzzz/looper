@@ -19,6 +19,7 @@ from . import (
 from .message import MessageEnvelope, MessageType, is_lark
 from .ops import Turn, TurnOrigin
 from .runtimes import Capability, MidTurnInput
+from .supervisor import cancel_tasks
 from .tiers.turn_token import TurnPhase, TurnToken
 
 if TYPE_CHECKING:
@@ -188,10 +189,8 @@ class MidTurnInputs:
 
     async def shutdown(self) -> None:
         tasks = tuple(self._tasks)
-        for task in tasks:
-            task.cancel()
         try:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await cancel_tasks(tasks)
         finally:
             for message_id in tuple(self._admissions):
                 await self._release_admission(message_id)

@@ -86,6 +86,7 @@ from .command_runs import BACKSTOP_SLACK, CommandRuns, CommandSpec, Finished, Lo
 from .drain import DrainState
 from .message import TASK_ROUTER_ADDRESS, AgentAddress, MessageEnvelope, MessageType
 from .schedule_gate import GateResult, run_gate
+from .supervisor import RECANCEL_SEC, cancel_tasks
 from .schedule_throttle import ScheduleThrottle
 from .schedule_notify import Notifier, Sender, alert_policy
 from .scheduler_settings import effective_run_timeout
@@ -553,15 +554,11 @@ class Scheduler:
 
     async def stop(self) -> None:
         if self._loop_task is not None:
-            self._loop_task.cancel()
-            try:
-                await self._loop_task
-            except asyncio.CancelledError:
-                pass
+            await cancel_tasks([self._loop_task], raise_errors=True)
             self._loop_task = None
-        for job in list(self._background):
-            job.cancel()
-        await asyncio.gather(*self._background, return_exceptions=True)
+        # A message backup still running is an asyncio subprocess: cancellation ends pg_dump and reaps it.
+        # The reap grace is the longer wait, so a second cancel does not cut that off.
+        await cancel_tasks(list(self._background), again_after=RECANCEL_SEC)
 
     def is_running(self) -> bool:
         return self._loop_task is not None and not self._loop_task.done()

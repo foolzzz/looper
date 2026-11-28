@@ -16,6 +16,7 @@ from ...db.tasks import ACTIVE_STATUSES
 from ..admission import Hold
 from ..spawn import SpawnParent
 from ..subagents import Delivery, Refused, RefusalReason, Spawner, SpawnService
+from ..supervisor import cancel_tasks
 from . import ErrorCode, OpError, RetrySafety, Risk, Tool, check_arguments
 
 logger = logging.getLogger(__name__)
@@ -450,8 +451,7 @@ class WorkerSubagents:
 
     async def stop(self, *, epoch: int | None = None) -> None:
         if self._scanner is not None:
-            self._scanner.cancel()
-            await asyncio.gather(self._scanner, return_exceptions=True)
+            await cancel_tasks([self._scanner])
         if epoch is not None:
             await self.service.detach(epoch=epoch)
         else:

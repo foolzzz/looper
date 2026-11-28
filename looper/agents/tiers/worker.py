@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..acp_guards import AcpFallbackError
+from ..supervisor import RECANCEL_SEC, cancel_tasks
 from ..agent_settings import AgentSettings, AgentType, Launch, fallback_settings, load_agent_settings, load_task_limit
 from ..bus import MessageBus
 from ..claude_cli import ClaudeRunRecorder, RecordNotResumable, TurnBlocked, budget_error, ended_by, prompt_block
@@ -1180,27 +1181,15 @@ class WorkerPool:
 
     async def stop(self) -> None:
         if self._expiry_task is not None:
-            self._expiry_task.cancel()
-            await asyncio.gather(self._expiry_task, return_exceptions=True)
+            await cancel_tasks([self._expiry_task])
         for run_id in self._candidate_locks:
             await self.kill(run_id)
         self._running = False
         if self._listener_task:
-            self._listener_task.cancel()
-            try:
-                await self._listener_task
-            except asyncio.CancelledError:
-                pass
+            await cancel_tasks([self._listener_task], raise_errors=True)
 
-        deliveries = list(self._input_deliveries)
-        for task in deliveries:
-            task.cancel()
-        await asyncio.gather(*deliveries, return_exceptions=True)
-
-        for task in list(self._tasks.values()):
-            task.cancel()
-        if self._tasks:
-            await asyncio.gather(*self._tasks.values(), return_exceptions=True)
+        await cancel_tasks(list(self._input_deliveries))
+        await cancel_tasks(list(self._tasks.values()), again_after=RECANCEL_SEC)
         self._tasks.clear()
 
         await asyncio.gather(*(wp.handle.end() for wp in self._active.values() if wp.handle is not None))
@@ -1673,11 +1662,7 @@ class WorkerPool:
         if task is None or task.done():
             return False
         self._inputs.pop(worker_id, None)
-        task.cancel()
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):
-            pass
+        await cancel_tasks([task], again_after=RECANCEL_SEC)
         logger.info("worker %s killed", worker_id)
         return True
 

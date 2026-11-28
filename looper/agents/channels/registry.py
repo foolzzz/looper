@@ -22,6 +22,7 @@ from ..message import parse_channel_id
 from ..task_notice import NotifyTarget
 from ..ops.leads import for_group
 from ..log_redaction import redact
+from ..supervisor import cancel_tasks
 from .base import ChannelAdapter, PostOutcome, PostReceipt
 from .proactive import store_body
 from .chat_routing import RouteDecision, RoutingSnapshot, load_snapshot
@@ -132,8 +133,7 @@ class ChannelRegistry:
     async def cancel_start(self, channel_id: str) -> None:
         task = self._retries.pop(channel_id, None)
         if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            await cancel_tasks([task])
             # A disable can race a retry that just finished registering an adapter.
             await self.unregister(channel_id)
         self._starts.pop(channel_id, None)
@@ -178,9 +178,8 @@ class ChannelRegistry:
 
     async def stop_all(self) -> None:
         self._stopping = True
-        for task in self._retries.values():
-            task.cancel()
-        await asyncio.gather(*self._retries.values(), return_exceptions=True)
+        retries = list(self._retries.values())
+        await cancel_tasks(retries)
         self._retries.clear()
         for channel_id in list(self._channels):
             await self.unregister(channel_id)

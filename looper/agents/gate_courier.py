@@ -43,6 +43,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..db import activity as db_activity, proactive_deliveries as db_deliveries, tasks as db_tasks
+from .supervisor import cancel_tasks
 from ..db import user_gates as db_user_gates
 from . import card_actions, chat_settings, proactive_delivery as delivery, turn_metrics
 from .channels.base import PostReceipt
@@ -189,9 +190,7 @@ class GateCourier:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await cancel_tasks([task])
 
     async def _loop(self) -> None:
         while True:
