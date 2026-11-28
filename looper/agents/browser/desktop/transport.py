@@ -219,12 +219,12 @@ class Endpoint:
             peer = self._credentials(conn)
         except Exception as exc:
             self.log.add("peer_mismatch", None, exc.__class__.__name__)
-            _send_handshake(conn, STATUS_PEER)
+            _reject_peer(conn)
             return
         self.last_peer = peer
         if peer.uid != self.expected_uid:
             self.log.add("peer_mismatch", peer, "uid")
-            _send_handshake(conn, STATUS_PEER)
+            _reject_peer(conn)
             return
         try:
             magic, version, _status = read_handshake(conn)
@@ -338,6 +338,23 @@ class Endpoint:
 def _monotonic() -> float:
     import time
     return time.monotonic()
+
+
+def _reject_peer(conn: socket.socket) -> None:
+    """Answer a rejected peer, then let the caller close.
+
+    The client has already written its handshake. Closing while those bytes
+    are still unread resets the connection, and the status is lost.
+    """
+    _discard_handshake(conn)
+    _send_handshake(conn, STATUS_PEER)
+
+
+def _discard_handshake(conn: socket.socket) -> None:
+    try:
+        read_handshake(conn)
+    except (OSError, EOFError, struct.error):
+        return
 
 
 def _send_handshake(sock: socket.socket, status: int) -> None:
