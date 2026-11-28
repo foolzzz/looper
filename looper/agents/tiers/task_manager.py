@@ -88,6 +88,7 @@ class RefuseReason(str, Enum):
     WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
     WORKSPACE_IN_SYSTEM_DIR = "workspace_in_system_dir"
     WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKSPACE_UNAVAILABLE = "workspace_unavailable"
     WORKTREE_UNSUPPORTED = "worktree_unsupported"
     HEAD_MOVED = "head_moved"
     HEAD_DETACHED = "head_detached"
@@ -125,9 +126,10 @@ def resume_message(text: str, history: Sequence[Any]) -> str:
 
 
 class Refused(Exception):
-    def __init__(self, reason: RefuseReason, text: str) -> None:
+    def __init__(self, reason: RefuseReason, text: str, kind: task_manager_dirs.Kind | None = None) -> None:
         super().__init__(text)
         self.reason = reason
+        self.kind = kind
 
 
 class _TaskResident(ResidentClaude):
@@ -167,6 +169,7 @@ class _TaskResident(ResidentClaude):
 class Submitted:
     state: Literal["started", "queued", "refused"]
     reason: RefuseReason | None = None
+    kind: task_manager_dirs.Kind | None = None  # the directory refusal's sub-type, typed; not on the event payload
 
 
 @dataclass
@@ -406,14 +409,14 @@ class TaskManagerAgent:
                     if agent is not self and agent.resident.started and agent.mode == "direct"]
 
         if direct:
-            problem = task_manager_dirs.check(
-                task, reopened.work_dir, environment=launch.runtime.environment(launch),
+            # Filesystem calls run in a thread so a slow mount does not stall the pool's event loop.
+            problem, checked = await asyncio.to_thread(
+                task_manager_dirs.inspect, task, reopened.work_dir, environment=launch.runtime.environment(launch),
                 runtime_root=self.pool.runtime_root, live=live_direct())
             if problem is not None:
                 task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
-                raise Refused(RefuseReason(problem.reason.value), problem.text)
+                raise Refused(RefuseReason(problem.reason.value), problem.text, problem.kind)
             self.work_dir = reopened.work_dir
-            await task_manager_dirs.before_directory_lock()
         executable = launch.executable(self.pool.claude_bin)
 
         def command_for(launch: Launch) -> list[str]:
@@ -467,21 +470,20 @@ class TaskManagerAgent:
                     if problem is not None:
                         await self.resident.stop(kill=True)
                         raise Refused(RefuseReason(problem.reason.value), problem.notice)
-                    if self.dir_lock is None:
-                        try:
-                            self.dir_lock = task_manager_dirs.DirectoryLock.acquire(
-                                self.pool.runtime_root, reopened.work_dir, self.task_id)
-                        except task_manager_dirs.LockHeld as held:
-                            task_manager_safety.record_refusal(
-                                task_manager_safety.Reason.WORKSPACE_OVERLAPS_SESSION, phase)
-                            raise Refused(RefuseReason.WORKSPACE_OVERLAPS_SESSION,
-                                          f"another task Manager session (task {held.holder}) holds {reopened.work_dir}") from held
-                    overlap = task_manager_dirs.overlap(reopened.work_dir, live_direct())
-                    if overlap is not None:
-                        task_manager_safety.record_refusal(
-                            task_manager_safety.Reason(overlap.reason.value), phase)
+                    if self.dir_lock is not None:
+                        self.dir_lock.release()
+                        self.dir_lock = None
+                    # The lock is taken first; then the directory the lock was taken on must be the checked one, and
+                    # the whole check runs again (including the live-session overlap). The process is then started
+                    # from the path: a same-user writer swapping the path after this point is not detected (RFC 25.5).
+                    lock, problem = await task_manager_dirs.admit_off_loop(
+                        task, reopened.work_dir, self.task_id, environment=launch.runtime.environment(launch),
+                        runtime_root=self.pool.runtime_root, live=live_direct(), expected=checked)
+                    if problem is not None:
+                        task_manager_safety.record_refusal(task_manager_safety.Reason(problem.reason.value), phase)
                         await self.resident.stop(kill=True)
-                        raise Refused(RefuseReason(overlap.reason.value), overlap.text)
+                        raise Refused(RefuseReason(problem.reason.value), problem.text, problem.kind)
+                    self.dir_lock = lock
                 if self.session_id:
                     command += ["--resume", self.session_id]
                 await self.resident.start(command, cwd=reopened.work_dir, signature=signature, env=env,
@@ -761,9 +763,10 @@ class TaskManagerPool:
                 return True
         return False
 
-    async def _refuse(self, request: _Request, reason: RefuseReason, text: str) -> None:
+    async def _refuse(self, request: _Request, reason: RefuseReason, text: str,
+                      kind: task_manager_dirs.Kind | None = None) -> None:
         if not request.admitted.done():
-            request.admitted.set_result(Submitted("refused", reason))
+            request.admitted.set_result(Submitted("refused", reason, kind))
         await request.sink.event(TaskManagerEvent.REFUSED, {"reason": reason})
         await request.sink.final(text, "refused")
 
@@ -808,7 +811,7 @@ class TaskManagerPool:
                 raise Refused(off, _off_text(off))
             await agent.turn(request)
         except Refused as exc:
-            await self._refuse(request, exc.reason, str(exc))
+            await self._refuse(request, exc.reason, str(exc), exc.kind)
         except asyncio.CancelledError:
             if not request.admitted.done():
                 request.admitted.set_result(Submitted("refused", RefuseReason.SHUTTING_DOWN))
