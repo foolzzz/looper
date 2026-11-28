@@ -905,35 +905,79 @@ def test_end_owned_shares_its_deadline_between_spawning_and_ending(
         created, release = asyncio.Event(), asyncio.Event()
         processes = []
         real_create = asyncio.create_subprocess_exec
+        real_wait = asyncio.wait
+        real_end = proc_tree._end
+        real_loop = asyncio.get_running_loop()
+        # Charged to the spawn wait on the loop clock end_owned reads. Both are
+        # binary-exact, so the armed timeouts equal the deadline and its remainder
+        # with ==. The old wall-clock window (0.25 s .. 0.55 s, then a 2 s reap)
+        # moved under load; this does not.
+        deadline = 4.0
+        consumed = 1.0
+        clock = {"now": 1000.0}
+        wait_timeouts: list[float] = []
+        end_tasks: list[asyncio.Task[Any]] = []
+
+        class _SharedDeadline:
+            """The loop end_owned asked for. Only its clock is scripted."""
+
+            def time(self) -> float:
+                return clock["now"]
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(real_loop, name)
+
+        shared_deadline = _SharedDeadline()
 
         async def create(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
             process = await real_create(*args, **kwargs)
             processes.append(process)
             assert await process.stdout.readline() == b"ready\n"
             created.set()
-            await release.wait()
+            await release.wait()  # A real process exists, but spawn has not recorded it yet.
             return process
 
+        async def record_wait(waited: Any, *args: Any, **kwargs: Any) -> Any:
+            # Recorded before the jump, so the spawn wait is the full deadline and
+            # the end wait, armed after the jump, is the remainder of that same one.
+            wait_timeouts.append(float(kwargs["timeout"]))
+            if len(wait_timeouts) == 1:
+                clock["now"] += consumed
+                release.set()
+            return await real_wait(waited, *args, **kwargs)
+
+        async def record_end(process: Any, *args: Any, **kwargs: Any) -> Any:
+            assert release.is_set(), "end_owned must await the in-flight spawn before ending its process"
+            end_tasks.append(asyncio.current_task())  # type: ignore[arg-type]
+            return await real_end(process, *args, **kwargs)
+
+        def get_running_loop() -> _SharedDeadline:
+            return shared_deadline
+
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+        monkeypatch.setattr(proc_tree, "_end", record_end)
         spawning = asyncio.create_task(proc_tree.spawn(
             sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
             "print('ready', flush=True); time.sleep(60)", stdout=asyncio.subprocess.PIPE))
-        timer = None
         try:
             await asyncio.wait_for(created.wait(), 5)
             proc_tree.fence_spawns()
-            timer = asyncio.get_running_loop().call_later(0.25, release.set)
-            began = time.monotonic()
-            await proc_tree.end_owned(deadline=0.4)
-            elapsed = time.monotonic() - began
-            assert 0.25 <= elapsed < 0.55  # Giving the end a fresh 0.4 s would take at least 0.65 s.
+            # Patched once the spawn is held, so the spawn itself still uses the real loop.
+            monkeypatch.setattr(asyncio, "get_running_loop", get_running_loop)
+            monkeypatch.setattr(asyncio, "wait", record_wait)
+            await proc_tree.end_owned(deadline=deadline)
+            # A fresh deadline on the end wait would arm 4.0 again, not the 3.0 remainder.
+            assert wait_timeouts == [deadline, deadline - consumed]
+            assert len(end_tasks) == 1
             process = await spawning
-            await asyncio.wait_for(process.wait(), 2)
+            # end_owned does not await an end task that is still running when the shared deadline
+            # expires. Waiting for it here, instead of a fixed 2 s reap, lets the SIGKILL land
+            # before the assertion; the outer guard below is the backstop.
+            await asyncio.gather(*end_tasks, return_exceptions=True)
+            await process.wait()
             assert process.returncode == -signal.SIGKILL
             assert _running([process.pid], settle=0) == []
         finally:
-            if timer is not None:
-                timer.cancel()
             release.set()
             await asyncio.gather(spawning, return_exceptions=True)
             for process in processes:
@@ -1049,6 +1093,10 @@ def test_end_owned_starts_all_agents_concurrently_and_keeps_unfinished_records(
 ) -> None:
     started: dict[int, str] = {}
     cancelled: set[int] = set()
+    # Assigned on the loop end_owned runs on. A cancelled end that is still reaping waits here,
+    # so it stays pending until this test releases it. Awaiting those tasks would not return.
+    reap: asyncio.Event | None = None
+    still_reaping: set[asyncio.Task[Any]] = set()
 
     async def slow_end(process: proc_tree._Orphan, **kwargs: Any) -> None:
         started[process.pid] = process.started
@@ -1056,20 +1104,38 @@ def test_end_owned_starts_all_agents_concurrently_and_keeps_unfinished_records(
             await asyncio.Event().wait()
         finally:
             cancelled.add(process.pid)
+            task = asyncio.current_task()
+            assert task is not None and reap is not None
+            still_reaping.add(task)
+            await reap.wait()  # A reap still running after cancellation must not hold end_owned.
+            still_reaping.discard(task)
 
     monkeypatch.setattr(proc_tree, "_end", slow_end)
 
     async def _run() -> None:
+        nonlocal reap
+        reap = asyncio.Event()
         for pid in (101, 102):
             record = _record(runtime_root, pid, "original", (1, "server"))
             proc_tree._recorded[pid] = (record, "original")
-        before = time.monotonic()
-        await proc_tree.end_owned(deadline=0.05)
-        assert time.monotonic() - before < 0.5
-        assert started == {101: "original", 102: "original"}
-        assert all(path.exists() for path, _ in proc_tree._recorded.values())
+        # 5 s only turns a hang into a failure. The pass condition is that end_owned has
+        # returned while both end tasks are still waiting on reap, not an elapsed bound.
+        async def end_then_snapshot() -> set[int]:
+            await proc_tree.end_owned(deadline=0.05)
+            return set(cancelled)  # no loop turn since end_owned returned
+
+        assert await asyncio.wait_for(end_then_snapshot(), 5) == set()
+        try:
+            assert started == {101: "original", 102: "original"}
+            assert all(path.exists() for path, _ in proc_tree._recorded.values())
+            await asyncio.sleep(0)  # cancellation is delivered on the next loop turn
+            assert cancelled == {101, 102}
+            assert len(still_reaping) == 2
+            assert all(not task.done() for task in still_reaping)
+        finally:
+            reap.set()  # also on failure, so asyncio.run can finish
         await asyncio.sleep(0)
-        assert cancelled == {101, 102}
+        assert not still_reaping
 
     asyncio.run(_run())
 
