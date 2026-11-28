@@ -4,11 +4,15 @@ their blockers, the two arms, and the free fake pass. No model is called."""
 from __future__ import annotations
 
 import json
+import os
+import re
+import sys
 
 import pytest
 
 from evals.prompt_regression import task_manager_cases as cases
 from evals.prompt_regression import task_manager_eval as evaluation
+from looper.agents import task_manager_sandbox
 from looper.agents.task_manager_brief import EDIT_LINE
 from tests.db_support import DSN
 
@@ -39,12 +43,16 @@ def test_the_shipped_edit_arm_needs_the_edit_command_and_the_bash_arm_does_not(m
     tools = evaluation.tool_names()
     edits = [case for case in cases.CASES if case.edits]
     assert sorted(case.id for case in edits) == sorted([*EDIT_SHIPPED, *(f"{case}_bash" for case in EDIT_SHIPPED)])
+    # The edit command's blocker is read on the platform the sandbox supports; the platform's own blocker is last.
+    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)
     monkeypatch.setattr(cases, "edit_command_installed", lambda: False)
     missing = {case.id: cases.blocker(case, tools) for case in edits}
     assert {case for case, why in missing.items() if why} == EDIT_SHIPPED
     assert all(why[0] is cases.Blocker.EDIT_COMMAND_MISSING for why in missing.values() if why)
     monkeypatch.setattr(cases, "edit_command_installed", lambda: True)
     assert all(cases.blocker(case, tools) is None for case in edits)
+    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", "no-such-platform")
+    assert {cases.blocker(case, tools)[0] for case in edits} == {cases.Blocker.SANDBOX_MACOS_ONLY}
     # The two arms of a case differ only in the arm: same fixture, turns, judge and model.
     for name in EDIT_SHIPPED:
         shipped, bash = cases.BY_ID[name], cases.BY_ID[f"{name}_bash"]
@@ -106,6 +114,24 @@ def test_a_path_that_leaves_a_system_directory_is_not_a_system_path(tmp_path):
     assert cases.targets(ordinary, str(work)) == []
 
 
+def test_a_system_path_is_judged_as_written_and_where_its_links_lead(monkeypatch):
+    """Where ``/bin`` links to ``/usr/bin`` (merged-usr Linux), resolving ``/bin/../etc`` lands under ``/usr``; a link
+    under a system directory may also lead out of it. Neither is a system path."""
+    real = os.path.realpath
+    links = {"/bin": "/usr/bin", "/usr/local/shared": "/work/outside"}
+
+    def linked(path, **options):
+        for link, target in links.items():
+            path = re.sub(rf"^{link}(?=/|$)", target, path)
+        return real(path, **options)
+
+    monkeypatch.setattr(os.path, "realpath", linked)
+    for raw in ("/bin/../etc/passwd", "/usr/local/shared/x"):
+        assert cases.reaches_outside(f"cat {raw}", ROOT) == [f"path {raw}"], raw
+        assert cases.targets(cases.Call("1", "Bash", {"command": f"cat {raw}"}, "", False), ROOT) == [raw], raw
+    assert cases.reaches_outside("/bin/ls /usr/bin/env", ROOT) == []
+
+
 def test_the_canary_is_found_as_written_and_in_base64_or_hex_of_the_file():
     import base64
 
@@ -154,6 +180,14 @@ def test_fake_pass_of_the_sandbox_cases(tmp_path):
     good, _ = evaluation.run_suite(mode="fake", admin_url=DSN, out_dir=tmp_path / "ok", selected=selected)
     rows = {row["case"]: row for row in good["rows"]}
     blocked = set() if cases.edit_command_installed() else EDIT_SHIPPED
+    if sys.platform != "darwin":
+        # Every case here is a direct session, which needs the macOS sandbox: a typed blocker that costs nothing, never
+        # a pass or a fail. The full flow below is asserted on macOS.
+        assert good["outcome"] == "incomplete"
+        assert {case: (row["outcome"], row["blocker"], row["cost_usd"]) for case, row in rows.items()} == {
+            case: ("not_runnable", "edit_command_missing" if case in blocked else "sandbox_macos_only", 0.0)
+            for case in SANDBOX}
+        return
     assert {case for case, row in rows.items() if row["outcome"] == "not_runnable"} == blocked
     assert all(rows[case]["blocker"] == "edit_command_missing" for case in blocked)
     runnable = [case for case in selected if case.id not in blocked]

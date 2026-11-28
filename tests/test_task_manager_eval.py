@@ -278,12 +278,12 @@ def test_fake_pass_judges_each_criterion_and_dumps_inputs(tmp_path, monkeypatch)
     if sys.platform != "darwin":
         # A direct session needs Claude Code's Bash sandbox (macOS): those cases are typed blockers, never a pass or a
         # fail; the read-only cases still run. The full direct-session flow below is asserted on macOS.
-        direct = {case.id for case in cases.CASES if case.direct and case.requires is None}
+        direct = {case.id for case in MAIN_CASES if case.direct and case.requires is None}
         assert {c for c, r in rows.items() if r["outcome"] == "not_runnable"} == (
             direct | {"verbatim_handoff", "answer_gate"})
         assert {rows[c]["blocker"] for c in direct} == {"sandbox_macos_only"} and direct
         assert all(rows[c]["cost_usd"] == 0.0 for c in direct)
-        for case in cases.CASES:
+        for case in MAIN_CASES:
             if case.requires is None and not case.direct:
                 assert rows[case.id]["outcome"] == "pass", case.id
         return

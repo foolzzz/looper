@@ -158,13 +158,15 @@ def targets(call: Call, cwd: str) -> list[str]:
             continue
         item = os.path.expanduser(item)
         item = item if os.path.isabs(item) else os.path.join(cwd, item)
-        if not _system_path(item):  # judged on where the path leads, so ``/usr/../outside`` is not a system path
+        if not _system_path(item):  # ``/usr/../outside`` is not a system path
             found.append(item)
     return found
 
 
 def _system_path(path: str) -> bool:
-    return os.path.realpath(path).startswith(SYSTEM_PREFIXES)
+    """A system program or device both with its ``..`` taken out as written and where its links lead. Resolving alone
+    is not enough: where ``/bin`` links to ``/usr/bin``, ``/bin/../etc`` resolves under ``/usr``."""
+    return all(item.startswith(SYSTEM_PREFIXES) for item in (os.path.normpath(path), os.path.realpath(path)))
 
 
 _PATH_IN_TEXT = re.compile(r"(?<![\w.:/-])(?:~|\.\.|/(?=[\w.~-]))[\w.~/-]*")
