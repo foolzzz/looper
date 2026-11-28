@@ -1087,7 +1087,7 @@ them.
   `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
   Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
   A turn also gets the full walk for links in the git directory (above) before anything else runs in the directory
-  and again when it ends. A hit refuses the turn (`ref_symlink`; `ref_unchecked` is refused as `workspace`), names
+  and again when it ends. A hit refuses the turn (`ref_symlink`; the other `ref_` reasons are refused as `workspace`), names
   only the path inside `.git`, and lists it in the needs-you section `task_manager_refs` (one unresolved row per
   task and path). After a turn, a hit keeps the reply and ends the turn as refused, with no turn summary and no
   ref report; context maintenance is skipped for that turn.
@@ -4552,10 +4552,13 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   (`GIT_NO_LAZY_FETCH=1`): in a partial clone, objects not yet fetched are
   reported missing by Looper's git calls instead of being fetched.
   The helper also refuses a repository whose git directory holds a symbolic
-  link where git reads refs or its own files (`ref_symlink`,
-  `looper/agents/ref_links.py`); a place it cannot look at, or deeper than 64
-  directories, is refused as `ref_unchecked`. The message names the path inside
-  the repository, never what the link points at. This refuses workspaces that
+  link or a hard link where git reads refs or its own files, or a symbolic ref
+  that points outside `refs/` (`ref_symlink`, `ref_hardlink`,
+  `ref_symref_target`, `looper/agents/ref_links.py`; a root ref such as
+  `ORIG_HEAD` is also an allowed target, and `objects/` is checked as an entry
+  only); a place it cannot look at, or deeper than 64 directories, is refused
+  as `ref_unchecked`. The message names the path inside the repository, never
+  what a link or a symbolic ref points at. This refuses workspaces that
   share parts of `.git` through links (`git-new-workdir` and similar layouts, a
   linked `.git/hooks` directory, or an old `core.preferSymlinkRefs` `HEAD`).
   Nothing is cached, inside `cached()` either. Two checks:
@@ -4564,9 +4567,12 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
     `info/` (`objects` and `hooks` as entries only), the whole `refs` and
     `reftable` trees, for each entry of `worktrees/` the entry itself and its
     `HEAD`, `refs`, `logs`, `gitdir` and `commondir`, and the `logs`,
-    `logs/HEAD` and `logs/refs` entries. A command that can write refs also has
-    this worktree's whole `logs` tree checked, and every component of the
-    shared reflogs of `HEAD`'s branch and of the refs its arguments may name
+    `logs/HEAD` and `logs/refs` entries. The root refs and the files under
+    `refs` are read for a symbolic ref's target; the `HEAD` of each entry of
+    `worktrees/` only for a command that can read other worktrees (one that can
+    write refs, `worktree`, `--all`, or an argument naming `worktrees/`). A
+    command that can write refs also has this worktree's whole `logs` tree
+    checked, and every component of the shared reflogs of `HEAD`'s branch and of the refs its arguments may name
     (all of them for `fetch`, `pull`, `remote` and `--stdin`).
   - **The full walk** adds the whole `logs` trees and each linked worktree's
     root refs, `refs`, `logs` and `reftable`. It runs at the start and end of a
@@ -4583,8 +4589,8 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   several times that for the full walk. Graft files are ignored
   (`GIT_GRAFT_FILE=/dev/null`). **Known race limit:** a check and the command
   are not atomic, so a process that writes the repository at the same moment can
-  add a link after the check. A link placed deeper under `logs`, or among
-  another worktree's own refs and root pseudo-refs, between two full walks is
+  add a link or such a symbolic ref after the check. One placed deeper under
+  `logs`, or among another worktree's own refs and root pseudo-refs, between two full walks is
   found at the next full walk or at the next command that writes that reflog;
   reading commands in between do not go through it (revisions passed on
   standard input do not trigger the full walk), and no command Looper runs reads
