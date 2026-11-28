@@ -486,16 +486,26 @@ def test_server_without_runtime_root_interrupts_a_preexisting_command_run(monkey
 
 def test_parallel_commands_run_up_to_the_limit_without_creating_tasks(monkeypatch, tmp_path):
     async def test(env: ScheduleEnv):
-        sid = await _command(env, "sleep 1", overlap="parallel", max_parallel_runs=2)
-        await _fire(env, sid)
-        await _fire(env, sid)
+        release = tmp_path / "release-parallel"
+        # Block on a file the test releases: the first two commands are still running when the third firing
+        # is decided, so a timed sleep cannot end early under load and erase the overlap skip.
+        sid = await _command(env, "while [ ! -f release-parallel ]; do sleep 0.02; done",
+                             overlap="parallel", max_parallel_runs=2)
+        first = await _fire(env, sid)
+        second = await _fire(env, sid)
+        await _runner(env, first["id"])
+        await _runner(env, second["id"])
         await _fire(env, sid)
         rows = await _rows(env, sid)
         assert [row["status"] for row in rows].count("running") == 2
         assert [row["status"] for row in rows].count("skipped_overlap") == 1
         assert all(row["task_id"] is None for row in rows)
-        rows = await _ended(env, sid, count=3)
-        assert [row["status"] for row in rows].count("succeeded") == 2
+        try:
+            release.touch()
+            rows = await _ended(env, sid, count=3)
+            assert [row["status"] for row in rows].count("succeeded") == 2
+        finally:
+            release.touch()
     run_scheduled(test, monkeypatch, tmp_path)
 
 
