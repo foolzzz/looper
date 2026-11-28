@@ -1092,6 +1092,10 @@ def test_end_owned_starts_all_agents_concurrently_and_keeps_unfinished_records(
 ) -> None:
     started: dict[int, str] = {}
     cancelled: set[int] = set()
+    # Assigned on the loop end_owned runs on. A cancelled end that is still reaping waits here,
+    # so it stays pending until this test releases it. Awaiting those tasks would not return.
+    reap: asyncio.Event | None = None
+    still_reaping: set[asyncio.Task[Any]] = set()
 
     async def slow_end(process: proc_tree._Orphan, **kwargs: Any) -> None:
         started[process.pid] = process.started
@@ -1099,20 +1103,33 @@ def test_end_owned_starts_all_agents_concurrently_and_keeps_unfinished_records(
             await asyncio.Event().wait()
         finally:
             cancelled.add(process.pid)
+            task = asyncio.current_task()
+            assert task is not None and reap is not None
+            still_reaping.add(task)
+            await reap.wait()  # A reap still running after cancellation must not hold end_owned.
+            still_reaping.discard(task)
 
     monkeypatch.setattr(proc_tree, "_end", slow_end)
 
     async def _run() -> None:
+        nonlocal reap
+        reap = asyncio.Event()
         for pid in (101, 102):
             record = _record(runtime_root, pid, "original", (1, "server"))
             proc_tree._recorded[pid] = (record, "original")
-        before = time.monotonic()
-        await proc_tree.end_owned(deadline=0.05)
-        assert time.monotonic() - before < 0.5
+        # 5 s only turns a hang into a failure. The pass condition is that end_owned has
+        # returned while both end tasks are still waiting on reap, not an elapsed bound.
+        await asyncio.wait_for(proc_tree.end_owned(deadline=0.05), 5)
         assert started == {101: "original", 102: "original"}
         assert all(path.exists() for path, _ in proc_tree._recorded.values())
-        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # cancellation is delivered on the next loop turn
         assert cancelled == {101, 102}
+        assert len(still_reaping) == 2
+        assert all(not task.done() for task in still_reaping)
+        assert reap is not None
+        reap.set()
+        await asyncio.sleep(0)
+        assert not still_reaping
 
     asyncio.run(_run())
 
