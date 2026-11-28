@@ -1086,6 +1086,11 @@ them.
   repository is refused before the session starts (see Directory checks below).
   `ref_report` and the `refs_unreadable` notice carry the turn's `message_id`.
   Every git call goes through `git_safe`; the real-CLI rows are `tests/test_task_manager_refs_probe.py`.
+  A turn is also checked for a link in the ref storage (above) before anything else runs in the directory and
+  again when it ends. A hit refuses the turn (`ref_symlink`; `ref_unchecked` is refused as `workspace`), names
+  only the path inside `.git`, and lists it in the needs-you section `task_manager_refs` (one unresolved row per
+  task and path). After a turn, a hit keeps the reply and ends the turn as refused, with no turn summary and no
+  ref report; context maintenance is skipped for that turn.
 
 Directory checks. A direct session starts only for an in-place task whose directory is the root of its own non-bare git repository. A worktree task (`workspace_mode` worktree), a linked worktree, or a submodule (`.git` is a file or a symlink) is refused with `worktree_unsupported`: v1 has no direct mode for a worktree task, and orchestrated mode is unchanged, so the commit-per-turn of worktree tasks (#1848) is not reached in direct mode. The operator's home is `workspace_is_home`. A system directory (`/`, or `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/dev`, `/Applications`, `/cores`, and anything under those) is `workspace_in_system_dir`. A directory that is, or contains, trusted configuration (credentials, the operator's configuration, the Claude configuration directory, the runtime root, and the ops file) is `workspace_contains_trusted_config`. A subdirectory, a bare repository, or a directory that is not a git repository is `workspace_not_repo_root`. A directory that equals, contains, or is inside another live direct session is `workspace_overlaps_session`. Comparisons use the device and inode of the resolved directory, so two spellings of one directory are the same directory. One directory has one lock, `task-manager-locks/<device>-<inode>.lock` under the runtime root (the directory is mode 0700, the file mode 0600, and the file is never deleted). A second session that finds the lock held gets the same refusal and names the holder. The resident's stop releases the lock. After that lock is taken, still inside admission and before the resident starts, the directory that was opened by path must have the same device and inode as both the checked directory and the directory the lock was actually taken on, and the whole check, including the overlap check, runs again. So a parent directory and a child directory that both passed the earlier check cannot both start, and a directory renamed or replaced in between is refused with `workspace_unavailable` (`kind` `changed_after_check`). An OS error during the checks or the lock (the directory is gone, a permission or I/O error) is the same typed refusal. At `inspect`, a path with no repository (missing, a plain file, an empty directory) is `workspace_not_repo_root` / `not_git` (a subdirectory of a repository stays `subdirectory`, a bare repository `bare`); `not_a_directory` is used only when, at lock time, the directory is gone or no longer a directory, and `io_error` covers a symlink loop, a permission or I/O error, or a runtime root that cannot hold the lock directory), never a generic turn failure, and admission does not report started. The refusal result carries `kind` as a typed field. The checks and the lock run in a worker thread. The session is started from the path, so a same-user writer swapping the path or its `.git` from the identity comparison inside admission until the spawn is not detected (a documented residual risk, outside the v1 threat model). The lock is per runtime root and per exact directory: two Looper processes with different runtime roots, or a parent and a child directory across processes, are not serialized, and a machine-wide lock is not built. The runtime root must be on a local filesystem. The lock descriptor is close-on-exec. If the Looper process dies while the Claude process is still alive, the kernel releases the lock when the Looper process exits, which can be before that Claude process exits. That early release is accepted for v1. These checks run only while `tasks.conversations.manager_answers` is on, which defaults off.
 
@@ -4507,6 +4512,26 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   the history as stored. Lazy fetches from a promisor remote are off
   (`GIT_NO_LAZY_FETCH=1`): in a partial clone, objects not yet fetched are
   reported missing by Looper's git calls instead of being fetched.
+  The helper also refuses a repository whose ref storage contains a symbolic
+  link (`ref_symlink`): `HEAD` and the other root refs, `packed-refs`, the
+  whole `refs`, `logs` and `reftable` trees, the same places of every linked
+  worktree under `worktrees/`, and those of each checked-out submodule's git
+  directory (`looper/agents/ref_links.py`). A part of that storage it cannot
+  list, or deeper than 64 directories, is refused as `ref_unchecked`. The
+  message names the path inside the repository, never what the link points at.
+  Links elsewhere in `.git` are not checked. This refuses workspaces that share
+  refs through links (`git-new-workdir` and similar layouts, or an old
+  `core.preferSymlinkRefs` `HEAD`). The walk is not part of the remembered
+  check: it runs before every command, inside `cached()` too, with no cache, so
+  its cost grows with the loose refs and reflogs (a few milliseconds for
+  hundreds of refs; it passes 50 ms at tens of thousands of files, and takes
+  most of a second at several thousand ref directories). **Known race limit:**
+  the walk and the command are not atomic, so a process that writes the
+  repository at the same moment can add a link after the walk. A direct session
+  checks again before and after each turn under the directory lock. In
+  orchestrated mode the risk remains: the Worker is not sandboxed and can
+  already read such files itself, but what git then prints could still reach
+  Looper's records.
   `tests/test_git_safe.py` fails on a direct `git` call elsewhere
   in `looper/`, except for Looper's own checkout, a fresh clone, and the
   knowledge vault, each listed there with its reason.
