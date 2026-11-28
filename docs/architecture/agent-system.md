@@ -4498,7 +4498,10 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   `--reference`, which `git repack -a -d` followed by removing the file makes
   self-contained). Replacement refs (`refs/replace`) are off for every command
   (`core.useReplaceRefs=false` and `GIT_NO_REPLACE_OBJECTS=1`), so Looper sees
-  the history as stored. `tests/test_git_safe.py` fails on a direct `git` call elsewhere
+  the history as stored. Lazy fetches from a promisor remote are off
+  (`GIT_NO_LAZY_FETCH=1`): in a partial clone, objects not yet fetched are
+  reported missing by Looper's git calls instead of being fetched.
+  `tests/test_git_safe.py` fails on a direct `git` call elsewhere
   in `looper/`, except for Looper's own checkout, a fresh clone, and the
   knowledge vault, each listed there with its reason.
 - **Kept and removed.** A step that a replan drops, from a decision or a change
