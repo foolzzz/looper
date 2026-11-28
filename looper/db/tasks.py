@@ -376,8 +376,12 @@ async def update_task_status(
     fail_kind: FailKind | None = None,
     pool: asyncpg.Pool | None = None,
     notify: bool = True,
-) -> None:
+    keep_ended: bool = False,
+) -> bool:
     """Set the task's status; the fields given (not ``None``) are set too, and kept until a restart.
+
+    ``keep_ended`` leaves a ``stopped`` or ``cancelled`` row as it is when ``status`` is another one (a Planner's late
+    status must not undo a stop); the result is False when it did. A restart moves the row through its own claim.
 
     ``notify`` runs the task-end listeners. A caller that still holds this task's row lock passes False and
     runs them after committing: a listener takes its own connection and would wait on that lock.
@@ -387,7 +391,7 @@ async def update_task_status(
     completed_at = now if status in ("completed", "failed", "cancelled") else None
     attempt_ended_at = now if status in ("completed", "failed", "cancelled", "stopped") else None
 
-    await pool.execute(
+    result = await pool.execute(
         """
         UPDATE tasks
         SET status = $2,
@@ -399,15 +403,19 @@ async def update_task_status(
             fail_kind = COALESCE($8, fail_kind),
             attempt_ended_at = COALESCE($9, attempt_ended_at),
             process_record = COALESCE($10::jsonb, process_record)
-        WHERE id = $1
+        WHERE id = $1 AND NOT ($11 AND status IN ('stopped', 'cancelled') AND $2 NOT IN ('stopped', 'cancelled'))
         """,
         task_id, status, planner_id, result_summary, error, now, completed_at,
         FailKind(fail_kind).value if fail_kind else None,
         attempt_ended_at,
         json.dumps(process_record, ensure_ascii=False) if process_record is not None else None,
+        keep_ended,
     )
+    if keep_ended and result == "UPDATE 0" and await get_task(task_id, pool=pool):
+        return False
     if notify and status in ("completed", "failed", "cancelled", "stopped"):
         await _task_ended(task_id)
+    return True
 
 
 async def update_task_phase(

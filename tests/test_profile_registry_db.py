@@ -287,11 +287,17 @@ def test_dsh_policy_checks_stored_effort_when_a_provider_changes(
 
 
 def test_every_database_has_the_builtin_runtime_provider_and_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
     from looper.agents.profile_registry import AgentProfile
     from looper.agents.runtimes import CLAUDE_CODE
     from looper.agents.runtimes import coco_login, cursor_login
     from looper.db import profile_registry as db
     from looper.db.connection import ensure_schema
+
+    # The view reads the login cache without waiting for the CLI; seed a fresh answer so the test does not race the probe.
+    monkeypatch.setitem(coco_login._probed, "coco", (
+        time.monotonic(), coco_login.LoginStatus(coco_login.LoginState.NOT_LOGGED_IN, "not logged in")))
 
     async def _test(pool: Any) -> None:
         await pool.execute("DELETE FROM agent_profiles WHERE builtin")  # a missing one comes back

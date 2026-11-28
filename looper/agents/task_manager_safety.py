@@ -48,6 +48,7 @@ class Reason(str, Enum):
     WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
     WORKSPACE_IN_SYSTEM_DIR = "workspace_in_system_dir"
     WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKSPACE_UNAVAILABLE = "workspace_unavailable"
     WORKTREE_UNSUPPORTED = "worktree_unsupported"
     HEAD_MOVED = "head_moved"
     HEAD_DETACHED = "head_detached"

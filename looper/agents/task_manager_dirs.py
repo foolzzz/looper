@@ -10,9 +10,24 @@ session may write. Its name is ``<device>-<inode>.lock``. The descriptor is
 close-on-exec: if this process dies while the Claude process is still alive,
 the kernel releases the lock at this process's exit. That early release is
 accepted for v1.
+
+Limits of the lock, stated so they are not read as more than they are. It is per runtime root and per exact
+directory: two Looper processes with different runtime roots do not see each other's lock files, and a parent
+and a child directory have different inodes, so across processes they are not serialized either (inside one
+process the overlap check covers them). The runtime root must be on a local filesystem, because ``flock``
+semantics over a network mount are not guaranteed. A machine-wide lock is not built here.
+
+Between the first check and the start of the session the directory can be renamed or replaced. So after the
+lock is taken, ``admit`` opens the resolved path, takes the device and inode of that open directory, and
+requires them to equal both the checked directory and the directory the lock was actually taken on (the lock
+reports it), then runs the whole check again. Any difference is a typed refusal. That is what is verified:
+the identity of the locked directory at admission. The session is then started from the path, not from a
+held directory descriptor, so a concurrent same-user writer that swaps the path or its ``.git`` after
+admission is not detected. That is outside the v1 threat model (see the task-session RFC, section 25.5).
 """
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import os
 import stat
@@ -38,6 +53,7 @@ class Reason(StrEnum):
     WORKSPACE_CONTAINS_TRUSTED_CONFIG = "workspace_contains_trusted_config"
     WORKSPACE_NOT_REPO_ROOT = "workspace_not_repo_root"
     WORKSPACE_OVERLAPS_SESSION = "workspace_overlaps_session"
+    WORKSPACE_UNAVAILABLE = "workspace_unavailable"
 
 
 class Kind(StrEnum):
@@ -46,6 +62,9 @@ class Kind(StrEnum):
     NOT_GIT = "not_git"
     LINKED_WORKTREE = "linked_worktree"
     WORKSPACE_MODE = "workspace_mode"
+    CHANGED_AFTER_CHECK = "changed_after_check"
+    NOT_A_DIRECTORY = "not_a_directory"
+    IO_ERROR = "io_error"
 
 
 @dataclass(frozen=True)
@@ -53,6 +72,14 @@ class Problem:
     reason: Reason
     kind: Kind | None
     text: str
+
+
+class LockDirError(OSError):
+    """The lock directory or lock file under the runtime root could not be made or opened."""
+
+    def __init__(self, runtime_root: Path) -> None:
+        super().__init__(str(runtime_root))
+        self.runtime_root = runtime_root
 
 
 class LockHeld(Exception):
@@ -136,6 +163,26 @@ def _directory_identity(path: Path) -> tuple[int, int] | None:
         return None
     if not stat.S_ISDIR(st.st_mode):
         return None
+    return (st.st_dev, st.st_ino)
+
+
+_GONE = (FileNotFoundError, NotADirectoryError)
+
+
+def _workspace_identity(path: Path | str) -> tuple[int, int] | None:
+    """Device and inode of the directory ``path`` opens to. None only when it is gone or not a directory.
+
+    Any other OS error (a symlink loop, a name that is too long, a permission error) is raised, so it is never
+    mistaken for "this is not a repository".
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except _GONE:
+        return None
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
     return (st.st_dev, st.st_ino)
 
 
@@ -235,10 +282,14 @@ def _is_system(place: Path) -> bool:
         current = parent
 
 
-def _git_marker(place: Path) -> str | None:
+def _git_marker(place: Path, *, strict: bool = False) -> str | None:
     try:
         mode = (place / ".git").lstat().st_mode
+    except _GONE:
+        return None
     except OSError:
+        if strict:
+            raise
         return None
     if stat.S_ISDIR(mode):
         return "dir"
@@ -293,7 +344,7 @@ def check(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, s
                 Reason.WORKSPACE_CONTAINS_TRUSTED_CONFIG, None,
                 f"{place} contains trusted configuration {entry}. "
                 f"Open the task on a repository that does not contain {entry}.")
-    marker = _git_marker(place)
+    marker = _git_marker(place, strict=True)
     if marker == "link":
         return Problem(
             Reason.WORKTREE_UNSUPPORTED, Kind.LINKED_WORKTREE,
@@ -332,28 +383,106 @@ def overlap(work_dir: str, live: Iterable[tuple[str, str]]) -> Problem | None:
     return None
 
 
-async def before_directory_lock() -> None:
-    """Return once the early check has passed and before admission takes its lock.
+def _unavailable(kind: Kind, place: str, detail: str) -> Problem:
+    return Problem(Reason.WORKSPACE_UNAVAILABLE, kind, f"{place}: {detail}")
 
-    The body does not wait. A test replaces this to hold two prepares in the window
-    where both have passed the early check and neither resident has started.
+
+def _os_problem(place: str, exc: OSError) -> Problem:
+    if isinstance(exc, LockDirError):
+        return _unavailable(Kind.IO_ERROR, place,
+                            f"the lock directory under the runtime root {exc.runtime_root} could not be created or "
+                            f"opened ({type(exc.__cause__).__name__}). Check that the runtime root is a writable directory.")
+    if isinstance(exc, _GONE):
+        return _unavailable(Kind.NOT_A_DIRECTORY, place,
+                            "the directory is gone or is no longer a directory. Open the task on an existing repository root.")
+    return _unavailable(Kind.IO_ERROR, place,
+                        f"the directory could not be checked or locked ({type(exc).__name__}). "
+                        "Check that the directory and the runtime root are readable and writable, then retry.")
+
+
+def inspect(task: Mapping[str, Any], work_dir: str, *, environment: Mapping[str, str], runtime_root: Path,
+            live: Iterable[tuple[str, str]]) -> tuple[Problem | None, tuple[int, int] | None]:
+    """``check`` plus the directory identity it covered. An OS error is a typed refusal, never an exception."""
+    live = tuple(live)
+    try:
+        before = _workspace_identity(_realpath(work_dir))
+        problem = check(task, work_dir, environment=environment, runtime_root=runtime_root, live=live)
+        after = _workspace_identity(_realpath(work_dir))
+    except OSError as exc:
+        return _os_problem(work_dir, exc), None
+    if problem is not None:
+        return problem, None
+    if before is None:
+        return _unavailable(Kind.NOT_A_DIRECTORY, work_dir, "the directory is gone or is not a directory."), None
+    if before != after:
+        return _unavailable(Kind.CHANGED_AFTER_CHECK, work_dir,
+                            "the directory was replaced while it was being checked. Retry."), None
+    return None, before
+
+
+def admit(task: Mapping[str, Any], work_dir: str, task_id: str, *, environment: Mapping[str, str],
+          runtime_root: Path, live: Iterable[tuple[str, str]],
+          expected: tuple[int, int]) -> tuple[DirectoryLock | None, Problem | None]:
+    """Take the lock, then prove the locked directory is the one that was checked, or refuse.
+
+    The lock is released before a refusal is returned. Blocking calls: run this in a thread.
     """
-    return None
+    live = tuple(live)
+    try:
+        lock = DirectoryLock.acquire(runtime_root, work_dir, task_id)
+    except LockHeld as held:
+        return None, Problem(
+            Reason.WORKSPACE_OVERLAPS_SESSION, None,
+            f"another task Manager session (task {held.holder}) holds {work_dir}. Wait until that session stops.")
+    except OSError as exc:
+        return None, _os_problem(work_dir, exc)
+    try:
+        if not (_workspace_identity(_realpath(work_dir)) == expected == lock.identity):
+            problem = _unavailable(Kind.CHANGED_AFTER_CHECK, work_dir,
+                                   "the directory was renamed or replaced after it was checked. Retry.")
+        else:
+            problem = check(task, work_dir, environment=environment, runtime_root=runtime_root, live=live)
+    except OSError as exc:
+        problem = _os_problem(work_dir, exc)
+    except BaseException:
+        lock.release()
+        raise
+    if problem is not None:
+        lock.release()
+        return None, problem
+    return lock, None
+
+
+async def admit_off_loop(*args: Any, **kwargs: Any) -> tuple[DirectoryLock | None, Problem | None]:
+    """``admit`` in a worker thread. A lock taken after the caller was cancelled is released, not leaked."""
+    future = asyncio.ensure_future(asyncio.to_thread(admit, *args, **kwargs))
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        def release(done: asyncio.Future) -> None:
+            if not done.cancelled() and done.exception() is None and (lock := done.result()[0]) is not None:
+                lock.release()
+        future.add_done_callback(release)
+        raise
 
 
 class DirectoryLock:
     """An exclusive lock for one directory. The file is never deleted: unlinking a flock file races."""
 
-    def __init__(self, fd: int) -> None:
+    def __init__(self, fd: int, identity: tuple[int, int] | None = None) -> None:
         self._fd: int | None = fd
+        self.identity = identity  # device and inode of the directory this lock was actually taken on
 
     @classmethod
     def acquire(cls, runtime_root: Path, work_dir: str, task_id: str) -> DirectoryLock:
         directory = Path(runtime_root) / "task-manager-locks"
-        directory.mkdir(parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            os.chmod(directory, 0o700)
+        except OSError as exc:
+            raise LockDirError(Path(runtime_root)) from exc
         resolved = _realpath(work_dir)
-        ident = _directory_identity(resolved)
+        ident = _workspace_identity(resolved)
         if ident is None:
             raise NotADirectoryError(str(resolved))
         device, inode = ident
@@ -361,7 +490,10 @@ class DirectoryLock:
         # close-on-exec: the Claude child does not inherit the lock. If this process
         # dies first, the kernel releases the lock while that child may still be writing.
         # Accepted for v1.
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+        except OSError as exc:
+            raise LockDirError(Path(runtime_root)) from exc
         try:
             os.chmod(path, 0o600)
             try:
@@ -375,7 +507,7 @@ class DirectoryLock:
         except Exception:
             os.close(fd)
             raise
-        return cls(fd)
+        return cls(fd, ident)
 
     def release(self) -> None:
         fd = self._fd

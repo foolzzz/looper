@@ -1117,7 +1117,34 @@ UTF-8, or the 64 KiB total already spent: `budget_exhausted`) is reported to the
 and a code-written `detail` (`<file>: <reason>`, sorted), once for each change of the skipped
 set; the notice is a stored conversation event and never part of a model's input.
 
-Directory checks. A direct session starts only for an in-place task whose directory is the root of its own non-bare git repository. A worktree task (`workspace_mode` worktree), a linked worktree, or a submodule (`.git` is a file or a symlink) is refused with `worktree_unsupported`: v1 has no direct mode for a worktree task, and orchestrated mode is unchanged, so the commit-per-turn of worktree tasks (#1848) is not reached in direct mode. The operator's home is `workspace_is_home`. A system directory (`/`, or `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/dev`, `/Applications`, `/cores`, and anything under those) is `workspace_in_system_dir`. A directory that is, or contains, trusted configuration (credentials, the operator's configuration, the Claude configuration directory, the runtime root, and the ops file) is `workspace_contains_trusted_config`. A subdirectory, a bare repository, or a directory that is not a git repository is `workspace_not_repo_root`. A directory that equals, contains, or is inside another live direct session is `workspace_overlaps_session`. Comparisons use the device and inode of the resolved directory, so two spellings of one directory are the same directory. One directory has one lock, `task-manager-locks/<device>-<inode>.lock` under the runtime root (the directory is mode 0700, the file mode 0600, and the file is never deleted). A second session that finds the lock held gets the same refusal and names the holder. The resident's stop releases the lock. The overlap check runs again after that lock is taken, still inside admission and before the resident starts, so a parent directory and a child directory that both passed the earlier check cannot both start. The lock descriptor is close-on-exec. If the Looper process dies while the Claude process is still alive, the kernel releases the lock when the Looper process exits, which can be before that Claude process exits. That early release is accepted for v1. These checks run only while `tasks.conversations.manager_answers` is on, which defaults off.
+Directory checks. A direct session starts only for an in-place task whose directory is the root of its own non-bare git repository. A worktree task (`workspace_mode` worktree), a linked worktree, or a submodule (`.git` is a file or a symlink) is refused with `worktree_unsupported`: v1 has no direct mode for a worktree task, and orchestrated mode is unchanged, so the commit-per-turn of worktree tasks (#1848) is not reached in direct mode. The operator's home is `workspace_is_home`. A system directory (`/`, or `/System`, `/Library`, `/usr`, `/bin`, `/sbin`, `/etc`, `/private/etc`, `/dev`, `/Applications`, `/cores`, and anything under those) is `workspace_in_system_dir`. A directory that is, or contains, trusted configuration (credentials, the operator's configuration, the Claude configuration directory, the runtime root, and the ops file) is `workspace_contains_trusted_config`. A subdirectory, a bare repository, or a directory that is not a git repository is `workspace_not_repo_root`. A directory that equals, contains, or is inside another live direct session is `workspace_overlaps_session`. Comparisons use the device and inode of the resolved directory, so two spellings of one directory are the same directory. One directory has one lock, `task-manager-locks/<device>-<inode>.lock` under the runtime root (the directory is mode 0700, the file mode 0600, and the file is never deleted). A second session that finds the lock held gets the same refusal and names the holder. The resident's stop releases the lock. After that lock is taken, still inside admission and before the resident starts, the directory that was opened by path must have the same device and inode as both the checked directory and the directory the lock was actually taken on, and the whole check, including the overlap check, runs again. So a parent directory and a child directory that both passed the earlier check cannot both start, and a directory renamed or replaced in between is refused with `workspace_unavailable` (`kind` `changed_after_check`). An OS error during the checks or the lock (the directory is gone, a permission or I/O error) is the same typed refusal. At `inspect`, a path with no repository (missing, a plain file, an empty directory) is `workspace_not_repo_root` / `not_git` (a subdirectory of a repository stays `subdirectory`, a bare repository `bare`); `not_a_directory` is used only when, at lock time, the directory is gone or no longer a directory, and `io_error` covers a symlink loop, a permission or I/O error, or a runtime root that cannot hold the lock directory), never a generic turn failure, and admission does not report started. The refusal result carries `kind` as a typed field. The checks and the lock run in a worker thread. The session is started from the path, so a same-user writer swapping the path or its `.git` from the identity comparison inside admission until the spawn is not detected (a documented residual risk, outside the v1 threat model). The lock is per runtime root and per exact directory: two Looper processes with different runtime roots, or a parent and a child directory across processes, are not serialized, and a machine-wide lock is not built. The runtime root must be on a local filesystem. The lock descriptor is close-on-exec. If the Looper process dies while the Claude process is still alive, the kernel releases the lock when the Looper process exits, which can be before that Claude process exits. That early release is accepted for v1. These checks run only while `tasks.conversations.manager_answers` is on, which defaults off.
+
+Readback. A direct session does not trust that Claude Code applied what Looper injected: before the user message
+of a launch or a resume, and before every later turn, `task_manager_readback` asks the running process for its
+own effective settings (control requests through `ResidentClaude.control`: `get_settings`, `get_sandbox_dialog`
+with `lists`, `get_hooks_listing`, `mcp_status`, `list_permission_rules`, `get_context_usage` with `detail:
+"summary"`; `initialize` once per launch or resume for the permission mode) and compares them with the launch's
+pinned values, typed, never by substring. Any wider effective setting, a settings layer other than user, flag or
+policy, an unknown `sandbox.*` key, an extra writable path, a forbidden `env` variable, a hook from another source,
+a built-in tool outside the allowlist that is not denied by the CLI's `--tools` narrowing, an agent from the task
+directory, another MCP server set, a stdio server that is not wrapped exactly as launched or whose command or
+arguments differ refuses the turn with `launch_setting_mismatch` or `mcp_set_mismatch`, ends the process and sends a
+critical alert to the operator's direct chat; a CLI that does not answer, or answers in another shape, refuses with
+`readback_unavailable` (the first answer after a start may take up to 30 s, later ones up to 5 s; a server still
+`pending` is polled for 10 s); an unsupported sandbox or a missing dependency refuses with `sandbox_unavailable`.
+Every turn's own `system/init` is then compared too: its `tools` must be the allowlist plus the tools of the
+servers read back (`EndConversation` and `WaitForMcpServers` may or may not be listed) and its `permissionMode` must be
+`bypassPermissions`; a difference ends the process, discards the turn (nothing of it is delivered, no end-of-turn
+commit) and refuses it with `launch_setting_mismatch`. This is detection: the CLI writes `init` before it calls the
+model, but it does not wait for Looper, so a tool can run before Looper has read the line (measured: the first tool ran
+0.27 s or more after Looper read `init`, never before it). The readback before the turn is what keeps a wider launch
+from starting. The refusal text is generated by code and never carries an environment value, a policy's content or an MCP server's
+command line. The positive tool list (`system/init.tools`) exists only after the first turn, so before it the check
+runs on the negative list; `mcp_status` returns only `type`, `command`, `args` and `url`, so `env` and `cwd` are
+covered by the resolver-side fingerprint only. The control subtypes are an undocumented protocol of the CLI, covered
+by the opt-in upgrade probe (`tests/test_task_manager_readback_probe.py`), which must be rerun, and
+`KNOWN_BUILTIN_TOOLS` updated, before `VERIFIED_CLI_VERSION` changes. The readback does not guarantee the network
+allowlist: the hostile-configuration probe does.
 
 `tasks.managers.max_resident` defaults to 6 (1–20). Admission can reclaim the least
 recently used idle process; a 60-second ticker reclaims processes idle for 30
@@ -3537,7 +3564,7 @@ Every run records the prompt in `llm_records.metadata`:
   have `project_skills` (`{project_id, sha256, plugin, skills}`), which is no
   longer written;
 - `project_instructions`: `[{path, delivery, sha256?, bytes?, clipped_bytes?,
-  error?}]`, the repository's own `CLAUDE.md` and `AGENTS.md` files the run's
+  skipped?, error?}]`, the repository's own `CLAUDE.md` and `AGENTS.md` files the run's
   runtime was given (`RuntimeAdapter.instruction_files`,
   `looper/agents/runtimes/instructions.py`), each `path` from the work
   directory. The files are those in the directories from the work directory's
@@ -3547,10 +3574,23 @@ Every run records the prompt in `llm_records.metadata`:
   `CLAUDE.md`, so each runtime gets its own file and the other one where the
   project has only that, never both. `delivery` is `native` when the runtime
   reads the file itself and `injected` when Looper put its text in the
-  runtime's system prompt (omp outside a repository: the first 32 KiB, with
-  the text's `sha256`, the file's `bytes` and the `clipped_bytes`, or the
-  `error` that kept it out). A run's history shows them as the prompt layers'
-  "Instructions" row.
+  runtime's system prompt (DSH and pi always, omp outside a repository: the
+  first 32 KiB, with the text's `sha256`, the file's `bytes` and the
+  `clipped_bytes`). Looper reads an injected file only from inside the
+  repository (`looper/agents/safe_read.py`). The boundary is the work
+  directory instead outside a repository, and when the repository root is the
+  operator's home or Looper's runtime root, or a directory above either: files
+  above the work directory are then listed but left out as `outside`. A file in
+  another repository nested inside the boundary (a directory on the way holds
+  `.git`) is left out. Looper follows a link only to a file with an
+  instruction file name: a link that resolves to a `CLAUDE.md` or `AGENTS.md`
+  of the same repository, such as `CLAUDE.md -> AGENTS.md`, is read. A file
+  left out is given to nobody and recorded with `skipped` (`outside`,
+  `other_repository`, `not_an_instruction_file`, `symlink`, `hard_linked`,
+  `not_regular`, `too_large` or `io_error`) and the same in words as `error`.
+  These limits are on what Looper reads itself; a runtime that reads a file
+  `native`ly follows its own rules.
+  A run's history shows them as the prompt layers' "Instructions" row.
 
 The same inputs give the same prompt and hash; changing the harness, the role
 prompt, the background, the knowledge index, the task or a contract changes
