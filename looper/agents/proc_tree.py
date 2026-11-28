@@ -46,7 +46,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .. import child_env
-from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -656,6 +655,28 @@ async def sweep(runtime_root: Path) -> None:
     await asyncio.gather(*(end_record(path, agents) for path, agents in ends.items()))
 
 
+# The sample ticker ends no process, so a stop waits this long and then cancels again: the same
+# interval as a service stop. The number is copied here. This module is loaded by the per-run
+# keeper, which must not import the supervisor (that imports the bus and message types).
+_TICKER_STOP_AGAIN_SEC = 1.0
+
+
+async def _cancel_ticker(task: asyncio.Task[Any] | None) -> None:
+    """Cancel one ticker and wait for it, cancelling again while it runs.
+
+    A task can lose a cancellation when ``asyncio.wait_for`` returns as the cancel arrives
+    (Python 3.11). A failure other than cancellation is retrieved and not raised. The caller's
+    own cancellation still propagates: ``asyncio.wait`` does not treat it as the ticker's.
+    """
+    if task is None:
+        return
+    while not task.done():
+        task.cancel()
+        await asyncio.wait({task}, timeout=_TICKER_STOP_AGAIN_SEC)
+    if not task.cancelled():
+        task.exception()
+
+
 # --- One turn's tree, followed while the turn runs ---
 
 
@@ -825,7 +846,7 @@ class TurnTree:
 
     async def stop_ticker(self) -> None:
         ticker, self._ticker = self._ticker, None
-        await cancel_tasks([ticker])
+        await _cancel_ticker(ticker)
 
     async def _reused(self, table: Table | None = None) -> frozenset[int]:
         """Reject reused identities durably, and unread identities for this observation. Never replace a

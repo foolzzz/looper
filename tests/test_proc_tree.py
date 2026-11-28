@@ -19,6 +19,7 @@ import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1794,6 +1795,38 @@ def test_turn_tree_ticker_picks_up_a_child_started_between_events(tmp_path: Path
                 os.kill(pid, signal.SIGKILL)
 
     assert asyncio.run(_run())
+
+
+def test_stop_ticker_cancels_again_and_keeps_a_ticker_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ticker that drops the first cancel still ends, and its own error is not raised."""
+    monkeypatch.setattr(proc_tree, "_TICKER_STOP_AGAIN_SEC", 0.05)
+
+    async def run() -> None:
+        started = asyncio.Event()
+
+        async def loses_the_first_cancel() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.Event().wait()
+
+        tree = SimpleNamespace(_ticker=asyncio.create_task(loses_the_first_cancel()))
+        await started.wait()
+        await asyncio.wait_for(proc_tree.TurnTree.stop_ticker(tree), 1)
+        assert tree._ticker is None
+
+        async def broken() -> None:
+            raise RuntimeError("ticker broke")
+
+        failed = asyncio.create_task(broken())
+        await asyncio.wait({failed})
+        tree._ticker = failed
+        await proc_tree.TurnTree.stop_ticker(tree)
+        error = failed.exception()
+        assert isinstance(error, RuntimeError)
+
+    asyncio.run(asyncio.wait_for(run(), 2))
 
 
 def test_cancelling_a_refresh_does_not_lose_new_descendants(monkeypatch: pytest.MonkeyPatch) -> None:
