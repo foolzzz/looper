@@ -4576,7 +4576,8 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   `.git` link during a project move), and has no network. A directory outside
   the work tree is writable only when it points back (a linked worktree) or
   lies inside an enclosing checkout's repository (a submodule). The
-  component manifest's read-only git calls run under the same read rules.
+  component manifest's read-only git calls run under the same read rules in
+  the server (not in the dashboard build, which runs that file on its own).
   It fails closed: a command that reaches outside is killed and refused as
   `sandbox_denied`, carrying none of its output (git may leave a lock file
   behind, which the user removes); when the profile cannot be applied the

@@ -238,11 +238,11 @@ def _git(repo: Path, *args: str, data: bytes | None = None) -> bytes:
     git = shutil.which("git") or shutil.which("git", path=os.defpath) or "git"
     try:
         command = [git, "-C", str(repo), *args]
-        # Imported here: the dashboard build runs this file on its own.
-        from .agents import git_jail
+        if __package__:  # the dashboard build runs this file on its own, without the package: not confined there
+            from .agents import git_jail
 
-        if git_jail.ENABLED:  # a checkout may be a registered project's repository: reads are confined, nothing is written
-            command = git_jail.wrap(command, git_jail.profile())
+            if git_jail.ENABLED:  # a checkout may be a registered project's repository: nothing is written
+                command = git_jail.wrap(command, git_jail.profile())
         return subprocess.run(command, input=data, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, check=True, timeout=30).stdout
     except subprocess.SubprocessError as exc:
