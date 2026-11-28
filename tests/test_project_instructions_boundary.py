@@ -1,8 +1,8 @@
 """Project instruction files that Looper reads itself (the ``INJECTED`` ones of
 ``looper/agents/runtimes/instructions.py``) are read only from inside the repository, or from inside the work
-directory outside a repository.
+directory outside a repository, and a link is followed only to a file with an instruction file name.
 
-Every "outside" file here is a fake one under ``tmp_path``.
+Every "outside" or private file here is a fake one under ``tmp_path``.
 """
 
 from __future__ import annotations
@@ -156,17 +156,85 @@ def test_a_link_to_another_file_inside_is_still_given(
     assert entry["path"] == "AGENTS.md" and entry["bytes"] == len("ALIASED RULES") and "skipped" not in entry
 
 
+@pytest.mark.parametrize("name, target, given", [
+    ("AGENTS.md", "../docs/AGENTS.md", 1),
+    ("CLAUDE.md", "../AGENTS.md", 2),  # the root's own file, and again through the link below it
+], ids=["a directory's AGENTS.md", "the parent's AGENTS.md"])
 @pytest.mark.parametrize("module, runtime", [(dsh, "dsh"), (pi, "pi")], ids=["dsh", "pi"])
-def test_below_the_root_a_link_up_to_a_file_of_the_repository_is_still_given(
-    tmp_path: Path, module: Any, runtime: str,
+def test_below_the_root_a_link_up_to_an_instruction_file_of_the_repository_is_still_given(
+    tmp_path: Path, module: Any, runtime: str, name: str, target: str, given: int,
 ) -> None:
     repo = _work(tmp_path)
-    (repo / "docs").mkdir()
-    (repo / "docs" / "rules.md").write_text("SHARED RULES")
     (repo / "pkg").mkdir()
-    (repo / "pkg" / "AGENTS.md").symlink_to("../docs/rules.md")
+    shared = repo / "pkg" / target
+    shared.parent.mkdir(exist_ok=True)
+    shared.write_text("SHARED RULES")
+    (repo / "pkg" / name).symlink_to(target)
 
-    assert "SHARED RULES" in _prompt(module, runtime, repo / "pkg")
+    assert _prompt(module, runtime, repo / "pkg").count("SHARED RULES") == given
+    entry = _entries(runtime, repo / "pkg")[-1]
+    assert entry["path"] == name and entry["bytes"] == len("SHARED RULES") and "skipped" not in entry
+
+
+def _assert_not_followed(module: Any, runtime: str, cwd: Path, private: str) -> None:
+    before = _open_fds()
+
+    prompt = _prompt(module, runtime, cwd)
+    entries = _entries(runtime, cwd)
+
+    assert private not in prompt and "# Project instructions" not in prompt
+    assert LOOPER_PROMPT in prompt
+    assert private not in repr(entries)
+    assert entries == [_skipped("AGENTS.md", "not_an_instruction_file")]
+    assert _open_fds() == before
+
+
+@pytest.mark.parametrize("module, runtime, repository", [case for case in ASSEMBLERS if case[2]],
+                         ids=[name for name, case in zip(ASSEMBLER_IDS, ASSEMBLERS) if case[2]])
+def test_a_link_to_the_repositorys_git_config_is_not_followed(
+    tmp_path: Path, module: Any, runtime: str, repository: bool,
+) -> None:
+    work = _work(tmp_path, repository)
+    (work / ".git" / "config").write_text("FAKE-GIT-CONFIG-CONTENT")
+    (work / "AGENTS.md").symlink_to(".git/config")
+
+    _assert_not_followed(module, runtime, work, "FAKE-GIT-CONFIG-CONTENT")
+
+
+@pytest.mark.parametrize("module, runtime, repository", ASSEMBLERS, ids=ASSEMBLER_IDS)
+def test_a_link_to_an_env_file_inside_is_not_followed(
+    tmp_path: Path, module: Any, runtime: str, repository: bool,
+) -> None:
+    work = _work(tmp_path, repository)
+    (work / ".env").write_text("FAKE-ENV-CONTENT")
+    (work / "AGENTS.md").symlink_to(".env")
+
+    _assert_not_followed(module, runtime, work, "FAKE-ENV-CONTENT")
+
+
+@pytest.mark.parametrize("module, runtime", [(dsh, "dsh"), (pi, "pi")], ids=["dsh", "pi"])
+def test_below_a_parent_repository_a_link_up_to_another_file_of_it_is_not_followed(
+    tmp_path: Path, module: Any, runtime: str,
+) -> None:
+    parent = _work(tmp_path)  # the nearest .git above the work directory, so the boundary is this whole directory
+    (parent / "fixture-private").write_text("FAKE-PARENT-CONTENT")
+    work = parent / "tasks" / "T1"
+    work.mkdir(parents=True)
+    (work / "AGENTS.md").symlink_to("../../fixture-private")
+
+    _assert_not_followed(module, runtime, work, "FAKE-PARENT-CONTENT")
+
+
+@pytest.mark.parametrize("module, runtime", [(dsh, "dsh"), (pi, "pi")], ids=["dsh", "pi"])
+def test_a_chain_through_an_instruction_name_is_judged_by_where_it_ends(
+    tmp_path: Path, module: Any, runtime: str,
+) -> None:
+    work = _work(tmp_path)
+    (work / ".env").write_text("FAKE-ENV-CONTENT")
+    (work / "CLAUDE.md").symlink_to(".env")
+    (work / "AGENTS.md").symlink_to("CLAUDE.md")
+
+    _assert_not_followed(module, runtime, work, "FAKE-ENV-CONTENT")
 
 
 def test_a_work_directory_reached_through_a_link_still_gives_its_file(tmp_path: Path) -> None:

@@ -547,7 +547,7 @@ class DshRuntime(RuntimeAdapter):
     def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
         # Native agent-instructions discovery is disabled by the managed overlay.
         return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
-            cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+            cwd, instructions.NAMES))
 
 
 def _unpriced(model: str, usage: Any) -> None:

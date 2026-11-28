@@ -18,9 +18,11 @@ omp 18.4.3 under Looper's isolation (the multi-runtime RFC, section 9):
   ``injected_section``), up to ``INJECTED_MAX_BYTES``.
 
 A file Looper reads itself is read only from inside the project (the repository
-root, or the work directory outside a repository) by ``safe_read``: a link that
-leads out of it, a file with other hard links and anything but a regular file
-are left out, and the run's record says which and why.
+root, or the work directory outside a repository) by ``safe_read``, and a link
+is followed only to a file with one of the two names (``NAMES``): a link that
+leads out of the project or to a file of any other name, a file with other hard
+links and anything but a regular file are left out, and the run's record says
+which and why.
 
 So each runtime sees the file it reads itself, and the other one when the
 project has only that; no file is given twice. Each run's record names the
@@ -46,12 +48,15 @@ from ..safe_read import Skip, Skipped, read_inside
 
 CLAUDE_MD = "CLAUDE.md"
 AGENTS_MD = "AGENTS.md"
+# The names Looper looks for in a file it reads itself, the one it prefers first.
+NAMES = (AGENTS_MD, CLAUDE_MD)
 # How much of an injected file a system prompt carries: as much as Codex reads of a project's own files
 # (its project_doc_max_bytes default).
 INJECTED_MAX_BYTES = 32 * 1024
 # What a run's record says of a file left out; an ``IO_ERROR`` says what failed instead.
 SKIPPED = {
     Skip.OUTSIDE: "it leads outside the project",
+    Skip.NOT_AN_INSTRUCTION_FILE: "it leads to a file that is not an instruction file",
     Skip.SYMLINK: "its path became a link while it was opened",
     Skip.HARD_LINKED: "it has other hard links",
     Skip.NOT_REGULAR: "it is not a regular file",
@@ -121,7 +126,7 @@ class Injected:
 
 def read_injected(path: Path, cwd: str | Path) -> Injected:
     """The part of ``path`` a system prompt carries, read only from inside the project of a run in ``cwd``."""
-    read = read_inside(project_dirs(cwd)[0], path, INJECTED_MAX_BYTES, clip=True)
+    read = read_inside(project_dirs(cwd)[0], path, INJECTED_MAX_BYTES, clip=True, names=NAMES)
     if isinstance(read, Skipped):
         return Injected(skipped=read.reason, error=read.detail or SKIPPED[read.reason])
     return Injected(read.data.decode("utf-8", errors="replace"), read.size,

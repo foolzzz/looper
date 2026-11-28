@@ -3,7 +3,7 @@
 Files that anyone who can change a repository may have written (project instruction files) are read by Looper
 itself, outside any sandbox. ``read_inside`` reads one only when it is a regular file, with no other hard link,
 whose resolved path is inside ``boundary``. A name that is a link to another file inside the boundary is read as
-that file.
+that file; with ``names``, only when the file it resolves to has one of those names.
 
 The check by path alone can be raced by a process that swaps a directory for a link between the check and the
 open, so the open walks the resolved path from a descriptor of the boundary one component at a time with
@@ -18,6 +18,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -25,6 +26,7 @@ from pathlib import Path
 
 class Skip(StrEnum):
     OUTSIDE = "outside"  # the resolved path is not inside the boundary
+    NOT_AN_INSTRUCTION_FILE = "not_an_instruction_file"  # the resolved file has none of the caller's ``names``
     SYMLINK = "symlink"  # a link was found while walking the path (the path changed after it was resolved)
     HARD_LINKED = "hard_linked"  # more than one link: the same inode may also be a file elsewhere
     NOT_REGULAR = "not_regular"  # a directory, FIFO, device or socket
@@ -92,8 +94,10 @@ def _io_error(exc: OSError) -> Skipped:
     return Skipped(Skip.IO_ERROR, f"{type(exc).__name__}: {exc.strerror or exc}")
 
 
-def read_inside(boundary: str | Path, path: str | Path, limit: int, *, clip: bool = False) -> Content | Skipped:
-    """``path`` read from inside ``boundary``: up to ``limit`` bytes, or why it was not read.
+def read_inside(boundary: str | Path, path: str | Path, limit: int, *, clip: bool = False,
+                names: Collection[str] | None = None) -> Content | Skipped:
+    """``path`` read from inside ``boundary``: up to ``limit`` bytes, or why it was not read. With ``names``, the
+    instruction file names, the file ``path`` finally resolves to must have one of them.
 
     A file larger than ``limit`` is ``Skip.TOO_LARGE``, or with ``clip`` its first ``limit`` bytes (``size`` tells
     how large it was). Never more than ``limit + 1`` bytes are read."""
@@ -103,6 +107,9 @@ def read_inside(boundary: str | Path, path: str | Path, limit: int, *, clip: boo
         return Skipped(Skip.OUTSIDE)
     if real == base:
         return Skipped(Skip.NOT_REGULAR)
+    # Judged on ``real``, the path that is walked below, so a link changed afterwards cannot pass another name.
+    if names is not None and os.path.basename(real) not in names:
+        return Skipped(Skip.NOT_AN_INSTRUCTION_FILE)
     try:
         directory, fd, name = _open_inside(base, os.path.relpath(real, base))
     except _LeftTheBoundary:

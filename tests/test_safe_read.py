@@ -76,6 +76,14 @@ def test_a_boundary_named_through_a_link_holds_its_files(base: Path, tmp_path: P
     assert read_inside(tmp_path / "base-alias", tmp_path / "base-alias" / "dir" / "file", LIMIT) == Content(b"INSIDE", 6)
 
 
+def test_with_names_a_link_is_followed_only_to_a_file_so_named(base: Path) -> None:
+    (base / "alias").symlink_to("dir/file")
+    (base / "link").symlink_to("alias")  # a chain is judged by where it ends
+    assert read_inside(base, base / "link", LIMIT, names=("file",)) == Content(b"INSIDE", 6)
+    for path in (base / "link", base / "dir" / "file"):
+        assert read_inside(base, path, LIMIT, names=("alias", "link")) == Skipped(Skip.NOT_AN_INSTRUCTION_FILE)
+
+
 @pytest.mark.parametrize("target", ["relative", "absolute"])
 def test_a_link_to_a_file_outside_is_skipped(base: Path, tmp_path: Path, target: str) -> None:
     outside = tmp_path / "outside" / "file"

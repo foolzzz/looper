@@ -363,7 +363,7 @@ class PiRuntime(RuntimeAdapter):
     def instruction_files(self, cwd: str | Path) -> tuple[InstructionFile, ...]:
         """Inject the project's files once; pi's own context-file discovery stays disabled."""
         return tuple(InstructionFile(path, Delivery.INJECTED) for path in instructions.first_per_directory(
-            cwd, (instructions.AGENTS_MD, instructions.CLAUDE_MD)))
+            cwd, instructions.NAMES))
 
     def launch_record(self, launch: Launch) -> dict[str, Any]:
         """Catalog items Pi leaves unloaded; only Looper's own server supplies the bridge."""
