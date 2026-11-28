@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from looper.agents import git_safe, ref_links, step_workspaces
+from looper.agents import git_safe, ref_links, step_workspaces, task_manager_refs
 from looper.agents.tiers import worker
 
 MARKER = "OUTSIDE_MARKER_7c1d"
@@ -434,25 +434,29 @@ COMMON = [("rev-parse", "HEAD"), ("status",), ("log", "-1"), ("for-each-ref",), 
 
 @pytest.mark.parametrize("seed", range(24))
 def test_any_entry_of_the_root_or_info_replaced_by_a_link_refuses_every_command(repo, tmp_path, seed, caplog, capfd):
+    """The link is symbolic or hard (a directory takes a symbolic one only)."""
     git_dir = repo / ".git"
     for name in ("shallow", "ORIG_HEAD", "info/attributes", "info/grafts", "info/sparse-checkout"):
         (git_dir / name).touch()
     entries = sorted(str(path.relative_to(git_dir)) for top in (git_dir, git_dir / "info") for path in top.iterdir())
-    place = random.Random(seed).choice(entries)
-    print(f"seed {seed}: {place}")
+    chooser = random.Random(seed)
+    place = chooser.choice(entries)
+    hard = chooser.random() < 0.5 and not (git_dir / place).is_dir()
+    reason = "ref_hardlink" if hard else "ref_symlink"
+    print(f"seed {seed}: {place} {reason}")
     _judged(repo)
     marker = tmp_path / "marker"
     marker.write_text(f"{MARKER}\n")
     path = git_dir / place
     shutil.rmtree(path) if path.is_dir() else path.unlink()
-    path.symlink_to(marker)
+    os.link(marker, path) if hard else path.symlink_to(marker)
     capfd.readouterr()
     for command in COMMON:
         returned = None
         with caplog.at_level(logging.DEBUG), pytest.raises(git_safe.RepositoryRefused) as refused:
             returned = safe(repo, *command)
         error = refused.value
-        assert returned is None
+        assert returned is None and error.reason == reason, (seed, place, command)
         assert MARKER not in f"{error}{error!r}{vars(error)}{caplog.text}", (seed, place, command)
     captured = capfd.readouterr()
     assert MARKER not in captured.out + captured.err
@@ -580,3 +584,221 @@ def test_a_step_that_ends_in_a_repository_the_full_walk_refuses_fails(repo, revi
     result = consume()
     assert result["passed"] is False if review else result["status"] == "failed"
     assert ".git/logs/refs/heads/main" in str(result) and ctx.fallback_reason is None
+
+
+# --- Symbolic-ref targets and hard links ---
+
+
+def _outside_marker(repo: Path) -> Path:
+    marker = repo.parent / "marker"
+    marker.write_text(f"{MARKER}\n")
+    return marker
+
+
+def _symref(repo: Path, place: str, content: str) -> None:
+    path = repo / ".git" / place
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+
+def _refused_without_content(repo: Path, reason: str, place: str, caplog, capfd,
+                             command: tuple[str, ...] = ("for-each-ref",)) -> None:
+    """The command, the full walk, the step check and the ref snapshot all refuse, and none says what is outside."""
+    said: list[str] = []
+    returned = None
+    with caplog.at_level(logging.DEBUG):
+        for attempt in (lambda: safe(repo, *command), lambda: git_safe.check_repository(repo)):
+            with pytest.raises(git_safe.RepositoryRefused) as refused:
+                returned = attempt()
+            error = refused.value
+            assert (error.reason, error.path) == (reason, f".git/{place}")
+            said.append(f"{error}{error!r}{vars(error)}")
+        said.append(asyncio.run(worker._git_dir_refusal(repo)))
+        assert f".git/{place}" in said[-1]
+        with pytest.raises(step_workspaces.GitError) as failed:
+            asyncio.run(step_workspaces._git(repo, "status", "--porcelain", check=False))
+        assert failed.value.reason == f"repository_refused:{reason}"
+        said.append(f"{failed.value}{vars(failed.value)}")
+        with pytest.raises(Exception) as unread:
+            asyncio.run(task_manager_refs.snapshot(repo))
+        said.append(f"{unread.value}{vars(unread.value)}")
+    captured = capfd.readouterr()
+    assert returned is None
+    assert MARKER not in "".join(said) + caplog.text + captured.out + captured.err
+
+
+# Where the symbolic ref is, and what it names. ``x`` and the worktree entry are real directories in the git
+# directory and ``secret`` in them a link to the outside file.
+OUTSIDE_TARGETS = ["x/secret", "secret", "worktrees/wt/secret", "refs/heads/../../x/secret"]
+
+
+@pytest.mark.parametrize("place", ["HEAD", "refs/heads/a", "refs/remotes/origin/HEAD", "ORIG_HEAD"])
+@pytest.mark.parametrize("target", OUTSIDE_TARGETS)
+def test_a_symbolic_ref_pointing_outside_refs_is_refused(repo, place, target, caplog, capfd):
+    _judged(repo)
+    marker = _outside_marker(repo)
+    (repo / ".git" / "x").mkdir()
+    (repo / ".git" / "x" / "secret").symlink_to(marker)
+    (repo / ".git" / "worktrees" / "wt" / "secret").symlink_to(marker)
+    shutil.copy(marker, repo / ".git" / "secret")
+    _symref(repo, place, f"ref: {target}\n")
+    capfd.readouterr()
+    _refused_without_content(repo, "ref_symref_target", place, caplog, capfd)
+
+
+def test_a_chain_of_symbolic_refs_that_ends_outside_refs_is_refused(repo, caplog, capfd):
+    _judged(repo)
+    (repo / ".git" / "x").mkdir()
+    (repo / ".git" / "x" / "secret").symlink_to(_outside_marker(repo))
+    _symref(repo, "HEAD", "ref: refs/heads/a\n")
+    _symref(repo, "refs/heads/a", "ref: x/secret\n")
+    capfd.readouterr()
+    _refused_without_content(repo, "ref_symref_target", "refs/heads/a", caplog, capfd,
+                             command=("rev-parse", "HEAD"))
+
+
+@pytest.mark.parametrize("content", [
+    "ref:x/secret", "ref:\t \r\n x/secret \n\n", "ref: x/secret\0refs/heads/main", "ref:", "ref: refs/heads/main\0",
+    "ref: x/secret" + " " * 5000, "ref: refs/heads/main" + " " * 5000 + "x",
+])
+def test_a_symbolic_ref_git_would_read_some_other_way_is_refused(repo, content):
+    _judged(repo)
+    _symref(repo, "refs/heads/odd", content)
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        safe(repo, "for-each-ref")
+    assert refused.value.reason == "ref_symref_target"
+
+
+@pytest.mark.parametrize("target", [
+    "refs", "refs/", "refs/heads/", "/refs/heads/x", "refs//x", "refs/.x", "refs/heads/.x/y", "refs/heads/x.lock",
+    "refs/heads/x.lock/y", "refs/heads/x.", "refs/heads/a..b", "refs/heads/a@{1}", "refs/heads/a\\b",
+    "refs/heads/a b", "refs/heads/a~", "refs/heads/a^", "refs/heads/a:b", "refs/heads/a?", "refs/heads/a*",
+    "refs/heads/a[", "refs/heads/a\x01", "refs/heads/a\x7f", "refs/heads/a\nb", "REFS/heads/x", "config", "head",
+    "orig_head", "MERGE_MSG", "FOO-HEAD", "main-worktree/HEAD", "../HEAD", "/etc/hosts", "",
+])
+def test_a_target_that_is_no_ref_name_is_not_allowed(target):
+    assert not ref_links._allowed_target(target)
+
+
+@pytest.mark.parametrize("target", [
+    "refs/heads/main", "refs/remotes/origin/main", "refs/heads/a.b-c/d@e{f}", "refs/heads/中文", "HEAD",
+    "ORIG_HEAD", "FETCH_HEAD", "MERGE_HEAD", "AUTO_MERGE", "BISECT_EXPECTED_REV", "NOTES_MERGE_PARTIAL",
+    "NOTES_MERGE_REF", "MERGE_AUTOSTASH",
+])
+def test_a_name_under_refs_or_a_root_ref_is_allowed(target):
+    assert ref_links._allowed_target(target)
+
+
+@pytest.mark.parametrize("place, target", [
+    ("HEAD", "refs/heads/main"), ("refs/remotes/origin/HEAD", "refs/remotes/origin/main"),
+    ("refs/heads/alias", "refs/heads/main"), ("worktrees/wt/HEAD", "refs/heads/main"),
+    ("worktrees/wt/refs/bisect/alias", "refs/heads/main"), ("NOTES_MERGE_REF", "refs/notes/commits"),
+    ("ORIG_HEAD", "HEAD"),
+])
+def test_the_ordinary_shapes_of_a_symbolic_ref_pass(repo, place, target):
+    plain(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _symref(repo, place, f"ref: {target}\n")
+    assert git_safe.check_repository(repo) is not None
+    for command in (("for-each-ref",), ("rev-parse", "--verify", "-q", "refs/heads/main"), ("branch",)):
+        assert safe(repo, *command).returncode == 0, command
+
+
+def test_a_detached_head_and_a_worktree_git_added_pass(repo, tmp_path):
+    safe(repo, "checkout", "-q", "--detach").check_returncode()
+    safe(repo, "worktree", "add", "-q", "-b", "added", str(tmp_path / "added"), "HEAD").check_returncode()
+    for directory in (repo, tmp_path / "added", repo.parent / "wt"):
+        assert git_safe.check_repository(directory) is not None
+        assert safe(directory, "commit", "-q", "--allow-empty", "-m", "c").returncode == 0, directory
+
+
+def test_a_local_clone_with_hard_linked_objects_passes(repo, tmp_path):
+    clone = tmp_path / "clone"
+    plain(repo.parent, "clone", "-q", "--local", str(repo), str(clone))
+    objects = [path for path in (clone / ".git" / "objects").rglob("*") if path.is_file()]
+    assert any(path.stat().st_nlink > 1 for path in objects)  # positive control
+    assert git_safe.check_repository(clone) is not None
+    for command in (("log", "-1"), ("branch", "other"), ("commit", "-q", "--allow-empty", "-m", "c")):
+        assert safe(clone, *command).returncode == 0, command
+
+
+def test_a_reftable_repository_and_its_worktree_pass(tmp_path):
+    directory = tmp_path / "reftable"
+    try:
+        plain(tmp_path, "init", "-q", "--ref-format=reftable", "-b", "main", str(directory))
+    except subprocess.CalledProcessError:
+        pytest.skip("this git does not write reftable repositories")
+    plain(directory, "commit", "-q", "--allow-empty", "-m", "a")
+    plain(directory, "worktree", "add", "-q", "-b", "other", str(tmp_path / "other"))
+    assert (directory / ".git" / "HEAD").read_text() == "ref: refs/heads/.invalid\n"  # positive control: git's stub
+    for place in (directory, tmp_path / "other"):
+        assert git_safe.check_repository(place) is not None
+        assert safe(place, "commit", "-q", "--allow-empty", "-m", "c").returncode == 0
+        assert safe(place, "branch").returncode == 0
+
+
+def _hard_link(repo: Path, place: str) -> None:
+    path = repo / ".git" / place
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    os.link(_outside_marker(repo), path)
+
+
+@pytest.mark.parametrize("place", [
+    "refs/heads/linked", "refs/heads/sub/deep/x", "packed-refs", "worktrees/wt/HEAD", "worktrees/wt/gitdir",
+    "worktrees/wt/commondir", "logs/HEAD", "HEAD", "ORIG_HEAD", "config", "info/exclude",
+])
+def test_a_hard_link_where_git_reads_refs_or_its_own_files_is_refused(repo, place, caplog, capfd):
+    _judged(repo)
+    _hard_link(repo, place)
+    capfd.readouterr()
+    _refused_without_content(repo, "ref_hardlink", place, caplog, capfd)
+
+
+@pytest.mark.parametrize("place", ["logs/refs/heads/sub/deep/x", "worktrees/wt/ORIG_HEAD",
+                                   "worktrees/wt/refs/bisect/bad"])
+def test_a_hard_link_deeper_is_refused_by_the_full_walk(repo, place):
+    _hard_link(repo, place)
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        git_safe.check_repository(repo)
+    assert (refused.value.reason, refused.value.path) == ("ref_hardlink", f".git/{place}")
+
+
+def test_a_command_that_writes_a_reflog_refuses_it_hard_linked(repo):
+    _judged(repo)
+    _hard_link(repo, "logs/refs/heads/sub/deep/x")
+    before = (repo.parent / "marker").read_text()
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        safe(repo, "update-ref", "refs/heads/sub/deep/x", "HEAD")
+    assert refused.value.reason == "ref_hardlink" and (repo.parent / "marker").read_text() == before
+
+
+@pytest.mark.parametrize("command", [
+    ("checkout", "-q", "leaf"), ("switch", "-q", "leaf"), ("branch",), ("worktree", "list"),
+    ("log", "--all", "-1"), ("rev-parse", "worktrees/wt/HEAD"),
+])
+@pytest.mark.parametrize("place, target", [("worktrees/wt/HEAD", "x/secret")])
+def test_another_worktrees_head_is_read_before_a_command_that_reads_it(repo, command, place, target):
+    _judged(repo)
+    _symref(repo, place, f"ref: {target}\n")
+    assert safe(repo, "for-each-ref").returncode == 0  # control: not read for every command
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        safe(repo, *command)
+    assert (refused.value.reason, refused.value.path) == ("ref_symref_target", f".git/{place}")
+
+
+@pytest.mark.parametrize("place", ["worktrees/wt/HEAD", "worktrees/wt/ORIG_HEAD", "worktrees/wt/refs/bisect/bad",
+                                   "modules/module/ORIG_HEAD", "modules/module/refs/heads/odd"])
+def test_the_full_walk_reads_every_worktree_and_submodule_for_targets(repo, place):
+    _symref(repo, place, "ref: x/secret\n")
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        git_safe.check_repository(repo)
+    assert (refused.value.reason, refused.value.path) == ("ref_symref_target", f".git/{place}")
+
+
+def test_a_linked_worktrees_own_head_is_checked_before_every_command_in_it(repo):
+    tree = repo.parent / "wt"
+    _judged(tree)
+    _symref(repo, "worktrees/wt/HEAD", "ref: x/secret\n")
+    with pytest.raises(git_safe.RepositoryRefused) as refused:
+        safe(tree, "status")
+    assert refused.value.reason == "ref_symref_target"
