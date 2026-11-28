@@ -59,6 +59,7 @@ OPERATOR_KEPT = frozenset({"HOME", "CLAUDE_CONFIG_DIR"})
 # names them: the cases run on the operator's real HOME. A direct session's own environment drops all but the first.
 OPERATOR_LOGIN_HOMES = frozenset({"XDG_CONFIG_HOME", "CODEX_HOME", "GROK_HOME", "TRAE_HOME", "COPILOT_HOME"})
 OPERATOR_NOTE = "results depend on this machine's configuration"
+OPERATOR_TOTAL_CAP_USD = 23.5  # --total-cap-usd of a real operator-login run that names none
 TRANSCRIPT_NOTE = ("the CLI keeps its session transcripts in the operator's Claude configuration directory, where they "
                    "stay after the run; they hold the eval's synthetic hostile content, not user data")
 # Settings that move billing off the CLI's own login: a key, a key helper, another endpoint or another provider.
@@ -354,7 +355,7 @@ def publishable(result: dict[str, Any]) -> dict[str, Any]:
         row = {key: value for key, value in row.items() if key != "observations"}
         if "checks" in row:
             row["checks"] = [{"name": c["name"], "ok": c["ok"]} for c in row["checks"]]
-        if "reason" in row and row["outcome"] != Outcome.NOT_RUNNABLE.value:
+        if "reason" in row and row["outcome"] not in (Outcome.NOT_RUNNABLE.value, Outcome.SKIPPED.value):
             row["reason"] = str(row["reason"]).partition(":")[0] if row["outcome"] == "error" else row["outcome"]
         rows.append(row)
     aborted = result["aborted"]
@@ -978,10 +979,15 @@ def compare_inputs(left: Path, right: Path) -> tuple[bool, str]:
 # --- Reservation and the read deny probe -----------------------------------------------------------------------------
 
 
-def reservation(selected: list[Case], reps: int, budgets: Mapping[str, float]) -> list[dict[str, Any]]:
-    """What a run of ``selected`` reserves on the ledger, per case: its model's per-run budget times the repetitions."""
-    return [{"case": case.id, "model": case.model, "reps": reps, "unit_usd": budgets[case.model],
-             "subtotal_usd": round(budgets[case.model] * reps, 6)} for case in selected]
+def repetitions(case: Case, reps: int | None) -> int:
+    """How often ``case`` runs: ``reps``, or where that is None (operator-login) what the case's definition says."""
+    return case.repetitions if reps is None else reps
+
+
+def reservation(selected: list[Case], reps: int | None, budgets: Mapping[str, float]) -> list[dict[str, Any]]:
+    """What running ``selected`` reserves on the ledger, per case: its model's per-run budget times the repetitions."""
+    return [{"case": case.id, "model": case.model, "reps": repetitions(case, reps), "unit_usd": budgets[case.model],
+             "subtotal_usd": round(budgets[case.model] * repetitions(case, reps), 6)} for case in selected]
 
 
 def reservation_table(rows: list[dict[str, Any]]) -> str:
@@ -1002,6 +1008,17 @@ def probe_deny_read(claude_bin: str) -> dict[str, Any]:
 
 
 # --- Suite -------------------------------------------------------------------------------------------------------
+
+
+def operator_stages(plan: list[Case]) -> tuple[list[list[Case]], list[Case]]:
+    """operator-login: ``plan`` as the stages that run in order (Opus, the other non-hostile cases, the hostile
+    cases; direct launches first within the non-hostile ones) and the re-run list that follows them. A stage starts
+    only when everything before it passed."""
+    main = [c for c in plan if not c.rerun_only]
+    first = sorted((c for c in main if not c.hostile), key=lambda c: not c.direct)
+    stages = [[c for c in first if c.model == cases.OPUS], [c for c in first if c.model != cases.OPUS],
+              [c for c in main if c.hostile]]
+    return stages, [c for c in plan if c.rerun_only]
 
 
 def tool_names() -> set[str]:
@@ -1029,12 +1046,13 @@ def check_real_claude(claude_bin: str | None) -> str:
     return str(Path(claude_bin).resolve())
 
 
-def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] | None = None, reps: int = 1,
+def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] | None = None,
+              reps: int | None = None,
               behavior: str = "ok", claude_bin: str | None = None, credential_choice: str | None = None,
               total_cap_usd: float | None = None, case_budget_usd: float | None = None,
               opus_case_budget_usd: float | None = None, opus_cap_usd: float = 6.0, ledger_path: Path | None = None,
               dump_dir: Path | None = None) -> tuple[dict[str, Any], Path]:
-    if mode not in ("fake", "real") or reps < 1 or behavior not in ("ok", "bad", "lie"):
+    if mode not in ("fake", "real") or (reps is not None and reps < 1) or behavior not in ("ok", "bad", "lie"):
         raise EvalError("mode must be fake/real, behavior ok/bad/lie and reps positive")
     if mode == "real" and behavior != "ok":
         raise EvalError("the scripted bad and lie behaviors are fake-mode controls")
@@ -1045,6 +1063,10 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
     if mode == "real" and out_dir.is_relative_to(REPO_ROOT):
         raise EvalError("real mode artifacts must be outside the repository; set --out-dir")
     operator_login = credential_choice == OPERATOR_LOGIN
+    if not operator_login:
+        reps = 1 if reps is None else reps
+    elif reps is not None:
+        raise EvalError("operator-login takes each case's repetitions from its definition: drop --reps")
     if operator_login:
         if behavior != "ok":
             raise EvalError("the scripted bad and lie behaviors run commands unsandboxed: not with operator-login")
@@ -1065,33 +1087,40 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
                                  "files would sit among real credentials")
                                 if c.needs_synthetic_home else None)) for c, why in runnable]
     plan = [c for c, why in runnable if why is None]
-    stages = [plan]
+    stages, rerun = [plan], []
     if operator_login:
-        first = sorted((c for c in plan if not c.hostile), key=lambda c: not c.direct)
-        hostile = [c for c in plan if c.hostile]
-        if hostile and not any(c.direct for c in first):
+        stages, rerun = operator_stages(plan)
+        if stages[-1] and not any(c.direct for stage in stages[:-1] for c in stage):
             raise EvalError("operator-login runs a hostile case only after a non-hostile case with a direct launch "
                             "has passed: select one too (direct_edit_brief, for example)")
-        stages = [first, hostile]
+        if rerun and not any(stages):
+            raise EvalError("the re-run list runs only after other cases passed: select those too")
+    main_cases = [c for stage in stages for c in stage]
     credential = None
     ledger = None
     budgets = ({cases.SONNET: case_budget_usd, cases.OPUS: opus_case_budget_usd} if mode == "real"
                else {cases.SONNET: 1.25, cases.OPUS: 3.0})  # fake costs are fractions of a cent; the judge still checks
     if mode == "real":
         credential = resolve_credential(credential_choice)
-        claude_bin = check_real_claude(claude_bin)
+        if operator_login and total_cap_usd is None:
+            total_cap_usd = OPERATOR_TOTAL_CAP_USD
         total = positive("--total-cap-usd", total_cap_usd)
         for model in {c.model for c in plan}:
             positive("--case-budget-usd" if model == cases.SONNET else "--opus-case-budget-usd", budgets[model])
         ledger = Ledger(ledger_path or out_dir / "ledger.jsonl", total_cap=total, opus_cap=opus_cap_usd)
-        reserve = sum(budgets[c.model] * reps for c in plan)
+        # Made before any CLI starts, for everything but the re-run list: each of its runs reserves at its own start.
+        reserved = reservation(main_cases, reps, budgets)
+        reserve = sum(row["subtotal_usd"] for row in reserved)
         if ledger.spent() + reserve > total:
             raise BudgetRefusal(f"the selected runs reserve {reserve:g} on top of {ledger.spent():.4f} already spent, "
                                 f"over --total-cap-usd {total:g}")
-        if sum(budgets[cases.OPUS] * reps for c in plan if c.model == cases.OPUS) + ledger.spent(cases.OPUS) > opus_cap_usd:
+        opus = sum(row["subtotal_usd"] for row in reserved if row["model"] == cases.OPUS)
+        if opus + ledger.spent(cases.OPUS) > opus_cap_usd:
             raise BudgetRefusal(f"the Opus runs exceed the Opus cap {opus_cap_usd:g}")
-        reserved = reservation([c for stage in stages for c in stage], reps, budgets)
-        print(f"reserved by this run:\n{reservation_table(reserved)}already spent on the ledger: "
+        claude_bin = check_real_claude(claude_bin)
+        later = (f"re-run list, not reserved now (each run reserves at its own start and is skipped when it does not "
+                 f"fit under the cap):\n{reservation_table(reservation(rerun, reps, budgets))}" if rerun else "")
+        print(f"reserved by this run:\n{reservation_table(reserved)}{later}already spent on the ledger: "
               f"{ledger.spent():.2f}; --total-cap-usd {total:g}", file=sys.stderr, flush=True)
     rows: list[dict[str, Any]] = []
     for case, why in runnable:
@@ -1109,11 +1138,10 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
         version = (task_manager_safety.VERIFIED_CLI_VERSION if mode == "real"
                    else f"fake {task_manager_cli.VERSION}")
         operator = {"note": OPERATOR_NOTE, "config": config_fingerprint(os.environ, version),
-                    "changed_during_run": False, "first_cases": [c.id for c in stages[0]],
-                    "hostile_cases": [c.id for c in stages[1]], "transcripts": TRANSCRIPT_NOTE,
-                    "not_covered": not_covered(os.environ),
-                    "reservation": reservation([c for stage in stages for c in stage], reps, budgets)
-                    if mode == "real" else None,
+                    "changed_during_run": False, "first_cases": [c.id for stage in stages[:-1] for c in stage],
+                    "hostile_cases": [c.id for c in stages[-1]], "rerun_cases": [c.id for c in rerun],
+                    "transcripts": TRANSCRIPT_NOTE, "not_covered": not_covered(os.environ),
+                    "reservation": reservation(main_cases, reps, budgets) if mode == "real" else None,
                     "deny_read_probe": {"status": "not_run", "reason": "fake mode starts no real CLI"}}
 
     def checkpoint(done: bool, aborted: str | None = None) -> dict[str, Any]:
@@ -1140,16 +1168,29 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
                              "blocker": cases.Blocker.DENY_READ_PROBE.value, "reason": reason, "cost_usd": 0.0}
                             for c in plan)
                 return checkpoint(True, f"deny_read_probe {probe['status']}"), path
-        for stage, members in enumerate(stages):
-            if stage and members and (held := gate_problem(rows, stages[0])):
-                rows.extend({"case": c.id, "rep": 0, "model": c.model, "outcome": Outcome.NOT_RUNNABLE.value,
-                             "blocker": cases.Blocker.STAGE_GATE.value, "reason": held, "cost_usd": 0.0}
-                            for c in members)
+        # The re-run list is the last stage: by then, the stages before it are "everything else".
+        order = [*stages, rerun]
+        for stage, members in enumerate(order):
+            last = operator_login and stage == len(stages)
+            earlier = [c for done in order[:stage] for c in done]
+            if operator_login and members and earlier and (
+                    held := gate_problem(rows, earlier, read_back=any(c.hostile for c in members))):
+                rows.extend(not_started(c, cases.Blocker.STAGE_GATE, held, Outcome.SKIPPED if c in rerun
+                                        else Outcome.NOT_RUNNABLE) for done in order[stage:] for c in done)
                 break
-            for rep in range(1, reps + 1):
+            for rep in range(1, max((repetitions(c, reps) for c in members), default=0) + 1):
                 for case in members:
+                    if rep > repetitions(case, reps):
+                        continue
                     budget = budgets[case.model] or 0.0
-                    run_id = ledger.reserve(case.id, rep, case.model, budget) if ledger is not None else None
+                    try:
+                        run_id = ledger.reserve(case.id, rep, case.model, budget) if ledger is not None else None
+                    except BudgetRefusal as exc:
+                        if not last:
+                            raise
+                        rows.append(not_started(case, cases.Blocker.OVER_CAP, str(exc), Outcome.SKIPPED))
+                        checkpoint(False)
+                        continue
                     try:
                         row = run_case(case, rep, mode=mode, behavior=behavior, admin_url=admin_url, out_dir=out_dir,
                                        claude_bin=claude_bin, credential=credential, budget=budget,
@@ -1173,14 +1214,19 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
     return checkpoint(True), path
 
 
-def gate_problem(rows: list[dict[str, Any]], first: list[Case]) -> str | None:
-    """Why the hostile stage may not start: every run of every first-stage case passed, and at least one of them
-    launched a direct session that read back as injected."""
-    ids = {case.id for case in first}
+def not_started(case: Case, blocker: cases.Blocker, reason: str, outcome: Outcome) -> dict[str, Any]:
+    return {"case": case.id, "rep": 0, "model": case.model, "outcome": outcome.value, "blocker": blocker.value,
+            "reason": reason, "cost_usd": 0.0}
+
+
+def gate_problem(rows: list[dict[str, Any]], earlier: list[Case], *, read_back: bool) -> str | None:
+    """Why the next stage may not start: every run of every earlier case passed and, where ``read_back`` (before the
+    hostile cases), at least one of them launched a direct session that read back as injected."""
+    ids = {case.id for case in earlier}
     ran = [row for row in rows if row["case"] in ids and row["rep"]]
     if failed := sorted({row["case"] for row in ran if row["outcome"] != Outcome.PASS.value}):
-        return f"held back: the non-hostile cases did not all pass ({', '.join(failed)})"
-    if not any(row.get("verified_direct_launches") for row in ran):
+        return f"held back: the earlier cases did not all pass ({', '.join(failed)})"
+    if read_back and not any(row.get("verified_direct_launches") for row in ran):
         return "held back: no direct launch was read back in the non-hostile cases"
     return None
 
@@ -1197,7 +1243,8 @@ def build_info() -> dict[str, Any]:
             "looper_file": looper.__file__}
 
 
-def summarize(rows: list[dict[str, Any]], *, mode: str, behavior: str, reps: int, aborted: str | None, done: bool,
+def summarize(rows: list[dict[str, Any]], *, mode: str, behavior: str, reps: int | None, aborted: str | None,
+              done: bool,
               ledger: Ledger | None, total_cap: float | None) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for row in rows:
@@ -1206,7 +1253,7 @@ def summarize(rows: list[dict[str, Any]], *, mode: str, behavior: str, reps: int
         overall = "incomplete"
     elif counts.get("fail"):
         overall = "fail"
-    elif counts.get("unparsed") or counts.get("error") or counts.get("not_runnable"):
+    elif any(counts.get(name) for name in ("unparsed", "error", "not_runnable", "skipped")):
         overall = "incomplete"  # never a pass while any case was not judged
     else:
         overall = "pass"
@@ -1223,14 +1270,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mode", choices=["fake", "real"], default="fake")
     parser.add_argument("--pg-url", help="disposable PostgreSQL server admin URL")
     parser.add_argument("--cases", help="comma-separated case ids (default: all)")
-    parser.add_argument("--reps", type=int, default=1)
+    parser.add_argument("--reps", type=int, help="default 1; refused with operator-login, whose cases say how often "
+                                                  "they run")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR / "task-manager")
     parser.add_argument("--claude-bin", help="real mode: the real Claude Code executable")
     parser.add_argument("--credential", choices=CREDENTIAL_CHOICES,
                         help="real mode: oauth reads CLAUDE_CODE_OAUTH_TOKEN, api-key reads ANTHROPIC_API_KEY, "
                              "operator-login uses the CLI's own login under your HOME and configuration (also "
                              "rehearsable in fake mode)")
-    parser.add_argument("--total-cap-usd", type=float)
+    parser.add_argument("--total-cap-usd", type=float,
+                        help=f"real mode: required, except with operator-login (default {OPERATOR_TOTAL_CAP_USD})")
     parser.add_argument("--case-budget-usd", type=float, help="real mode: the most one Sonnet case run may spend")
     parser.add_argument("--opus-case-budget-usd", type=float, help="real mode: the most the Opus case may spend")
     parser.add_argument("--opus-cap-usd", type=float, default=6.0, help="real mode: all Opus spend, ledger included")

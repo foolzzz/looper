@@ -31,6 +31,14 @@ HOSTILE = {"foreign_task_refused", "readonly_progress", "project_instructions_ho
            "branch_kept_against_convention"}
 EDIT_CASES = {f"{name}{arm}" for name in ("edit_multi_file", "edit_large_file_local", "edit_retry_after_mismatch")
               for arm in ("", "_bash")}
+RERUN = ["edit_large_file_local", "edit_retry_after_mismatch"]  # run last, outside the pre-start reservation
+# A full operator-login run, in order: Opus, the other non-hostile cases (direct launches first), then the hostile ones.
+OPUS_FIRST = ["opus_switch"]
+SONNET_FIRST = ["direct_edit_brief", "stop_continue", "fresh_session_excerpt", "edit_multi_file",
+                "edit_multi_file_bash", "edit_large_file_local_bash", "edit_retry_after_mismatch_bash",
+                "readonly_resume"]
+HOSTILE_ORDER = ["readonly_progress", "foreign_task_refused", "project_instructions_hostile",
+                 "branch_kept_against_convention"]
 
 
 def sha(data: bytes) -> str:
@@ -349,13 +357,14 @@ def test_runs_with_different_hashes_are_not_directly_comparable(tmp_path):
 # --- The staged order -------------------------------------------------------------------------------------------
 
 
-def stub(monkeypatch, outcomes=None, abort_on=None, verified=1):
+def stub(monkeypatch, outcomes=None, abort_on=None, verified=1, costs=None):
+    """``run_case`` replaced: records what started. ``costs`` maps a model to what each of its runs spends."""
     started = []
 
     def run_case(case, rep, **kwargs):
         assert kwargs["operator_login"] is True and kwargs["credential"] is None
         started.append((case.id, rep))
-        row = {"case": case.id, "rep": rep, "model": case.model, "cost_usd": 0.0,
+        row = {"case": case.id, "rep": rep, "model": case.model, "cost_usd": (costs or {}).get(case.model, 0.0),
                "outcome": (outcomes or {}).get(case.id, "pass"),
                "verified_direct_launches": verified if case.direct else 0}
         if case.id == abort_on:
@@ -372,14 +381,24 @@ def suite(tmp_path, **override):
     return evaluation.run_suite(**arguments)
 
 
-def test_every_non_hostile_case_of_every_repetition_runs_before_a_hostile_one(operator, monkeypatch, tmp_path):
+def full_order():
+    return ([(case, 1) for case in OPUS_FIRST + SONNET_FIRST]
+            + [(case, rep) for rep in (1, 2) for case in HOSTILE_ORDER] + [(case, 1) for case in RERUN])
+
+
+def blocked(result, blocker):
+    return {row["case"]: row["outcome"] for row in result["rows"] if row.get("blocker") == blocker}
+
+
+def test_a_full_run_takes_opus_then_the_non_hostile_then_the_hostile_cases_then_the_re_run_list(operator, monkeypatch,
+                                                                                              tmp_path):
     started = stub(monkeypatch)
-    result, _ = suite(tmp_path, reps=2)
-    ids = [case for case, _ in started]
-    first = len(ids) - 2 * len(HOSTILE)
-    assert set(ids[first:]) == HOSTILE and not set(ids[:first]) & HOSTILE and first == 22
-    assert ids[0] == "direct_edit_brief" and ids[first - 1] == "readonly_resume"  # read-back launches first
-    assert set(result["operator_login"]["hostile_cases"]) == HOSTILE
+    result, _ = suite(tmp_path)
+    assert started == full_order()
+    assert result["reps"] is None
+    section = result["operator_login"]
+    assert section["first_cases"] == OPUS_FIRST + SONNET_FIRST
+    assert section["hostile_cases"] == HOSTILE_ORDER and section["rerun_cases"] == RERUN
 
 
 @pytest.mark.parametrize("outcome", ["fail", "unparsed", "error"])
@@ -387,16 +406,34 @@ def test_a_stage_one_case_that_does_not_pass_keeps_every_hostile_case_from_start
                                                                                      outcome):
     started = stub(monkeypatch, outcomes={"readonly_resume": outcome})
     result, _ = suite(tmp_path)
-    assert not {case for case, _ in started} & HOSTILE
-    held = {row["case"]: row for row in result["rows"] if row.get("blocker") == "stage_gate"}
-    assert set(held) == HOSTILE and all(row["outcome"] == "not_runnable" for row in held.values())
+    assert [case for case, _ in started] == OPUS_FIRST + SONNET_FIRST
+    assert blocked(result, "stage_gate") == {**dict.fromkeys(HOSTILE, "not_runnable"), **dict.fromkeys(RERUN, "skipped")}
     assert result["outcome"] != "pass"
+
+
+@pytest.mark.parametrize("outcome", ["fail", "unparsed", "error"])
+def test_nothing_else_starts_unless_the_opus_case_passed(operator, monkeypatch, tmp_path, outcome):
+    started = stub(monkeypatch, outcomes={"opus_switch": outcome})
+    result, _ = suite(tmp_path)
+    assert started == [("opus_switch", 1)]
+    assert blocked(result, "stage_gate") == {**dict.fromkeys(SONNET_FIRST + HOSTILE_ORDER, "not_runnable"),
+                                             **dict.fromkeys(RERUN, "skipped")}
+
+
+@pytest.mark.parametrize("case", HOSTILE_ORDER)
+def test_a_hostile_case_that_does_not_pass_skips_the_re_run_list(operator, monkeypatch, tmp_path, case):
+    started = stub(monkeypatch, outcomes={case: "fail"})
+    result, _ = suite(tmp_path)
+    assert started == full_order()[:-len(RERUN)]  # the hostile stage itself runs to its end
+    assert blocked(result, "stage_gate") == dict.fromkeys(RERUN, "skipped")
+    assert result["outcome"] == "fail" and result["counts"]["skipped"] == 2
 
 
 def test_hostile_cases_need_a_read_back_launch_first(operator, monkeypatch, tmp_path):
     started = stub(monkeypatch, verified=0)
-    suite(tmp_path)
-    assert not {case for case, _ in started} & HOSTILE
+    result, _ = suite(tmp_path)
+    assert [case for case, _ in started] == OPUS_FIRST + SONNET_FIRST
+    assert blocked(result, "stage_gate") == {**dict.fromkeys(HOSTILE, "not_runnable"), **dict.fromkeys(RERUN, "skipped")}
     for selected in (["foreign_task_refused"], ["readonly_resume", "foreign_task_refused"]):
         started.clear()
         with pytest.raises(EvalError, match="non-hostile"):
@@ -404,10 +441,58 @@ def test_hostile_cases_need_a_read_back_launch_first(operator, monkeypatch, tmp_
         assert started == []
 
 
+def test_the_re_run_list_never_runs_alone(operator, monkeypatch, tmp_path):
+    started = stub(monkeypatch)
+    with pytest.raises(EvalError, match="re-run"):
+        suite(tmp_path, selected=[cases.BY_ID[name] for name in RERUN])
+    assert started == []
+
+
+@pytest.mark.parametrize("mode", ["fake", "real"])
+@pytest.mark.parametrize("reps", [1, 2])
+def test_operator_login_takes_no_repetitions_flag(operator, monkeypatch, tmp_path, mode, reps):
+    probe_stub(monkeypatch)
+    started = stub(monkeypatch)
+    arguments = {"mode": "real", "claude_bin": stand_in_claude(tmp_path), "case_budget_usd": 1.25,
+                 "opus_case_budget_usd": 3} if mode == "real" else {}
+    with pytest.raises(EvalError, match="--reps"):
+        suite(tmp_path, reps=reps, selected=[cases.BY_ID["direct_edit_brief"]], **arguments)
+    assert started == []
+
+
+def test_the_command_line_passes_no_repetitions_or_cap_it_was_not_given(monkeypatch, tmp_path):
+    seen = {}
+
+    def run_suite(**kwargs):
+        seen.update(kwargs)
+        return {"outcome": "pass", "counts": {}}, tmp_path
+
+    monkeypatch.setattr(evaluation, "run_suite", run_suite)
+    with pytest.raises(SystemExit):
+        evaluation.main(["--pg-url", "x", "--credential", "operator-login"])
+    assert seen["reps"] is None and seen["total_cap_usd"] is None
+
+
+def test_other_modes_keep_one_repetition_and_ignore_the_re_run_list(clean_run, tmp_path):
+    result, _ = evaluation.run_suite(mode="fake", admin_url="postgresql://nobody@127.0.0.1:1/never",
+                                     out_dir=tmp_path / "out",
+                                     selected=[cases.BY_ID[name] for name in (*RERUN, "foreign_task_refused")])
+    assert clean_run == [(case, 1) for case in (*RERUN, "foreign_task_refused")] and result["reps"] == 1
+
+
+@pytest.fixture
+def clean_run(monkeypatch):
+    started = []
+    monkeypatch.setattr(task_manager_sandbox, "SUPPORTED_PLATFORM", sys.platform)
+    monkeypatch.setattr(evaluation, "run_case", lambda case, rep, **k: started.append((case.id, rep)) or {
+        "case": case.id, "rep": rep, "model": case.model, "outcome": "pass", "cost_usd": 0.0})
+    return started
+
+
 def test_a_readback_refusal_aborts_the_whole_run(operator, monkeypatch, tmp_path):
     started = stub(monkeypatch, abort_on="stop_continue")
-    result, path = suite(tmp_path, reps=2)
-    assert started == [("direct_edit_brief", 1), ("stop_continue", 1)]
+    result, path = suite(tmp_path)
+    assert started == [("opus_switch", 1), ("direct_edit_brief", 1), ("stop_continue", 1)]
     assert result["outcome"] == "incomplete" and result["aborted"] == "launch_refused in stop_continue"
     assert json.loads(path.read_text())["aborted"] == result["aborted"]
 
@@ -421,7 +506,7 @@ def new_case(name):
 def test_a_new_case_is_hostile_and_needs_a_synthetic_home_until_it_says_otherwise(operator, monkeypatch, tmp_path):
     started = stub(monkeypatch)
     new = new_case("someone_elses_new_case")
-    assert new.hostile and new.needs_synthetic_home
+    assert new.hostile and new.needs_synthetic_home and new.repetitions == 2 and not new.rerun_only
     result, _ = suite(tmp_path, selected=[new, cases.BY_ID["direct_edit_brief"]])
     assert [case for case, _ in started] == ["direct_edit_brief"]
     row = next(row for row in result["rows"] if row["case"] == new.id)
@@ -429,7 +514,7 @@ def test_a_new_case_is_hostile_and_needs_a_synthetic_home_until_it_says_otherwis
     started.clear()
     declared = dataclasses.replace(new, needs_synthetic_home=False)
     suite(tmp_path, selected=[declared, cases.BY_ID["direct_edit_brief"]], out_dir=tmp_path / "second")
-    assert [case for case, _ in started] == ["direct_edit_brief", declared.id]
+    assert started == [("direct_edit_brief", 1), (declared.id, 1), (declared.id, 2)]
 
 
 def test_the_cases_on_this_checkout_say_what_they_are():
@@ -506,7 +591,7 @@ def stand_in_claude(tmp_path):
 
 
 def real_suite(tmp_path, **override):
-    arguments = {"mode": "real", "claude_bin": stand_in_claude(tmp_path), "total_cap_usd": 18, "case_budget_usd": 1.25,
+    arguments = {"mode": "real", "claude_bin": stand_in_claude(tmp_path), "case_budget_usd": 1.25,
                  "opus_case_budget_usd": 3, **override}
     return suite(tmp_path, **arguments)
 
@@ -534,7 +619,7 @@ def test_real_mode_hands_no_credential_to_a_case_and_records_the_verified_versio
 def test_no_case_starts_unless_the_read_deny_probe_passes(operator, monkeypatch, tmp_path, status):
     calls = probe_stub(monkeypatch, status)
     started = stub(monkeypatch)
-    result, path = real_suite(tmp_path, total_cap_usd=20.5)  # every runnable case once
+    result, path = real_suite(tmp_path)
     assert len(calls) == 1 and started == []
     assert result["aborted"] == f"deny_read_probe {status}" and result["outcome"] == "incomplete"
     assert result["operator_login"]["deny_read_probe"]["status"] == status
@@ -549,8 +634,8 @@ def test_the_probe_runs_once_before_the_first_case(operator, monkeypatch, tmp_pa
     started = stub(monkeypatch)
     real = evaluation.run_case
     monkeypatch.setattr(evaluation, "run_case", lambda case, rep, **k: order.append(case.id) or real(case, rep, **k))
-    real_suite(tmp_path, selected=[cases.BY_ID["direct_edit_brief"]], reps=2)
-    assert order == ["probe", "direct_edit_brief", "direct_edit_brief"] and len(started) == 2
+    real_suite(tmp_path, selected=[cases.BY_ID["foreign_task_refused"], cases.BY_ID["direct_edit_brief"]])
+    assert order == ["probe", "direct_edit_brief", "foreign_task_refused", "foreign_task_refused"] and len(started) == 3
 
 
 def test_the_reservation_is_computed_from_the_cases_and_printed_before_the_run(operator, monkeypatch, tmp_path, capsys):
@@ -563,48 +648,134 @@ def test_the_reservation_is_computed_from_the_cases_and_printed_before_the_run(o
                 "verified_direct_launches": 1}
 
     monkeypatch.setattr(evaluation, "run_case", run_case)
-    selected = [cases.BY_ID[name] for name in ("direct_edit_brief", "foreign_task_refused", "opus_switch")]
-    result, _ = real_suite(tmp_path, selected=selected, reps=2)
+    selected = [cases.BY_ID[name] for name in
+                ("direct_edit_brief", "foreign_task_refused", "opus_switch", "edit_large_file_local")]
+    result, _ = real_suite(tmp_path, selected=selected)
     rows = result["operator_login"]["reservation"]
     assert [(r["case"], r["model"], r["reps"], r["unit_usd"], r["subtotal_usd"]) for r in rows] == [
-        ("direct_edit_brief", "sonnet", 2, 1.25, 2.5), ("opus_switch", "opus", 2, 3, 6),
+        ("opus_switch", "opus", 1, 3, 3), ("direct_edit_brief", "sonnet", 1, 1.25, 1.25),
         ("foreign_task_refused", "sonnet", 2, 1.25, 2.5)]
-    assert evaluation.reservation_table(rows) in printed[0] and "| total | | | | 11.00 |" in printed[0]
+    assert evaluation.reservation_table(rows) in printed[0] and "| total | | | | 6.75 |" in printed[0]
+    assert "edit_large_file_local" in printed[0] and "skipped" in printed[0]
+    assert result["total_cap_usd"] == 23.5
+
+
+# --- The case definitions, the cap and the re-run list ------------------------------------------------------------
 
 
 CEILING_USD = 23.5  # the approved ceiling of an operator-login run
-# Runnable with operator-login but in neither proposed command: all of them together would exceed the ceiling.
-NOT_PROPOSED = EDIT_CASES | {"project_instructions_hostile", "branch_kept_against_convention"}
+BUDGETS = {cases.SONNET: 1.25, cases.OPUS: 3.0}
 
 
-def documented_reservation():
-    """The README's table: every case an operator-login run can start, Opus once and the others twice."""
-    runnable = [c for c in cases.CASES if c.judge is not None and c.requires is None and not c.needs_synthetic_home]
-    budgets = {cases.SONNET: 1.25, cases.OPUS: 3.0}
-    return (evaluation.reservation([c for c in runnable if c.model == cases.OPUS], 1, budgets)
-            + evaluation.reservation([c for c in runnable if c.model == cases.SONNET], 2, budgets))
+def test_hostile_cases_run_twice_every_other_case_once_and_the_re_run_list_is_not_hostile():
+    for case in cases.CASES:
+        assert case.repetitions == (2 if case.hostile else 1), case.id
+    assert [case.id for case in cases.CASES if case.rerun_only] == RERUN
+    assert not any(case.hostile for case in cases.CASES if case.rerun_only)
 
 
-def test_the_readme_table_is_the_documented_commands_reservation():
-    rows = documented_reservation()
-    assert sum(row["subtotal_usd"] for row in rows) == 38.0 > CEILING_USD
-    proposed = [row for row in rows if row["case"] not in NOT_PROPOSED]
-    assert proposed == rows[:7] and sum(row["subtotal_usd"] for row in proposed) == 18.0 <= CEILING_USD
+def runnable():
+    return [c for c in cases.CASES if c.judge is not None and c.requires is None and not c.needs_synthetic_home]
+
+
+def documented_tables():
+    """The README's two tables, from the case definitions: what is reserved before the start, and the re-run list."""
+    stages, rerun = evaluation.operator_stages(runnable())
+    main = evaluation.reservation([case for stage in stages for case in stage], None, BUDGETS)
+    return main, evaluation.reservation(rerun, None, BUDGETS)
+
+
+def test_the_readme_tables_are_the_definitions_reservation():
+    main, rerun = documented_tables()
+    assert sum(row["subtotal_usd"] for row in main) == 23.0 <= CEILING_USD
+    assert sum(row["subtotal_usd"] for row in rerun) == 2.5 and [row["case"] for row in rerun] == RERUN
+    assert evaluation.OPERATOR_TOTAL_CAP_USD == CEILING_USD
+    section = operator_section()
+    assert evaluation.reservation_table(main) in section and evaluation.reservation_table(rerun) in section
+
+
+def operator_section():
     readme = (evaluation.REPO_ROOT / "evals" / "README.md").read_text()
-    assert evaluation.reservation_table(rows) in readme
+    return readme.split("### `--credential operator-login`")[1].split("\nThe stand-in is a positive")[0]
 
 
-def test_the_documented_commands_run_every_non_hostile_case_before_a_hostile_one():
-    readme = (evaluation.REPO_ROOT / "evals" / "README.md").read_text()
-    section = readme.split("### `--credential operator-login`")[1]
-    block = section.split("# proposed, needs approval")[1].split("```")[0].replace("\\\n", " ")
+def test_the_documented_command_selects_every_runnable_case_under_the_default_cap():
+    block = operator_section().split("# proposed, needs approval")[1].split("```")[0].replace("\\\n", " ")
     commands = [line for line in block.splitlines() if "--mode real" in line]
-    selected = [re.search(r"--cases (\S+)", line)[1].split(",") for line in commands]
-    assert selected[0] == ["opus_switch"] and not cases.BY_ID["opus_switch"].hostile
-    assert commands[0].rstrip().endswith("&&")  # the Sonnet command runs only if the first passed
-    assert "--total-cap-usd 3 " in commands[0] and "--total-cap-usd 18 " in commands[1]
-    runnable = {c.id for c in cases.CASES if c.judge and not c.requires and not c.needs_synthetic_home}
-    assert set(selected[0] + selected[1]) == runnable - NOT_PROPOSED
+    assert len(commands) == 1
+    assert set(re.search(r"--cases (\S+)", commands[0])[1].split(",")) == {c.id for c in runnable()}
+    assert "--case-budget-usd 1.25 " in commands[0] and "--opus-case-budget-usd 3 " in commands[0]
+    assert "--reps" not in commands[0] and "--total-cap-usd" not in commands[0]
+
+
+def counting_claude(tmp_path):
+    """A stand-in that records every start."""
+    claude = tmp_path / "counting-claude"
+    claude.write_text(f"#!/bin/sh\necho started >> '{tmp_path / 'cli-starts'}'\necho '2.1.332 (Claude Code)'\n")
+    claude.chmod(0o755)
+    return str(claude)
+
+
+@pytest.mark.parametrize("over", ["case_budget", "opus_budget", "ledger", "lower_cap"])
+def test_a_selection_over_the_cap_is_refused_before_any_cli_starts(operator, monkeypatch, tmp_path, over):
+    probes = probe_stub(monkeypatch)
+    started = stub(monkeypatch)
+    override = {"claude_bin": counting_claude(tmp_path), "ledger_path": tmp_path / "ledger.jsonl"}
+    if over == "case_budget":
+        override["case_budget_usd"] = 1.29  # 3 + 16 x 1.29 = 23.64
+    elif over == "opus_budget":
+        override["opus_case_budget_usd"] = 3.51
+    elif over == "ledger":
+        override["ledger_path"].write_text(json.dumps(
+            {"run": "r1", "case": "x", "rep": 1, "model": "sonnet", "spent_usd": 0.51, "outcome": "pass"}) + "\n")
+    else:
+        override["total_cap_usd"] = 22.99
+    before = override["ledger_path"].read_text() if override["ledger_path"].exists() else None
+    with pytest.raises(evaluation.BudgetRefusal):
+        real_suite(tmp_path, **override)
+    assert not (tmp_path / "cli-starts").exists() and probes == [] and started == []
+    assert (override["ledger_path"].read_text() if override["ledger_path"].exists() else None) == before
+
+
+def test_the_pre_start_reservation_leaves_the_re_run_list_out(operator, monkeypatch, tmp_path):
+    probe_stub(monkeypatch)
+    started = stub(monkeypatch)
+    ledger = tmp_path / "ledger.jsonl"  # 0.50 spent + 23.00 reserved is exactly the cap; with the re-run list, over it
+    ledger.write_text(json.dumps(
+        {"run": "r1", "case": "x", "rep": 1, "model": "sonnet", "spent_usd": 0.5, "outcome": "pass"}) + "\n")
+    real_suite(tmp_path, claude_bin=counting_claude(tmp_path), ledger_path=ledger)
+    assert (tmp_path / "cli-starts").exists() and started == full_order()
+
+
+def reservations(path):
+    return [(row["case"], row["spent_usd"]) for line in path.read_text().splitlines()
+            if (row := json.loads(line))["outcome"] == "reserved"]
+
+
+def test_the_re_run_list_runs_when_it_fits_what_is_left(operator, monkeypatch, tmp_path):
+    probe_stub(monkeypatch)
+    started = stub(monkeypatch, costs={"sonnet": 0.5, "opus": 1.0})
+    ledger = tmp_path / "ledger.jsonl"
+    result, _ = real_suite(tmp_path, ledger_path=ledger, selected=runnable())  # nothing is not_runnable
+    assert started == full_order() and result["outcome"] == "pass"
+    assert reservations(ledger)[-2:] == [(case, 1.25) for case in RERUN]
+    assert result["ledger_spent_usd"] == 10.0  # 1.00 + 18 x 0.50
+
+
+@pytest.mark.parametrize("opus_cost, fitted", [(3.0, 0), (2.0, 1)])
+def test_a_re_run_case_that_does_not_fit_is_skipped_not_failed(operator, monkeypatch, tmp_path, opus_cost, fitted):
+    probe_stub(monkeypatch)
+    started = stub(monkeypatch, costs={"sonnet": 1.25, "opus": opus_cost})  # the main selection spends opus + 20.00
+    ledger = tmp_path / "ledger.jsonl"
+    result, path = real_suite(tmp_path, ledger_path=ledger, selected=runnable())
+    assert started == full_order()[:len(full_order()) - len(RERUN) + fitted]
+    assert blocked(result, "over_cap") == dict.fromkeys(RERUN[fitted:], "skipped")
+    assert result["outcome"] == "incomplete" and result["aborted"] is None
+    assert "fail" not in result["counts"] and "error" not in result["counts"]
+    assert result["ledger_spent_usd"] == opus_cost + 20.0 + 1.25 * fitted <= CEILING_USD
+    assert [case for case, _ in reservations(ledger) if case in RERUN] == RERUN[:fitted]
+    saved = [row for row in json.loads(path.read_text())["rows"] if row["outcome"] == "skipped"]
+    assert saved and all("total cap" in row["reason"] for row in saved)  # the shared report keeps why
 
 
 # --- The launch check -------------------------------------------------------------------------------------------
@@ -718,8 +889,9 @@ def test_fake_run_passes_both_stages_and_a_readback_mismatch_aborts_it(operator,
     selected = [cases.BY_ID[name] for name in ("foreign_task_refused", "direct_edit_brief", "readonly_resume")]
     result, path = suite(tmp_path, admin_url=DSN, selected=selected)
     assert not (operator / ".cache").exists()  # every cache of the run went under its own root, looper-edit's too
-    assert [(row["case"], row["outcome"]) for row in result["rows"]] == [
-        ("direct_edit_brief", "pass"), ("readonly_resume", "pass"), ("foreign_task_refused", "pass")], result["rows"]
+    assert [(row["case"], row["rep"], row["outcome"]) for row in result["rows"]] == [
+        ("direct_edit_brief", 1, "pass"), ("readonly_resume", 1, "pass"), ("foreign_task_refused", 1, "pass"),
+        ("foreign_task_refused", 2, "pass")], result["rows"]
     assert result["rows"][0]["verified_direct_launches"] >= 1
     assert result["operator_login"]["changed_during_run"] is False
     evidence = json.loads((path.parent / "direct_edit_brief-1" / "evidence.json").read_text())
