@@ -384,18 +384,25 @@ async def load() -> bool:
     """Read the stored settings at startup; a missing or unreadable value is the default (off). Answers whether
     stopping a reply is on."""
     from . import receipts_settings, status_card
+    from .browser import browser_settings
 
     global _turn_context_enabled, _timezone, _reply_language
-    stored = await db_settings.get_settings([
-        STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
-        MID_TURN_INPUT_KEY,
-        TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY, DELIVERY_ENABLED_KEY,
-        session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY, status_card.ENABLED_KEY,
-        session_routing.MAX_RESIDENT_TOTAL_KEY, session_routing.IDLE_RECLAIM_KEY,
-        receipts_settings.ENABLED_KEY,
-        *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
-        MORNING_BRIEF_ENABLED_KEY, MORNING_BRIEF_TIME_KEY, MORNING_BRIEF_CUTOFF_KEY,
-    ])
+    try:
+        stored = await db_settings.get_settings([
+            STOP_ENABLED_KEY, COMPLETION_TURNS_KEY, RESEARCH_ORDER_KEY, METRICS_ENABLED_KEY, DELIVERY_GUARD_KEY,
+            MID_TURN_INPUT_KEY,
+            TURN_CONTEXT_KEY, TIMEZONE_KEY, REPLY_LANGUAGE_KEY, OUTBOUND_ENABLED_KEY, DELIVERY_ENABLED_KEY,
+            session_routing.ROUTING_KEY, session_routing.MAX_RESIDENT_KEY, status_card.ENABLED_KEY,
+            session_routing.MAX_RESIDENT_TOTAL_KEY, session_routing.IDLE_RECLAIM_KEY,
+            receipts_settings.ENABLED_KEY,
+            browser_settings.ENABLED_KEY, browser_settings.USER_CHROME_KEY, browser_settings.DESKTOP_KEY,
+            browser_settings.RETENTION_DAYS_KEY,
+            *("channels.outbound." + key for key in OUTBOUND_DEFAULTS),
+            MORNING_BRIEF_ENABLED_KEY, MORNING_BRIEF_TIME_KEY, MORNING_BRIEF_CUTOFF_KEY,
+        ])
+    except Exception as exc:
+        browser_settings.note_unreadable(exc)
+        raise
     session_routing.apply_stored(stored)
     _turn_context_enabled = stored.get(TURN_CONTEXT_KEY) == "true"
     _timezone = stored.get(TIMEZONE_KEY)
@@ -440,6 +447,7 @@ async def load() -> bool:
     set_completion_turns(turns)
     status_card.apply_stored(stored.get(status_card.ENABLED_KEY))
     receipts_settings.apply_stored(stored.get(receipts_settings.ENABLED_KEY))
+    browser_settings.apply_stored(stored)
     return _stop_enabled
 
 
