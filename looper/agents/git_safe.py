@@ -477,9 +477,10 @@ def _refuse_ref_links(directory: str | Path, found: Inspection, args: Sequence[s
         _walked.pop(found.common, None)  # walked in full again, until a walk passes
         raise
     if full:
-        _walked[found.common] = None
-        while len(_walked) > MEMO_LIMIT:
-            _walked.pop(next(iter(_walked)), None)
+        with _memo_lock:
+            _walked[found.common] = None
+            while len(_walked) > MEMO_LIMIT:
+                _walked.pop(next(iter(_walked)))
 
 
 def _refuse_links_without_a_repository(directory: str | Path) -> None:
