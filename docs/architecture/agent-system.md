@@ -3534,7 +3534,7 @@ Every run records the prompt in `llm_records.metadata`:
   have `project_skills` (`{project_id, sha256, plugin, skills}`), which is no
   longer written;
 - `project_instructions`: `[{path, delivery, sha256?, bytes?, clipped_bytes?,
-  error?}]`, the repository's own `CLAUDE.md` and `AGENTS.md` files the run's
+  skipped?, error?}]`, the repository's own `CLAUDE.md` and `AGENTS.md` files the run's
   runtime was given (`RuntimeAdapter.instruction_files`,
   `looper/agents/runtimes/instructions.py`), each `path` from the work
   directory. The files are those in the directories from the work directory's
@@ -3544,10 +3544,17 @@ Every run records the prompt in `llm_records.metadata`:
   `CLAUDE.md`, so each runtime gets its own file and the other one where the
   project has only that, never both. `delivery` is `native` when the runtime
   reads the file itself and `injected` when Looper put its text in the
-  runtime's system prompt (omp outside a repository: the first 32 KiB, with
-  the text's `sha256`, the file's `bytes` and the `clipped_bytes`, or the
-  `error` that kept it out). A run's history shows them as the prompt layers'
-  "Instructions" row.
+  runtime's system prompt (DSH and pi always, omp outside a repository: the
+  first 32 KiB, with the text's `sha256`, the file's `bytes` and the
+  `clipped_bytes`). Looper reads an injected file only from inside the
+  repository (the work directory outside a repository;
+  `looper/agents/safe_read.py`), and follows a link only to a file with an
+  instruction file name: a link that resolves to a `CLAUDE.md` or `AGENTS.md`
+  inside it, such as `CLAUDE.md -> AGENTS.md`, is read. A file left out is
+  given to nobody and recorded with `skipped` (`outside`,
+  `not_an_instruction_file`, `symlink`, `hard_linked`, `not_regular`,
+  `too_large` or `io_error`) and the same in words as `error`.
+  A run's history shows them as the prompt layers' "Instructions" row.
 
 The same inputs give the same prompt and hash; changing the harness, the role
 prompt, the background, the knowledge index, the task or a contract changes
