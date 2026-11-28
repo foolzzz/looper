@@ -18,7 +18,9 @@ Every git command Looper runs in a task, step or worktree directory goes through
   ``check_repository`` refuses a repository whose file assigns a filter, diff or merge driver.
 * An object id means the object the repository itself holds: ``argv`` and ``environment`` turn replacement refs
   (``refs/replace``) off, and ``check_repository`` refuses a repository (or a checked-out submodule) that borrows
-  another object store (a non-empty ``objects/info/alternates`` or ``http-alternates``).
+  another object store (a non-empty ``objects/info/alternates`` or ``http-alternates``). ``environment`` also
+  turns lazy fetches off: in a partial clone, objects not yet fetched are reported missing by Looper's git calls
+  instead of being fetched.
 * ``environment`` builds the child's environment from an allowlist: the server's database credentials, tokens
   and provider keys never reach git or anything it runs.
 * ``check_repository`` refuses, with ``RepositoryRefused``, a directory whose ``.git`` points somewhere that does
@@ -80,9 +82,11 @@ CALLER_VARIABLES = frozenset({
     "GIT_OPTIONAL_LOCKS", "GIT_MERGE_AUTOEDIT", "GIT_REFLOG_ACTION", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
     "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
 })
-# Fixed: no prompt, no pager, an editor that edits nothing, no askpass, no external diff, no replacement refs.
+# Fixed: no prompt, no pager, an editor that edits nothing, no askpass, no external diff, no replacement refs, and
+# no lazy fetch (for a missing object git would read a promisor remote the repository names, through a transport
+# program its configuration chooses).
 _FIXED_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_EDITOR": "true", "GIT_ASKPASS": "true",
-              "GIT_NO_REPLACE_OBJECTS": "1"}
+              "GIT_NO_REPLACE_OBJECTS": "1", "GIT_NO_LAZY_FETCH": "1"}
 
 # An attribute line that assigns a filter, diff or merge driver (``-diff`` and ``diff`` assign none).
 _DRIVER = re.compile(r"(?:^|\s)(filter|diff|merge)=")

@@ -928,6 +928,80 @@ def test_each_replace_ref_guard_works_on_its_own(repo, guard):
     assert "first" in shown and "substituted" not in shown
 
 
+# --- A missing object is not fetched from a promisor remote ---
+
+
+def _promise_missing_blob(repo: Path, tmp_path: Path, marker: Path, config: str) -> str:
+    """Name a promisor remote in the repository's ``config`` file, with a transport program that writes the marker,
+    and delete the blob of ``a.txt``; its id."""
+    transport = tmp_path / "transport.sh"
+    transport.write_text(f'#!/bin/sh\necho "$0 $*" >> "{marker}"\nexit 1\n')
+    transport.chmod(0o755)
+    blob = plain(repo, "rev-parse", "HEAD:a.txt").stdout.strip()
+    if config == "config.worktree":
+        plain(repo, "config", "extensions.worktreeConfig", "true")
+    for key, value in (("url", str(tmp_path / "elsewhere")), ("promisor", "true"), ("uploadpack", str(transport))):
+        plain(repo, "config", "--file", str(repo / ".git" / config), f"remote.origin.{key}", value)
+    (repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+    (repo / "a.txt").write_text("two\n")
+    return blob
+
+
+@pytest.mark.parametrize("config", ["config", "config.worktree"])
+@pytest.mark.parametrize("command", [("cat-file", "-p", "BLOB"), ("show", "HEAD"), ("diff", "HEAD", "--", "a.txt"),
+                                     ("log", "-p", "-1")], ids=lambda command: command[0])
+def test_a_missing_object_is_not_fetched_from_a_promisor_remote(command, config, repo, marker, tmp_path):
+    blob = _promise_missing_blob(repo, tmp_path, marker, config)
+    command = tuple(blob if part == "BLOB" else part for part in command)
+    plain(repo, *command, check=False)
+    assert fired(marker), "positive control: ordinary git runs the transport to fetch the object"
+    marker.unlink()
+    done = safe(repo, *command)
+    assert fired(marker) == []
+    assert done.returncode != 0, done.stdout
+
+    async def go() -> int:
+        process = await git_safe.spawn(repo, *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await process.communicate()
+        return process.returncode
+
+    assert asyncio.run(go()) != 0
+    assert fired(marker) == []
+
+
+def test_every_git_call_refuses_lazy_fetches(repo, tmp_path, monkeypatch):
+    _submodule(tmp_path, repo)
+    monkeypatch.setenv("GIT_NO_LAZY_FETCH", "0")  # the server's own value does not reach git
+    seen: list[tuple[list[str], dict[str, str] | None]] = []
+    real_run, real_exec = subprocess.run, asyncio.create_subprocess_exec
+
+    def run(command, *args, **kwargs):
+        seen.append((list(command), kwargs.get("env")))
+        return real_run(command, *args, **kwargs)
+
+    async def execute(*command, **kwargs):
+        seen.append((list(command), kwargs.get("env")))
+        return await real_exec(*command, **kwargs)
+
+    monkeypatch.setattr(git_safe.subprocess, "run", run)
+    monkeypatch.setattr(git_safe.asyncio, "create_subprocess_exec", execute)
+
+    async def go() -> None:
+        process = await git_safe.spawn(repo, "rev-parse", "HEAD", stdout=asyncio.subprocess.PIPE)
+        await process.communicate()
+        await git_safe.recheck_async(process)
+
+    safe(repo, "status", "--porcelain", check=True)
+    git_safe._memo.clear()
+    asyncio.run(go())
+    git_safe.run(None, "--version", capture_output=True, check=True, timeout=30)
+    subcommands = {word for command, _ in seen for word in command}
+    assert {"rev-parse", "config", "ls-files", "status", "--version"} <= subcommands
+    assert [command for command, env in seen if (env or {}).get("GIT_NO_LAZY_FETCH") != "1"] == []
+    with pytest.raises(ValueError):
+        git_safe.environment({"GIT_NO_LAZY_FETCH": "0"})
+
+
 # --- No direct git call in looper/ outside the places listed here ---
 
 # A file may run git directly only for a directory Looper owns the content of (its own checkout, a clone it just
