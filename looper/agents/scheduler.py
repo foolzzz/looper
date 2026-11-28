@@ -474,6 +474,8 @@ class Scheduler:
         self._adopted: set[str] = set()
         # Gates and messages under way; stopping cancels them.
         self._background: set[asyncio.Task[Any]] = set()
+        # The one notice-retry task. The loop does not wait for it.
+        self._notice_retries: asyncio.Task[Any] | None = None
         self._drain = drain
         self._starting = 0
         self._gates = 0
@@ -582,19 +584,51 @@ class Scheduler:
         }
 
     async def idle(self) -> None:
-        """Wait for the gates and messages under way, and those they start, then send notice retries that are due.
+        """Wait for the gates and messages under way, and those they start.
 
-        The retry is after that wait so a recovery spawned by this pass can name an alert before the alert is sent
-        again. The scheduler loop also retries after each tick; a second pass claims nothing the first one took.
+        When this scheduler sends notices, also send the retries that are due, after that wait, so a recovery
+        spawned by this pass can name an alert before the alert is sent again. A scheduler with no sender (a
+        message backup and nothing else) does not query the database for this. The running loop does not wait:
+        it keeps one retry task in the background.
         """
         while self._background:
             await asyncio.gather(*list(self._background), return_exceptions=True)
+        if self._notifier._sender is None:
+            return
         await self._retry_notices()
 
+    def _notice_retries_paused(self) -> bool:
+        return self._drain is not None and self._drain.draining
+
     async def _retry_notices(self) -> None:
-        if self._drain is not None and self._drain.draining:
+        if self._notice_retries_paused():
             return
-        await self._notifier.retry_due(self._clock())
+        await self._notifier.retry_due(self._clock(), paused=self._notice_retries_paused)
+
+    def _kick_notice_retries(self) -> None:
+        """Start the one background retry pass. A pass already running is left to finish."""
+        if self._notifier._sender is None:
+            return
+        current = self._notice_retries
+        if current is not None and not current.done():
+            return
+        task = asyncio.create_task(self._retry_notices_background())
+        self._notice_retries = task
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        task.add_done_callback(self._forget_notice_retries)
+
+    async def _retry_notices_background(self) -> None:
+        try:
+            await self._retry_notices()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("scheduler notice retries failed")
+
+    def _forget_notice_retries(self, task: asyncio.Task[Any]) -> None:
+        if self._notice_retries is task:
+            self._notice_retries = None
 
     def _spawn(self, job: Any, *, gate: bool = False) -> None:
         task = asyncio.ensure_future(job)
@@ -613,7 +647,8 @@ class Scheduler:
             try:
                 await self.tick()
                 self._last_tick_at = self._last_ok_tick_at = self._clock()
-                await self._retry_notices()
+                # Waiting here would let one stuck send stop the ticks.
+                self._kick_notice_retries()
             except asyncio.CancelledError:
                 raise
             except Exception:

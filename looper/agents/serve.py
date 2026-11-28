@@ -1020,7 +1020,7 @@ async def _run_agent_system_watched(
             drain = DrainState()  # A new control plane always starts serving; drain is never stored.
             admission.configure_drain(lambda: drain.draining)
             drain.add_waker(lambda: asyncio.create_task(admission.wake()))
-            scheduler = Scheduler(bus=bus, sender=registry.notify, dashboard_url=dashboard_url,
+            scheduler = Scheduler(bus=bus, sender=registry.notify_outcome, dashboard_url=dashboard_url,
                                   runtime_root=runtime_root, drain=drain, poster=registry.post,
                                   claude_bin=claude_bin, own_apps=own_bot_app_ids,
                                   message_backup=db_backup.message_backup_for(ops, runtime_root))

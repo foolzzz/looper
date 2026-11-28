@@ -14,18 +14,30 @@ import asyncpg
 Db = asyncpg.Pool | asyncpg.Connection
 
 _TERMINAL = ("sent", "uncertain", "gave_up")
-_UNREPORTED = ("pending", "gave_up", "uncertain")
+# Alerts a recovery may still have to tell the chat about. ``sending`` counts: the recovery can be written while
+# the alert is in flight. ``sent`` does not: that try was delivered.
+_UNREPORTED = ("pending", "sending", "gave_up", "uncertain")
 
 
 async def held(conn: Db, schedule_id: str, kind: str, run_key: str) -> str | None:
-    """``sent`` or ``failed`` when this notice must not be sent again, else None (send, or re-arm a later streak)."""
+    """``sent`` when a run notice was delivered, ``failed`` when it must not be sent, else None.
+
+    A run notice still ``pending`` is None: its completion replay sends it again. ``sending``, ``uncertain`` and
+    ``gave_up`` are ``failed``. Any other kind may re-arm a terminal row for a later streak.
+    """
     row = await conn.fetchrow(
         "SELECT state FROM schedule_notice_retries WHERE schedule_id = $1 AND kind = $2 AND run_key = $3",
         schedule_id, kind, run_key)
     if row is None:
         return None
-    if row["state"] in ("pending", "sending") or kind == "run":
-        return "sent" if row["state"] == "sent" else "failed"
+    if kind == "run":
+        if row["state"] == "sent":
+            return "sent"
+        if row["state"] == "pending":
+            return None
+        return "failed"
+    if row["state"] in ("pending", "sending"):
+        return "failed"
     return None
 
 
@@ -39,8 +51,16 @@ async def begin_send(conn: Db, *, schedule_id: str, kind: str, run_id: str | Non
         "chat, failures, summary_of, created_at, updated_at) VALUES ($1, $2, $3, $4, 'sending', 0, $5, $6, $7, $8, "
         "$9::bigint[], $10, $10) ON CONFLICT (schedule_id, kind, run_key) DO NOTHING RETURNING *",
         schedule_id, kind, run_id, run_key, text, channel, chat, failures, summary_of, now)
-    if row is not None or kind == "run":
+    if row is not None:
         return row
+    if kind == "run":
+        # The completion replay of a refused run. The attempt count and the clock stay, so the retry budget does not
+        # move; a row that is already uncertain, gave up, or in flight is left alone.
+        return await conn.fetchrow(
+            "UPDATE schedule_notice_retries SET state = 'sending', next_attempt_at = NULL, error = NULL, "
+            "text = $4, channel = $5, chat = $6, updated_at = $7 "
+            "WHERE schedule_id = $1 AND kind = $2 AND run_key = $3 AND state = 'pending' RETURNING *",
+            schedule_id, kind, run_key, text, channel, chat, now)
     return await conn.fetchrow(
         "UPDATE schedule_notice_retries SET state = 'sending', retries = 0, next_attempt_at = NULL, error = NULL, "
         "text = $4, channel = $5, chat = $6, failures = $7, summary_of = $8::bigint[], run_id = $9, "
@@ -77,6 +97,35 @@ async def settle(conn: Db, retry_id: int, *, state: str, error: str | None, next
 
 async def delete_retry(conn: Db, retry_id: int) -> None:
     await conn.execute("DELETE FROM schedule_notice_retries WHERE id = $1", retry_id)
+
+
+async def note_failure_count(conn: Db, schedule_id: str, failures: int) -> None:
+    """The open failure alert's count is the streak at the latest failure, not the count when it was opened."""
+    await conn.execute(
+        "UPDATE schedule_notice_retries SET failures = $2 "
+        "WHERE schedule_id = $1 AND kind = 'failures_alert' AND reported_at IS NULL "
+        "AND state = ANY($3::text[]) AND (failures IS NULL OR failures < $2)",
+        schedule_id, failures, list(_UNREPORTED))
+
+
+async def named_in_recovery(conn: Db, alert_id: int) -> bool:
+    """Whether a recovery already names this alert, so a later refusal is not queued again.
+
+    A recovery that was delivered is deleted, and the alert's ``reported_at`` is what remains. A recovery that is
+    still only written keeps the id in ``summary_of``.
+    """
+    if await conn.fetchval("SELECT reported_at IS NOT NULL FROM schedule_notice_retries WHERE id = $1", alert_id):
+        return True
+    return await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM schedule_notice_retries "
+        "WHERE kind = 'failures_recovered' AND summary_of @> ARRAY[$1]::bigint[])", alert_id) is True
+
+
+async def settle_if_sending(conn: Db, retry_id: int, *, state: str, error: str, now: datetime) -> bool:
+    """Settle a claim that is still ``sending``. False when that send already finished."""
+    return await conn.fetchrow(
+        "UPDATE schedule_notice_retries SET state = $2, next_attempt_at = NULL, error = $3, updated_at = $4 "
+        "WHERE id = $1 AND state = 'sending' RETURNING id", retry_id, state, error, now) is not None
 
 
 async def drop_pending_recoveries(conn: Db, schedule_id: str, now: datetime) -> None:

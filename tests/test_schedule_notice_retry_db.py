@@ -305,14 +305,15 @@ def test_two_passes_at_once_claim_a_retry_once(monkeypatch: pytest.MonkeyPatch, 
     run_scheduled(test, monkeypatch, tmp_path)
 
 
-def test_a_run_reported_twice_keeps_one_retry_and_sends_nothing_more(monkeypatch: pytest.MonkeyPatch,
-                                                                     tmp_path: Path) -> None:
+def test_a_refused_run_notice_is_replayed_and_a_second_run_is_its_own(monkeypatch: pytest.MonkeyPatch,
+                                                                      tmp_path: Path) -> None:
+    """A completion replay of a run whose send was refused sends again. One row stays. A second run is its own."""
     async def test(env: ScheduleEnv) -> None:
         sid, channel = await _setup(env, "rejected", notify="failures", alert_failures_after=10)
         run = await _fire(env, sid)
         await env.scheduler._notifier.run_ended(run["run_id"])
         [row] = await _retries(env, "run")
-        assert (row["state"], row["run_id"], len(channel.attempts)) == ("pending", run["run_id"], 1)
+        assert (row["state"], row["run_id"], len(channel.attempts)) == ("pending", run["run_id"], 2)
         # A second failed run is a notice of its own.
         await _fire(env, sid)
         assert len(await _retries(env, "run")) == 2
@@ -415,5 +416,176 @@ def test_old_settled_retries_are_pruned_with_the_outbox(monkeypatch: pytest.Monk
         async with env.pool.acquire() as conn:
             await db_schedules.prune_notifications(conn, env.clock.now + timedelta(days=1))
         assert [row["id"] for row in await _retries(env, "run")] == [second["id"]]  # a pending one is kept
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_sent_retry_is_not_named_by_the_recovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A later successful try stays ``sent``. The recovery does not call that alert undelivered."""
+    async def test(env: ScheduleEnv) -> None:
+        sid, channel = await _setup(env)
+        channel.script = ["rejected"]
+        await _fire(env, sid)
+        await _pass(env, sid, 2)
+        [row] = await _retries(env)
+        assert row["state"] == "sent" and row["retries"] == 1
+        await _recover(env, sid)
+        assert "补充" not in channel.got[-1]
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_the_summary_counts_failures_at_the_latest_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        sid, channel = await _setup(env, "rejected")
+        await _fire(env, sid)
+        await _fire(env, sid)
+        [row] = await _retries(env)
+        assert row["failures"] == 2 and row["state"] == "pending"
+        channel.default = "sent"
+        await _recover(env, sid)
+        assert "涉及连续 2 次运行" in channel.got[-1]
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_a_successful_run_retry_marks_the_completion_event_sent(monkeypatch: pytest.MonkeyPatch,
+                                                               tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.db import schedules as db_schedules
+
+        with_sender(env)
+        channel = _channel(env, Channel("rejected"))
+        await allow_telegram(env)
+        schedule = await env.schedule(notify="always", notify_target=TARGET)
+        run_id = await env.scheduler.run_now(schedule["schedule_id"])
+        task_id = (await db_schedules.get_run(run_id))["task_id"]
+        await env.end_task(task_id, "completed", summary="done")
+        await env.scheduler.idle()
+        event = await env.pool.fetchrow(
+            "SELECT sent_at FROM manager_events WHERE dedupe_key = $1", f"schedule_run:{run_id}")
+        assert event is not None and event["sent_at"] is None
+        [row] = await _retries(env, "run")
+        assert row["state"] == "pending"
+        channel.default = "sent"
+        # The schedule is not enabled, so its next fire stays unset. Advance the clock and retry.
+        env.clock.now += timedelta(minutes=2)
+        await env.scheduler.idle()
+        sent_at = await env.pool.fetchval(
+            "SELECT sent_at FROM manager_events WHERE dedupe_key = $1", f"schedule_run:{run_id}")
+        assert sent_at is not None
+        delivered = len(channel.got)
+        await env.scheduler._notifier.run_ended(run_id)
+        assert len(channel.got) == delivered
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize("answer", ["pending-in-outbox", "unknown"])
+def test_telegram_outbox_unknown_is_not_sent_again(answer: str, monkeypatch: pytest.MonkeyPatch,
+                                                   tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents import chat_settings
+        from looper.agents.channels.base import PostOutcome, PostReceipt
+        from looper.agents.channels.registry import ChannelRegistry
+        from looper.agents.channels.telegram import TelegramChannelAdapter
+        from looper.agents.message import builtin_channel_id
+
+        monkeypatch.setattr(chat_settings, "_outbound_enabled", True)
+        sends: list[str] = []
+
+        class Outbox:
+            async def send(self, kind, chat, body, reply_to, key, source, **kw):
+                sends.append(key)
+                error = "outbound delivery is still pending" if answer == "pending-in-outbox" else "lost answer"
+                return PostReceipt(False, outcome=PostOutcome.UNKNOWN, error=error)
+
+        adapter = TelegramChannelAdapter.__new__(TelegramChannelAdapter)
+        adapter._app, adapter._bus, adapter._channel_outbox = object(), None, Outbox()
+        adapter._channel_id = builtin_channel_id("telegram")
+        registry = ChannelRegistry.__new__(ChannelRegistry)
+        registry._channels = {builtin_channel_id("telegram"): adapter}
+        registry.record_delivery = lambda *a: None
+        sid, _ = await _setup(env)
+        env.scheduler._notifier._sender = registry.notify_outcome
+        await _fire(env, sid)
+        for minutes in (1, 5, 15, 30):
+            await _pass(env, sid, minutes)
+        [row] = await _retries(env)
+        assert (len(sends), row["state"]) == (1, "uncertain")
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_alert_in_flight_when_the_recovery_is_written(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        sid, channel = await _setup(env)
+        channel.script = ["rejected"]
+        await _fire(env, sid)
+        entered, release = asyncio.Event(), asyncio.Event()
+        plain = env.scheduler._notifier._sender
+
+        async def slow(chan: str, chat: str, text: str) -> Any:
+            if text.startswith("告警") and not release.is_set():
+                entered.set()
+                await release.wait()
+                channel.script = ["rejected"]
+            return await plain(chan, chat, text)
+
+        env.scheduler._notifier._sender = slow
+        env.clock.now += timedelta(minutes=1)
+        retry = asyncio.create_task(env.scheduler._notifier.retry_due(env.clock.now))
+        await asyncio.wait_for(entered.wait(), 10)
+        await env.ok("POST", "/api/v1/schedule_admin/update", {"schedule_id": sid, "fields": {"gate_command": "true"}})
+        await env.due(sid)
+        await env.scheduler.tick()
+        while env.scheduler._background:
+            await asyncio.gather(*list(env.scheduler._background))
+        release.set()
+        await retry
+        for minutes in (5, 15, 30):
+            await _pass(env, sid, minutes)
+        assert channel.got and ("没有送达" in channel.got[0]) and not any(text.startswith("告警") for text in channel.got)
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_schedule_deleted_before_the_claim(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        from looper.agents.schedule_notify import Kind
+        from looper.db import schedules as db_schedules
+
+        sid, _ = await _setup(env)
+        schedule = await db_schedules.get_schedule(sid)
+        await env.pool.execute("DELETE FROM schedules WHERE id = $1", sid)
+        await env.scheduler._notifier._deliver(schedule, Kind.STALE_ALERT, "告警：x")
+
+    run_scheduled(test, monkeypatch, tmp_path)
+
+
+def test_retries_do_not_hold_the_scheduler_loop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test(env: ScheduleEnv) -> None:
+        sid, channel = await _setup(env)
+        channel.script = ["rejected"]
+        await _fire(env, sid)
+        env.clock.now += timedelta(minutes=2)
+        ticks: list[int] = []
+        gate = asyncio.Event()
+
+        async def hang(*_args: Any, **_kwargs: Any) -> Any:
+            await gate.wait()
+            return True, None
+
+        async def tick() -> None:
+            ticks.append(1)
+
+        env.scheduler._notifier._sender = hang
+        env.scheduler._tick_seconds = 0.01
+        monkeypatch.setattr(env.scheduler, "tick", tick)
+        loop = asyncio.create_task(env.scheduler._loop())
+        await asyncio.sleep(1)
+        loop.cancel()
+        await asyncio.gather(loop, return_exceptions=True)
+        assert len(ticks) > 1
 
     run_scheduled(test, monkeypatch, tmp_path)

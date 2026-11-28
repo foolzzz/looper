@@ -89,13 +89,18 @@ class NotifyAnswer:
         return f"NotifyAnswer({self.outcome.value}, error={self._pair[1]!r})"
 
 
-def notice_answer(success: bool, error: str | None, outcome: PostOutcome | None) -> NotifyAnswer:
-    """A channel ``notify`` result. A failure that names no outcome never left, so it is ``REJECTED`` and may be
-    retried. :meth:`DeliveryReceipt.result` would call that ``UNKNOWN`` and the notice would never be tried again."""
+def notice_answer(success: bool, error: str | None, outcome: PostOutcome | None, *,
+                  sent_any: bool = False) -> NotifyAnswer:
+    """How a schedule retry reads a channel send.
+
+    A missing outcome, or any part that already left, may have been accepted: ``UNKNOWN``, and it is not asked
+    again. Only an explicit refusal before anything was sent is ``REJECTED`` and may be retried. ``notify`` itself
+    stays a ``(sent, error)`` pair; the schedule path is the caller of this.
+    """
     if success:
         return NotifyAnswer(PostOutcome.SENT)
-    if outcome is None or outcome is PostOutcome.SENT:
-        return NotifyAnswer(PostOutcome.REJECTED, error)
+    if sent_any or outcome is None or outcome is PostOutcome.SENT:
+        return NotifyAnswer(PostOutcome.UNKNOWN, error)
     return NotifyAnswer(outcome, error)
 
 
