@@ -23,7 +23,8 @@ changed, or changes nothing. When the chains cannot be known, the report says so
 change is still listed, told apart by what Looper's own read of the ref files shows (``Snapshot.spelled``).
 
 Snapshots cannot tell which of two turns on one repository changed a ref, so a turn whose time overlapped another
-task's turn there gets no command at all (``open_turn``, ``close_turn``).
+task's turn there gets no command at all (``open_turn``, ``close_turn``). Nor does any ref that shares a command with a
+change to another unfinished task's branch: following a command Looper gives never writes that branch.
 """
 from __future__ import annotations
 
@@ -105,7 +106,8 @@ class NotRestorable(str, Enum):
     CHAIN_OUTSIDE_REFS = "chain_outside_refs"  # a hop outside ``refs/``, such as ``HEAD``: Looper never writes those
     CHAIN_UNREADABLE = "chain_unreadable"  # git could not read a hop of the chain
     REF_FILE_UNREADABLE = "ref_file_unreadable"  # Looper refused a ref file or directory the ref is read from
-    OVERLAPPING_TURN = "overlapping_turn"  # another task's turn on this repository ran meanwhile; it may be its change
+    # It may be another task's work: its turn on this repository ran meanwhile, or the command would write its branch.
+    OVERLAPPING_TURN = "overlapping_turn"
     OTHER_TASK_BRANCH = "other_task_branch"  # information only: another unfinished task's branch, a command would undo it
 
 
@@ -911,18 +913,13 @@ async def compare(work_dir: str | Path, before: Snapshot, after: Snapshot, *, ta
     if before.window is not None and before.window.overlapped:
         # Any of these changes may be the other turn's: a command would undo it.
         commands = [(None, why or NotRestorable.OVERLAPPING_TURN) for _, why in commands]
-    done = [replace(entry, restore=command, not_restorable=why)
-            for (entry, _, _), (command, why) in zip(entries, commands)]
-    # An information entry whose command also restores a change is listed with the changes.
-    shared = {change.restore for change, (_, _, informs) in zip(done, entries) if not informs and change.restore}
+    # A command that would write another unfinished task's branch is offered to nothing that shares it.
+    theirs = {command for (command, _), (_, _, informs) in zip(commands, entries) if informs and command}
     changes, info = [], []
-    for change, (_, _, informs) in zip(done, entries):
-        if informs and change.restore not in shared:
-            # Another task is at work on it: a command of its own is not offered.
-            info.append(replace(change, restore=None,
-                                not_restorable=change.not_restorable or NotRestorable.OTHER_TASK_BRANCH))
-        else:
-            changes.append(change)
+    for (entry, _, informs), (command, why) in zip(entries, commands):
+        if command in theirs:
+            command, why = None, NotRestorable.OTHER_TASK_BRANCH if informs else NotRestorable.OVERLAPPING_TURN
+        (info if informs else changes).append(replace(entry, restore=command, not_restorable=why))
     return Report(tuple(changes), tuple(info), before.head, after.head, own_commits, needs_you)
 
 

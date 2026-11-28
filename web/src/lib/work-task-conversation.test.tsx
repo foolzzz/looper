@@ -348,7 +348,7 @@ describe("task conversation", () => {
     expect(report.textContent).toContain("不能说它被重置过");
     expect(report.textContent).toContain("refs/heads/dir 没有读取，是否变化未知");
     expect(report.textContent).toContain("Looper 没有读它");
-    expect(report.textContent).toContain("同一仓库里另一个任务的管家回合和本轮时间重叠");
+    expect(report.textContent).toContain("可能涉及另一个任务的改动（它的管家回合和本轮时间重叠");
     expect(report.textContent).not.toMatch(/refs\/heads\/big 被改写/);
     expect(report.textContent).toContain("reset --hard、rebase 或 commit --amend");
     expect(report.textContent).toContain("属于另一个 Looper 任务");

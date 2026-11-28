@@ -514,6 +514,14 @@ def _run(repo, command: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=30)
 
 
+def _assert_tied_to_another_task(report, target: str) -> None:
+    """A command for the task branch would write the other task's branch it is linked to: neither gets one."""
+    assert [(c.ref, c.restore, c.not_restorable) for c in report.changes] == [
+        ("refs/heads/main", None, refs.NotRestorable.OVERLAPPING_TURN)]
+    assert [(c.ref, c.restore, c.not_restorable) for c in report.info] == [
+        (target, None, refs.NotRestorable.OTHER_TASK_BRANCH)]
+
+
 @pytest.mark.parametrize("target", ["refs/heads/a-fresh", "refs/heads/z-fresh", "refs/heads/other",
                                     "refs/heads/looper/task-two/step"])  # created before or after main, moved, info
 def test_a_task_branch_turned_into_a_link_to_a_compared_branch_is_reported_and_restored_first(repo, target):
@@ -531,10 +539,13 @@ def test_a_task_branch_turned_into_a_link_to_a_compared_branch_is_reported_and_r
     tip = git(repo, "rev-parse", target)
     link = report.changes[0]
     assert link.ref == "refs/heads/main" and link.change is Change.MOVED and link.new == tip
+    assert report.own_commits == 1
+    if target.startswith("refs/heads/looper/"):
+        _assert_tied_to_another_task(report, target)
+        return
     # Both entries are tied by the link: one command, listed under each, so none is left as information.
     assert [c.ref for c in report.changes] == ["refs/heads/main", target] and report.info == ()
     assert len({c.restore for c in report.changes}) == 1
-    assert report.own_commits == 1
     _apply_in_order(repo, report)
     after = asyncio.run(refs.snapshot(repo))
     assert after.symrefs == {} and after.refs["refs/heads/main"] == tip
@@ -635,6 +646,9 @@ def test_a_reset_on_a_task_branch_already_linked_to_a_compared_ref_is_a_rewrite(
     assert change.ref == "refs/heads/main" and change.change is Change.NON_FAST_FORWARD
     assert (change.old, change.new) == (tip, first) and report.own_commits == 0
     assert [c.ref for c in (*report.changes, *report.info)] == ["refs/heads/main", target]  # the target once
+    if target.startswith("refs/heads/looper/"):
+        _assert_tied_to_another_task(report, target)
+        return
     _apply_in_order(repo, report)
     assert asyncio.run(refs.snapshot(repo)) == before
 
@@ -858,7 +872,7 @@ def test_a_command_that_checks_the_task_branch_keeps_the_commits_of_the_turn(rep
     (True, "refs/heads/leaf"),  # or moves it back
     (False, "refs/hidden/mid"),  # a hop outside the compared refs
 ])
-def test_another_tasks_link_that_shares_a_command_with_a_change_is_listed_with_the_changes(repo, leaf_existed, through):
+def test_a_chain_that_ties_a_change_to_another_tasks_branch_gets_no_command(repo, leaf_existed, through):
     commit(repo, "b.txt")
     git(repo, "checkout", "-q", "other")
     step = "refs/heads/looper/task-two/step"
@@ -875,23 +889,24 @@ def test_another_tasks_link_that_shares_a_command_with_a_change_is_listed_with_t
         git(repo, "symbolic-ref", step, through)
         git(repo, "symbolic-ref", "refs/heads/a-outer", step)
         git(repo, "update-ref", "refs/heads/looper/task-two/bystander", "refs/heads/main~1")
+        git(repo, "branch", "apart", "refs/heads/main")  # no chain ties this one to another task's branch
 
     async def active(_: str) -> bool:
         return True
 
     report = run(repo, go, active=active, branch="other")
-    assert [c.ref for c in report.changes] == ["refs/heads/a-outer", "refs/heads/leaf", step]
-    assert [c.ref for c in report.info] == ["refs/heads/looper/task-two/bystander"]
-    assert report.info[0].restore is None and report.info[0].not_restorable is refs.NotRestorable.OTHER_TASK_BRANCH
+    assert [c.ref for c in report.changes] == ["refs/heads/a-outer", "refs/heads/apart", "refs/heads/leaf"]
+    tied = [c for c in report.changes if c.ref != "refs/heads/apart"]
+    assert [(c.restore, c.not_restorable) for c in tied] == [(None, refs.NotRestorable.OVERLAPPING_TURN)] * 2
+    assert [c.ref for c in report.info] == ["refs/heads/looper/task-two/bystander", step]
+    assert [(c.restore, c.not_restorable) for c in report.info] == [(None, refs.NotRestorable.OTHER_TASK_BRANCH)] * 2
     assert report.needs_you
-    _apply_in_order(repo, report)
-    # No command was offered for the other task's own branch: it stays as the turn left it.
-    bystander = "refs/heads/looper/task-two/bystander"
-    assert _stored(repo)[bystander] != before[bystander]
-    before[bystander] = _stored(repo)[bystander]
-    if through != "refs/heads/leaf":  # the turn made this ref outside: it is checked, not removed
-        assert _stored(repo).pop(through) == ("ref", "refs/heads/leaf")
-    assert {k: v for k, v in _stored(repo).items() if k != "refs/hidden/mid"} == before
+    # Following every command the report gives touches nothing of the other task's chain.
+    left = _stored(repo)
+    commands = [c.restore for c in (*report.changes, *report.info) if c.restore]
+    assert len(commands) == 1 and _run(repo, commands[0]).returncode == 0
+    del left["refs/heads/apart"]
+    assert _stored(repo) == left and left != before
 
 
 def test_moving_the_commit_in_another_tasks_link_alone_does_not_need_you(repo):

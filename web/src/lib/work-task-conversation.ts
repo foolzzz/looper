@@ -234,7 +234,7 @@ const NOT_RESTORABLE_TEXT: Record<(typeof NOT_RESTORABLE)[number], string> = {
   chain_outside_refs: "引用链经过 refs/ 之外的名字（例如 HEAD），Looper 不改写它",
   chain_unreadable: "git 读不出引用链中的某一跳",
   ref_file_unreadable: "它要读的引用文件或目录是指向别处的链接、不是独立的普通文件、过大或读取失败，Looper 没有读它",
-  overlapping_turn: "同一仓库里另一个任务的管家回合和本轮时间重叠，分不清是谁改的，恢复可能撤掉对方的改动",
+  overlapping_turn: "可能涉及另一个任务的改动（它的管家回合和本轮时间重叠，或恢复命令会改到它仍在用的分支），恢复可能撤掉那个任务的改动",
   other_task_branch: "它是另一个仍未结束的任务的分支，恢复可能撤掉那个任务的改动",
 };
 const SKIP_REASONS: Record<string, string> = {
