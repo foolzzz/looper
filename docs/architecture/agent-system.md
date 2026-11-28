@@ -4510,6 +4510,15 @@ the [step workspaces RFC](rfcs/step-workdir-isolation-v0.zh-CN.md)):
   `tests/test_git_safe.py` fails on a direct `git` call elsewhere
   in `looper/`, except for Looper's own checkout, a fresh clone, and the
   knowledge vault, each listed there with its reason.
+- **Git's output stays inside.** Git's messages can quote file content that
+  Looper does not control. A git command that
+  fails in a task, step or worktree directory, or in a repository a project move
+  repairs, is reported only as its subcommand and exit code
+  (`git_safe.GitFailure`, for example `git_failed:merge-tree (exit 128)`): in
+  errors, a step workspace's `detail`, activity, review gates, the Planner's
+  messages, the reported-files check, API answers and the service log. None of
+  git's stderr or stdout goes with it. A successful project move repair reports
+  an empty `output`. To see what git said, run the command in the repository.
 - **Kept and removed.** A step that a replan drops, from a decision or a change
   to the task, loses its worktree and branch at once. A completed task's
   worktrees and branches are removed.

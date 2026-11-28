@@ -120,7 +120,7 @@ step_workspaces                      一个隔离步骤的一个工作区
   | `local_changes` | 任务目录里的未提交改动或未跟踪文件挡住了 `--ff-only`，`detail` 是这些文件 |
   | `branch_changed` | 任务目录不再检出 B、B 不再包含 S（被重置或变基），或重算三次后 B 仍在被别人移动 |
   | `step_branch_changed` | worktree 不在步骤分支上，或 S 不是 W 的祖先（Worker 改写了步骤分支） |
-  | `git_failed` | 其他 git 错误（锁被占用、超时），`detail` 是 git 的输出 |
+  | `git_failed` | 其他 git 错误（锁被占用、超时），`detail` 是 git 子命令和退出码（`git_failed:<子命令> (exit N)`）或超时、拒绝原因，不含 git 的任何输出 |
 
 - `PlanStep` 增加 `workspace: StepWorkspace | None`；`TaskPlan` 增加 `start: {"branch", "commit"} | None`，即 R，在项目为
   `worktree` 且任务目录满足 D1 时，于派出第一个步骤前记下。两者随计划一起读写（`db.plans`），重启后由 `_resume` 读回。
