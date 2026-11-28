@@ -76,7 +76,7 @@ from .log_redaction import log_to_stderr
 from .scheduler import Scheduler
 from .message import MessageEnvelope, MessageType, TASK_ROUTER_ADDRESS, planner_address
 from .runtimes.runner.supervisor import RunnerSupervisor
-from .supervisor import AgentSupervisor
+from .supervisor import AgentSupervisor, cancel_tasks
 from .tiers import triage_background
 from .tiers.manager import ManagerConfig
 from .tiers.task import TaskRouter
@@ -687,6 +687,16 @@ async def shut_down_within(shutdown: Awaitable[None], *, deadline: float = SHUTD
         exit_now(1)
         return
     stopping.result()
+
+
+async def stop_recording_and_channel_checks(*tasks: asyncio.Task[Any] | None) -> None:
+    """Stop the recording-proxy and channel-health loops. They end before the shutdown budget starts."""
+    await cancel_tasks(tasks)
+
+
+async def stop_advisory_checks(task: asyncio.Task[Any] | None) -> None:
+    """Stop the advisory check loop. A failure other than cancellation still surfaces."""
+    await cancel_tasks([task], raise_errors=True)
 
 
 def _local_url(host: str, port: int) -> str:
@@ -1319,17 +1329,13 @@ async def _run_agent_system_watched(
         try:
             await stop_event.wait()
         finally:
-            proxy_checks.cancel()
-            channel_checks.cancel()
-            await asyncio.gather(proxy_checks, channel_checks, return_exceptions=True)
+            await stop_recording_and_channel_checks(proxy_checks, channel_checks)
 
         # --- Shutdown ---
 
         async def shut_down() -> None:
             await task_managers.shutdown()
-            advisory_checks.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await advisory_checks
+            await stop_advisory_checks(advisory_checks)
             if mode is ShutdownMode.DETACH_KEPT:
                 await worker_pool.detach_kept(epoch=lease.epoch)
                 await explorers.stop(epoch=lease.epoch)
@@ -1393,9 +1399,7 @@ async def _run_agent_system_watched(
             except Exception:
                 logger.warning("request recording proxy shutdown failed", exc_info=True)
         if advisory_checks is not None:
-            advisory_checks.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await advisory_checks
+            await stop_advisory_checks(advisory_checks)
         try:
             if recognition_service is not None:
                 await recognition_service.stop()

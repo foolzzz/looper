@@ -18,6 +18,7 @@ from ..db.intents import IntentRefused
 from . import cron, extraction, intents, leads_model, model_call, processor, reminders, subscriptions
 from .agent_settings import AgentType
 from .ops import ErrorCode, OpError
+from .supervisor import cancel_tasks
 
 RECOGNIZE_MAX_EVENTS = 2000
 RECOGNIZE_MAX_USD = 1.0
@@ -177,9 +178,7 @@ class IntentRecognitions:
         self._stopping = True
         tasks = list(self._tasks)
         ids = list(self._running.values())
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await cancel_tasks(tasks)
         if ids:
             await connection.get_pool().execute("UPDATE intent_recognitions SET state='failed',finished_at=$2,"
                 "error='interrupted by a restart; run it again' WHERE id=ANY($1::bigint[]) AND state='running'",

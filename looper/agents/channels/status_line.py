@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from .. import chat_settings, turn_metrics
+from ..supervisor import cancel_tasks
 from enum import Enum
 from typing import Any
 
@@ -270,8 +271,7 @@ class Reactions:
 
     async def stop(self) -> None:
         """Cancel the calls still running; the next run logs its first failure again."""
-        for task in list(self._pending):
-            task.cancel()
-        await asyncio.gather(*self._pending, return_exceptions=True)
+        pending = list(self._pending)
+        await cancel_tasks(pending)
         self._pending.clear()
         self._failed = False

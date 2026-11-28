@@ -38,6 +38,7 @@ from ..lanes import Lane
 from ..message import MessageEnvelope, MessageType
 from ..runtimes import CLAUDE_CODE
 from ..session_routing import SessionKey, SessionKind
+from ..supervisor import cancel_tasks
 from .manager_session import MAIN_SESSION, ManagerSession, Retirement
 from ..chat_scopes import ScopeInvariantViolation, ScopeUnavailable
 
@@ -770,9 +771,7 @@ class SessionRouter:
             handle.cancel()
         self._deadlines.clear()
         workers = [*self._workers.values(), *self._expiring]
-        for worker in workers:
-            worker.cancel()
-        await asyncio.gather(*workers, return_exceptions=True)
+        await cancel_tasks(workers)
         self._workers.clear()
         self._expiring.clear()
         self._reservations.clear()

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import os
 import socket
@@ -16,6 +15,7 @@ import asyncpg
 
 from . import proc_tree
 from .loop_watch import LoopWatch
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -176,9 +176,7 @@ class ControlPlaneLease:
         if self.state in (LeaseState.HELD, LeaseState.UNCERTAIN):
             self.state = LeaseState.RELEASED
         if self._health_task is not None:
-            self._health_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._health_task
+            await cancel_tasks([self._health_task], raise_errors=True)
         try:
             await asyncio.wait_for(self._conn.close(), HEALTH_TIMEOUT_SECONDS)
         except TimeoutError:

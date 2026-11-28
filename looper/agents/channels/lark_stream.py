@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import json
 import logging
 import math
@@ -18,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosedOK, WebSocketException
 
+from ..supervisor import cancel_tasks
 from .lark_api import LarkApi
 from .lark_cli import RECEIVE_EVENT
 
@@ -425,6 +425,36 @@ class StreamStats:
     dropped: int = 0
 
 
+async def _cancel_remaining(tasks: list[asyncio.Task[Any]]) -> None:
+    """Cancel ``tasks`` and wait them out, even if this task is cancelled again while it waits.
+
+    Cleanup of the connection runs on a task that is already being cancelled, and the caller cancels it
+    again while the children are still ending. That second cancel lands on the next await and would leave
+    a child running after it dropped the first one. The wait therefore runs on its own task; cancellation
+    of this one is held back until the wait has finished. A cancel that arrived is then raised again, so
+    this task stays cancelled and does not also publish the end-of-stream sentinel.
+    """
+    current = asyncio.current_task()
+    finishing = asyncio.ensure_future(cancel_tasks(tasks))
+    cancelled = False
+    try:
+        while not finishing.done():
+            if current is not None:
+                while current.cancelling():
+                    current.uncancel()
+                    cancelled = True
+            try:
+                await asyncio.shield(finishing)
+            except asyncio.CancelledError:
+                cancelled = True
+        finishing.result()
+    finally:
+        if not finishing.done():
+            finishing.cancel()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
                         ping_interval: float | None = None,
                         admit: Callable[[dict], bool] | None = None,
@@ -554,10 +584,10 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
         except (OSError, WebSocketException, TimeoutError) as exc:
             raise ConnectionError(f"the Lark stream connection failed: {type(exc).__name__}") from None
         finally:
-            for task in (*tasks, *answering):
-                task.cancel()
-            await asyncio.gather(*tasks, *answering, return_exceptions=True)
-            logger.info("Lark stream disconnected")
+            try:
+                await _cancel_remaining([*tasks, *answering])
+            finally:
+                logger.info("Lark stream disconnected")
             if not asyncio.current_task().cancelling():
                 await events.put(None)
 
@@ -567,6 +597,4 @@ async def stream_events(api: LarkApi, *, seen: SeenEvents | None = None,
             yield event
         await connection
     finally:
-        connection.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await connection
+        await cancel_tasks([connection], raise_errors=True)

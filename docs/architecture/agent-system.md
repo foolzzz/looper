@@ -2173,11 +2173,23 @@ Every way Looper ends an agent goes through `looper/agents/proc_tree.py`:
   pool that has stopped still answers a Planner's `KILL_WORK` at once
   (`killed: false`), so a shutdown does not grow with the number of running
   steps (with 3 tasks and 12 steps it took about 1 s on the real path). A
-  stop that cancels a message loop cancels it again every `RECANCEL_SEC`
-  (5 s) while it runs on (`supervisor.cancel_and_wait`): Python 3.11's
-  `asyncio.wait_for` drops a cancellation that arrives as what it waits for
-  completes, and the loop then waits for its next message for good. The
-  bus's request-reply does not use it. The whole shutdown has
+  stop that cancels a message loop waits it out, and cancels it again while
+  it keeps running. A task that is already cancelling is left for one
+  interval before another cancel, so the cleanup the first cancel started
+  can finish that interval. A service stop uses `SERVICE_STOP_AGAIN_SEC`
+  (1 s). A stop that is reaping a process uses `RECANCEL_SEC` (5 s):
+  consults, scheduler background jobs, worker runs, runner starts, the task
+  router's loop, task-manager runs, wait checks, and the fleet's idle close.
+  `supervisor.cancel_and_wait` is that wait. Python 3.11's `asyncio.wait_for`
+  drops a cancellation that arrives as what it waits for completes, and the
+  loop then waits for its next message for good. The bus's request-reply
+  waits on its own. Those reap intervals run one after another. With one
+  runner kind the process-class ones add up to 40 s (eight times 5 s), and
+  to 45 s when a second runner kind stops in the same loop. About twenty-five
+  service stops add a second each, and ending a worker's process adds its
+  3 s SIGTERM grace. That is past the shutdown deadline below, so a
+  worst-case shutdown exits at the deadline and the next start reaps what
+  is left. The whole shutdown has
   `SHUTDOWN_DEADLINE_SEC` (15 s, under the installed service's 30 s before SIGKILL): past
   it the server logs `the shutdown did not finish within 15 s` and exits with
   code 1, and a second SIGINT or SIGTERM during the shutdown exits at once the

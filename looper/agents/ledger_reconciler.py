@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 from ..db import ledger
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,7 @@ class LedgerReconciler:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        await cancel_tasks([task])
 
     async def run_once(self, now: float | None = None) -> int | None:
         """Reconcile when the ledger is on and it is time; how many it registered, None when it did not run."""

@@ -18,6 +18,7 @@ from typing import Any
 from ..db import connection, metrics as db_metrics, proactive_deliveries, system_settings
 from . import chat_settings, metrics, proactive_delivery, turn_metrics
 from .proactive_delivery import ChatKind, Delivery, DeliveryKind, Outcome, Urgency
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 ENABLED_KEY = "metrics.alerts.enabled"
@@ -210,11 +211,7 @@ class MetricsAlertService:
     async def stop(self) -> None:
         self._stopping.set()
         if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+            await cancel_tasks([self._task], raise_errors=True)
             self._task = None
 
     async def _loop(self) -> None:

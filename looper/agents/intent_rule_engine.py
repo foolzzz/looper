@@ -23,6 +23,7 @@ from .intent_rule_evaluation import (PreparedCandidate, PreparedMRBatch, RuleDec
                                      prepare_message_candidates)
 from .intent_rule_verifier import VerifiedFact, VerificationUnavailable, parse_target, verify
 from .ops import ErrorCode, OpError
+from .supervisor import cancel_tasks
 
 logger = logging.getLogger(__name__)
 _INSTALLED = None
@@ -450,10 +451,8 @@ class IntentRuleService:
 
     async def stop(self):
         self._stop.set()
-        if self._task:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
+        await cancel_tasks([self._task])
+        self._task = None
 
     async def _loop(self):
         while not self._stop.is_set():

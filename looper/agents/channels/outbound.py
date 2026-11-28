@@ -18,6 +18,7 @@ from typing import Any
 from uuid import uuid4
 from weakref import WeakSet, WeakValueDictionary
 
+from ..supervisor import cancel_tasks
 from .base import PostOutcome, PostReceipt
 from . import outbound_metrics
 from .outbound_metrics import EventKind
@@ -368,9 +369,7 @@ class Gateway:
 
     async def stop(self):
         tasks = [item.task for item in self._edits.values() if item.task is not None and not item.task.done()]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await cancel_tasks(tasks)
         self._edits.clear()
 
     async def edit(self, message_id: str, call_with_text):
@@ -450,13 +449,10 @@ class Outbox:
     async def stop(self):
         # Join the probe first: it may be about to start the scanner or new workers.
         if self._recovery_task is not None:
-            self._recovery_task.cancel()
-            await asyncio.gather(self._recovery_task, return_exceptions=True)
+            await cancel_tasks([self._recovery_task])
             self._recovery_task = None
         tasks = [*self._workers, *([self._task] if self._task else [])]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await cancel_tasks(tasks)
         self._task = None
         self._workers.clear()
         for future in self._waiters.values():

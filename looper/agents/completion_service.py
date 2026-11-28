@@ -35,6 +35,7 @@ from . import completion_events
 from .completion_events import Target
 from .drain import DrainState
 from .message import manager_address
+from .supervisor import SERVICE_STOP_AGAIN_SEC, cancel_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +98,8 @@ class CompletionService:
         if _running is self:
             _running = None
         task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        # One second, not the process-reap grace: this loop only sleeps, and shutdown has 15s for every stop.
+        await cancel_tasks([task], again_after=SERVICE_STOP_AGAIN_SEC)
 
     async def _loop(self) -> None:
         while True:

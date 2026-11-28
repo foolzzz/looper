@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -42,6 +42,18 @@ CRASH_LOOP_RESTARTS = 3
 # How long a stop waits for a task it cancelled before it cancels it again: longer than a run's cancellation
 # takes to end its processes (proc_tree.TERM_GRACE_SEC).
 RECANCEL_SEC = 5.0
+# A service stop, which ends no process, waits only this long. Serve's shutdown budget is 15s and the stops run
+# one after another; 1s recovers one cancellation that ``asyncio.wait_for`` dropped (a completion tick then sleeps
+# half a second) without spending the process-reap grace. A task still running after that is cancelled again,
+# including an idle check or a backup that has not finished its own cleanup.
+SERVICE_STOP_AGAIN_SEC = 1.0
+# One shutdown runs these waits in series, and serve exits at SHUTDOWN_DEADLINE_SEC (15s) if they are still going.
+# When every task loses one cancel, one runner kind spends eight process-class intervals: task-manager runs,
+# consults, wait checks, scheduler background jobs, the fleet idle close, the task-router loop, worker runs, and
+# that runner. 8 × RECANCEL_SEC is 40s, or 45s when a second runner kind stops in the same loop. About twenty-five
+# service stops add a second each, and a worker's SIGTERM grace adds proc_tree.TERM_GRACE_SEC (3s). The sum is past
+# 15s: the deadline exits and the next start reaps what is left. Wait checks and the idle close sit in the 40s
+# because a second cancel at 1s kills a command still inside its 3s grace and cuts an idle close longer than a second.
 
 
 async def cancel_and_wait(task: asyncio.Task[Any], *, again_after: float = RECANCEL_SEC) -> None:
@@ -52,10 +64,41 @@ async def cancel_and_wait(task: asyncio.Task[Any], *, again_after: float = RECAN
     message loop then waits for its next message for good. ``asyncio.wait``
     does not take the task's cancellation for the caller's own: a cancelled
     caller still propagates.
+
+    A task that is already cancelling has a cleanup await in progress. Another
+    ``cancel`` now would interrupt that await, so the first round only waits.
     """
+    first = True
     while not task.done():
-        task.cancel()
+        if not (first and task.cancelling()):
+            task.cancel()
+        first = False
         await asyncio.wait({task}, timeout=again_after)
+
+
+async def cancel_tasks(
+    tasks: Iterable[asyncio.Task[Any] | None],
+    *,
+    again_after: float = SERVICE_STOP_AGAIN_SEC,
+    raise_errors: bool = False,
+) -> None:
+    """Cancel each task and wait until it ends, cancelling again every ``again_after`` seconds.
+
+    The tasks are cancelled together, so one stop waits about one interval, not once per task. ``raise_errors``
+    re-raises a failure other than cancellation, as ``await task`` does when it only suppresses ``CancelledError``.
+    Otherwise the failure is retrieved and not raised, as ``gather(..., return_exceptions=True)`` does.
+    """
+    pending = [task for task in tasks if task is not None]
+    if not pending:
+        return
+    await asyncio.gather(*(cancel_and_wait(task, again_after=again_after) for task in pending))
+    for task in pending:
+        if task.cancelled():
+            continue
+        if raise_errors:
+            task.result()
+        else:
+            task.exception()
 
 
 class ManagedAgent(Protocol):
@@ -158,8 +201,7 @@ class AgentSupervisor:
         if entry is None:
             return
         if entry.restarting is not None:
-            entry.restarting.cancel()
-            await asyncio.gather(entry.restarting, return_exceptions=True)
+            await cancel_tasks([entry.restarting])
             entry.restarting = None
         try:
             await entry.agent.stop()
@@ -211,17 +253,11 @@ class AgentSupervisor:
         self._running = False
 
         if self._health_task:
-            self._health_task.cancel()
-            try:
-                await self._health_task
-            except asyncio.CancelledError:
-                pass
+            await cancel_tasks([self._health_task], raise_errors=True)
             self._health_task = None
+        await cancel_tasks(entry.restarting for entry in self._agents.values())
         for entry in self._agents.values():
-            if entry.restarting is not None:
-                entry.restarting.cancel()
-                await asyncio.gather(entry.restarting, return_exceptions=True)
-                entry.restarting = None
+            entry.restarting = None
 
         for agent_id, entry in reversed(list(self._agents.items())):
             try:

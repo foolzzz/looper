@@ -536,7 +536,7 @@ def test_a_turn_past_its_deadline_on_a_runtime_without_interrupt_does_not_hold_t
     from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
-    monkeypatch.setattr(completion_events, "TURN_SECONDS", 0.5)
+    monkeypatch.setattr(completion_events, "TURN_SECONDS", 5.0)
     monkeypatch.setattr(completion_events, "END_SECONDS", 0.3, raising=False)
     hung, fresh = _Hung(swallow=swallow), _Hung()
     monkeypatch.setattr(ClaudeCodeRuntime, "resident_session", lambda self, label: fresh)
@@ -559,6 +559,7 @@ def test_a_turn_past_its_deadline_on_a_runtime_without_interrupt_does_not_hold_t
         assert notice.payload["text"] == web_end_text("completed", "calc", "## Done\nadd and sub pass")
         (row,) = await _events(pool)
         assert (row["state"], row["reason"]) == ("fallback", "turn_timeout")
+        assert any(text.startswith("[COMPLETION]") for text in hung.texts)
         assert not manager.busy and hung.stops >= 1  # the late turn's runtime is stopped
         await asyncio.wait_for(manager._handle(MessageEnvelope.create(
             source=channel_address("web"), target=MANAGER_ADDRESS, message_type=MessageType.USER_MESSAGE,
@@ -580,7 +581,7 @@ def test_a_turn_let_go_of_that_exits_late_touches_nothing_of_the_turn_after_it(m
     from looper.agents.runtimes.claude_code import ClaudeCodeRuntime
     from looper.agents.tiers.manager import ManagerAgent, ManagerConfig
 
-    monkeypatch.setattr(completion_events, "TURN_SECONDS", 0.5)
+    monkeypatch.setattr(completion_events, "TURN_SECONDS", 5.0)
     monkeypatch.setattr(completion_events, "END_SECONDS", 0.3)
     hold = asyncio.Event()
     late, fresh = _Hung(swallow=True), _Hung(hold=hold)

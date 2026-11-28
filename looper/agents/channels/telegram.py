@@ -41,6 +41,7 @@ from ..message import (
     manager_address,
     parse_channel_id,
 )
+from ..supervisor import cancel_tasks
 from ..task_notice import Notice, NotifyTarget, TargetKind, split_message
 from .. import task_notice_delivery
 from ..ops.leads import for_group
@@ -291,8 +292,9 @@ class TelegramChannelAdapter(ChannelAdapter):
 
         if self._outbound_task:
             task = self._outbound_task
-            task.cancel()
-            await cleanup("outbound", lambda: task)
+            await cancel_tasks([task])
+            if not task.cancelled() and (error := task.exception()) is not None:
+                logger.warning("%s: telegram outbound cleanup failed", self._channel_id, exc_info=error)
         if self._app:
             updater = self._app.updater
             if updater is not None and updater.running:
