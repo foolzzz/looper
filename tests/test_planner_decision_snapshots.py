@@ -3,12 +3,14 @@ models see changes; on, every dispatch pass and step decision is recorded, and e
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
 
 import pytest
 
+from looper.agents.tiers import decisions
 from looper.agents.tiers.decisions import replay
 from looper.db import decision_snapshots as db_snapshots
 from tests.test_planner_agent import WORK_FAILED, WORK_OK, decide, drive, plan, step
@@ -34,7 +36,20 @@ def _snapshots(monkeypatch: pytest.MonkeyPatch, agent_db: Any, *, on: bool) -> l
 
     monkeypatch.setattr(db_snapshots, "add", add)
     monkeypatch.setattr(db_snapshots, "turn", turn)
+    # The product bound is a production choice (a snapshot never holds a decision long); these runs must record,
+    # so a loaded machine's scheduling delay must not turn into "snapshots are off".
+    monkeypatch.setattr(decisions, "TIMEOUT_SECONDS", 30.0)
     return rows
+
+
+def test_a_slow_read_of_the_switch_is_not_an_off_switch(agent_db, monkeypatch):
+    async def slow(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        await asyncio.sleep(1.2)  # longer than the production bound, as a loaded machine can be
+        return {db_snapshots.ENABLED_KEY: "true"}
+
+    _snapshots(monkeypatch, agent_db, on=True)
+    monkeypatch.setattr(db_snapshots.system_settings, "get_settings", slow)
+    assert asyncio.run(decisions.enabled()) is True
 
 
 def _first_attempt_fails() -> Any:
