@@ -2156,51 +2156,116 @@ uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regressi
 
 A throwaway `HOME` or `CLAUDE_CONFIG_DIR` has no login, so this mode keeps yours: `HOME` is not replaced and
 `CLAUDE_CONFIG_DIR` is left as you have it (set or unset). The eval reads, copies and exports no credential file or
-keychain entry and adds no credential variable; the CLI signs in by itself. If your settings configure a key or
-endpoint (`env`, `apiKeyHelper`), the CLI uses that, and bills it. git is told to read no user or system
-configuration, as under a throwaway `HOME`.
+keychain entry and adds no credential variable; the CLI signs in by itself. The variables that move other logins
+(`XDG_CONFIG_HOME`, `CODEX_HOME`, `GROK_HOME`, `TRAE_HOME`, `COPILOT_HOME`) stay too, so the sandbox's read deny list
+follows them. `TMPDIR` and `XDG_CACHE_HOME` point under the run's own directory, so no cache is written under your
+`HOME`. git gets a configuration under that directory that turns off your global configuration, ignore file and
+attributes file, and no system configuration.
+
+**Billing is checked before any CLI start** (and again before every case). If your `settings.json`,
+`settings.local.json` or the managed settings hold `apiKey`, `primaryApiKey`, `apiKeyHelper`, the AWS credential
+helpers, or an `env` entry that sets a key, a token, a base URL, custom headers or another provider backend, the run
+stops and names the file and the key, never the value. A settings file that cannot be read as JSON stops it too.
 
 **The synthetic settings layer does not apply.** A direct session loads your user settings, and with them your hooks
-(which run outside the sandbox), plugins, skills, memory and `CLAUDE.md`. The CLI also writes its session transcripts
-into your configuration directory, where they stay after the run. The read-only launches (`readonly_resume`, the
-read-only turn of `opus_switch`) have no sandbox, read deny list or readback; what they may read follows your
-permission settings.
+(which run outside the sandbox and may send what they see to other services on your machine), plugins, skills, memory
+and `CLAUDE.md`. The CLI also writes its session transcripts into your configuration directory, where they stay after
+the run; they hold the eval's synthetic hostile content, not user data, and every report says so. The read-only
+launches (`readonly_resume`, the read-only turn of `opus_switch`) have no sandbox, read deny list or readback; what
+they may read follows your permission settings.
 
-- **Report.** `operator_login` records the CLI version and the SHA-256 of your user `settings.json`, of the hook
-  definitions in it (canonical JSON) and of your user `CLAUDE.md` (`absent` or `unreadable` where there is none to
-  take), and whether any of them changed during the run. Only those two files are opened and only hashes are written.
-  Not hashed: files `CLAUDE.md` imports, `settings.local.json`, managed settings, plugins, skills and memory, so equal
-  hashes do not prove equal configurations. `--compare-runs A.json B.json` prints both runs' outcomes and exits 1 with
-  `not directly comparable` when a hash or the version differs or is unreadable, a configuration changed mid-run, or
-  only one run used your configuration.
-- **Order.** First the cases that ask for nothing hostile (`direct_edit_brief`, `stop_continue`,
-  `fresh_session_excerpt`, `readonly_resume`, `opus_switch`; direct launches first), every repetition of them. Only
-  when all of those selected pass, and at least one direct launch was read back, do the others start
-  (`foreign_task_refused`; `readonly_progress`, whose requirement holds an injected instruction; and any case not in
-  that list). Otherwise they report `not_runnable` (`stage_gate`). Selecting one of them without a non-hostile direct
-  case is refused. A model's failed check in the first stage therefore holds the hostile cases back.
-- **Abort.** A refused turn (Looper's readback found a mismatch, or any other launch refusal), or a launch that skips
-  permission prompts without the sandbox on and the `denyRead` list holding your SSH, keychain, Claude and Looper
-  paths, stops the whole run (`incomplete`, `aborted`).
-- **Targets.** Hostile cases point only at files and a task the eval itself creates in its temporary directory.
-  `read_deny_live` plants canaries in the denied paths, which under your `HOME` are real credential files: it is
-  `not_runnable` (`needs_synthetic_home`) in this mode.
-- **Files.** `--out-dir` must be an ignored local directory (outside the repository for a real run).
-  `task-manager-eval.json` is the shareable report: local paths replaced, check names and outcomes only, no replies,
-  commands or error texts. `task-manager-eval.local.json`, the evidence, raw records and server logs stay local.
-- The scripted `bad` and `lie` behaviors are refused. `--mode fake --credential operator-login` rehearses the order
-  and the checks for free.
+#### Stage 0: the read deny probe
+
+Before the first case of a real run, and on its own at any time:
 
 ```bash
-# proposed, needs approval: Sonnet cases, two repetitions, then the Opus switch on the same ledger
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
+  --probe-deny-read --claude-bin "$CLAUDE_BIN"
+```
+
+It calls no model and costs nothing. The CLI (the same verified version) runs as a direct session, with the command,
+environment and pinned sandbox settings built by the functions a live session uses, under your `HOME` and
+configuration, but against a scripted server on 127.0.0.1 with the key `sk-probe-not-real`. The first request that
+carries an `Authorization` header, or another key, ends the probe at once (`ABORTED`); only that fact is recorded.
+For each path on the read deny list that exists here, the script runs one read-only command (list the directory and
+discard the names, or open the file and read no block of it) that prints `DENIED`, `ALLOWED` or `OTHER`. The server
+keeps those markers only: no request body or header. Two controls the probe creates must answer `ALLOWED` (a
+directory and a file inside the task directory) and two must answer `DENIED` (a directory and a file it adds to this
+run's deny list).
+
+| status | meaning |
+|---|---|
+| `PASS` | every entry present here was refused and the controls answered as expected |
+| `FAIL` | an entry answered `ALLOWED` or `OTHER` (named by index and `~/…` path), a control answered wrongly, or nothing could be verified |
+| `INVALID` | a command was blocked before it ran (a `PreToolUse` hook or a permission rule: `BLOCKED_BY_HOOK`), or the session did not follow the script; nothing is concluded |
+| `ALARM` | a present deny directory's modification time or number of entries changed while the probe ran (your configuration directory included, which other sessions and the CLI itself also write to) |
+| `ABORTED` | no request, or one with a foreign credential |
+
+Only `PASS` lets cases start; the command exits 1 otherwise. The report says "N verified denied, M absent on this
+machine (not verified)"; an entry that cannot be read outside the sandbox either is listed apart and not counted. A
+pass says nothing about paths that are not on the deny list.
+
+- **Report.** `operator_login` records the CLI version, the probe's result, the reservation, the transcript note and
+  a SHA-256 of each of: your user `settings.json`, the hook definitions in it (canonical JSON), your user `CLAUDE.md`,
+  the files it imports (`@path`, followed five deep; code spans and blocks skipped; login files are not opened),
+  `settings.local.json`, the managed settings and their drop-ins, the installed plugins' names and versions and the
+  skills' names (`absent` or `unreadable` where there is none to take), and whether any of them changed during the run.
+  Only hashes are written. `not_covered` lists what is not hashed or not checked (plugin and skill contents, other
+  memory such as rules and auto memory, the managed `CLAUDE.md` and device or server policies, `~/.claude.json`, the
+  programs hooks run, logins in places no kept variable names, and imports that could not be covered), so equal hashes
+  do not prove equal configurations. `--compare-runs A.json B.json` prints both runs' outcomes and exits 1 with
+  `not directly comparable` when a hash or the version differs or is unreadable, a configuration changed mid-run, or
+  only one run used your configuration.
+- **Order.** A case is typed: `hostile` and `needs_synthetic_home`, both true for a new case until it says otherwise.
+  First the cases that are not hostile (`direct_edit_brief`, `stop_continue`, `fresh_session_excerpt`,
+  `readonly_resume`, `opus_switch`; direct launches first), every repetition of them. Only when all of those selected
+  pass, and at least one direct launch of a turn that ran to its end was read back, do the others start
+  (`foreign_task_refused`; `readonly_progress`, whose requirement holds an injected instruction). Otherwise they
+  report `not_runnable` (`stage_gate`). Selecting one of them without a non-hostile direct case is refused. A model's
+  failed check in the first stage therefore holds the hostile cases back. The gate works within one command; the
+  commands below put the Opus case in a command of its own that must pass before the other starts.
+- **Abort.** A refused turn (Looper's readback found a mismatch, or any other launch refusal), or a launch that skips
+  permission prompts without the sandbox on and the `denyRead` list holding your SSH, keychain, Claude and Looper
+  paths, stops the whole run (`incomplete`, `aborted`). The launches are checked after every turn and again when a
+  case ends however it ended (a turn that timed out or raised included); a launch capture that cannot be read counts
+  as a refusal.
+- **Targets.** Hostile cases point only at files and a task the eval itself creates in its temporary directory. A case
+  with `needs_synthetic_home` (one that plants files under `HOME`, such as canaries in the denied paths, which under
+  your `HOME` are real credential files, or one that does not say) is `not_runnable` in this mode.
+- **Files.** `--out-dir` and `--dump-inputs` must be ignored local directories (outside the repository for a real
+  run's `--out-dir`). `task-manager-eval.json` is the shareable report: local paths replaced, check names and outcomes
+  only, no replies, commands or error texts. `task-manager-eval.local.json`, the evidence, raw records and server logs
+  stay local.
+- The scripted `bad` and `lie` behaviors are refused. `--mode fake --credential operator-login` rehearses the order
+  and the checks for free (it starts no real CLI, so no probe).
+
+What the two commands below reserve on their ledger, from the case definitions (a real run prints this table before it
+starts):
+
+| case | model | repetitions | reserved per run (USD) | subtotal (USD) |
+|---|---|---|---|---|
+| `opus_switch` | opus | 1 | 3.00 | 3.00 |
+| `direct_edit_brief` | sonnet | 2 | 1.25 | 2.50 |
+| `stop_continue` | sonnet | 2 | 1.25 | 2.50 |
+| `readonly_progress` | sonnet | 2 | 1.25 | 2.50 |
+| `foreign_task_refused` | sonnet | 2 | 1.25 | 2.50 |
+| `fresh_session_excerpt` | sonnet | 2 | 1.25 | 2.50 |
+| `readonly_resume` | sonnet | 2 | 1.25 | 2.50 |
+| total | | | | 18.00 |
+
+The total is 18.00 USD. A real run refuses to start when what it reserves, on top of the ledger, exceeds
+`--total-cap-usd`.
+
+```bash
+# proposed, needs approval: the non-hostile Opus case first; only if it passes, the Sonnet cases on the same ledger
+uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
+  --mode real --credential operator-login --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" \
+  --cases opus_switch --opus-case-budget-usd 3 --total-cap-usd 3 --ledger "$EVAL_OUT/ledger.jsonl" \
+  --out-dir "$EVAL_OUT/task-manager-opus" &&
 uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
   --mode real --credential operator-login --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" \
   --cases direct_edit_brief,stop_continue,readonly_progress,foreign_task_refused,fresh_session_excerpt,readonly_resume \
-  --reps 2 --case-budget-usd 1.25 --total-cap-usd 15 --ledger "$EVAL_OUT/ledger.jsonl" --out-dir "$EVAL_OUT/task-manager-sonnet"
-uv run --system-certs --python 3.11 --extra test python -m evals.prompt_regression.task_manager_eval \
-  --mode real --credential operator-login --claude-bin "$CLAUDE_BIN" --pg-url "$LOOPER_EVAL_DATABASE_URL" \
-  --cases opus_switch --opus-case-budget-usd 3 --total-cap-usd 18 --ledger "$EVAL_OUT/ledger.jsonl" \
-  --out-dir "$EVAL_OUT/task-manager-opus"
+  --reps 2 --case-budget-usd 1.25 --total-cap-usd 18 --ledger "$EVAL_OUT/ledger.jsonl" --out-dir "$EVAL_OUT/task-manager-sonnet"
 ```
 
 The stand-in is a positive and negative control for the judges, not evidence about a model. Besides `ok`, it has
