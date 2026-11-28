@@ -1,7 +1,7 @@
 """What git prints in a task repository never leaves Looper as text.
 
 Git's messages can quote file content that Looper does not control. Each test makes git say a marker that is
-only in a file outside the repository (or, where one command is made to fail,
+only in a broken file git reads (or, where one command is made to fail,
 prints it from that command), drives a path that runs git, and looks for the
 marker in everything that path hands on: the error or returned detail, bus
 messages, activity, the Planner's prompts and turns, the stored rows, the log
@@ -66,12 +66,9 @@ def init_repo(path: Path) -> Path:
     return path
 
 
-def plant(repo: Path, outside: Path) -> None:
-    """Point the repository's ``packed-refs`` at a file outside it that holds the marker."""
-    outside.write_text(f"password {MARKER}\n")
-    packed = repo / ".git" / "packed-refs"
-    packed.unlink(missing_ok=True)
-    packed.symlink_to(outside)
+def plant(repo: Path) -> None:
+    """Make the repository's ``packed-refs`` a broken file whose line holds the marker: git quotes it."""
+    (repo / ".git" / "packed-refs").write_text(f"password {MARKER}\n")
 
 
 async def _save(_: Any) -> None:
@@ -94,10 +91,10 @@ def clean(*handed_on: Any) -> str:
     return text
 
 
-def test_the_planted_link_makes_git_quote_the_outside_file(tmp_path: Path) -> None:
+def test_the_planted_file_makes_git_quote_it(tmp_path: Path) -> None:
     """The positive control: without it every absence below would prove nothing."""
     repo = init_repo(tmp_path / "repo")
-    plant(repo, tmp_path / "outside.txt")
+    plant(repo)
     said = subprocess.run(["git", "status"], cwd=repo, capture_output=True, text=True, timeout=10)
     assert said.returncode != 0 and MARKER in said.stderr
 
@@ -107,7 +104,7 @@ def test_a_failure_is_its_subcommand_and_exit_code() -> None:
     assert str(GitFailure.of(("--version",), 1)) == "git_failed:command (exit 1)"
 
 
-# --- Real git in a repository with the planted link ---
+# --- Real git in a repository with the planted file ---
 
 
 @pytest.mark.parametrize("ref_gone", [False, True], ids=["branch", "new-branch"])
@@ -117,7 +114,7 @@ def test_making_a_step_worktree(tmp_path: Path, ref_gone: bool) -> None:
     git(repo, "worktree", "remove", "--force", created.path)
     if ref_gone:
         git(repo, "branch", "-D", created.branch)
-    plant(repo, tmp_path / "outside.txt")
+    plant(repo)
     with pytest.raises(ws.GitError) as raised:
         asyncio.run(ws.ensure_worktree(created))
     assert "git_failed:worktree (exit " in clean(raised.value)
@@ -126,7 +123,7 @@ def test_making_a_step_worktree(tmp_path: Path, ref_gone: bool) -> None:
 def test_merging_a_step(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     created = step_workspace(repo, tmp_path / "rt")
-    plant(repo, tmp_path / "outside.txt")
+    plant(repo)
     rows: list[dict[str, Any]] = []
 
     async def save(current: ws.StepWorkspace) -> None:
@@ -141,7 +138,7 @@ def test_merging_a_step(tmp_path: Path) -> None:
 def test_freezing_a_step_for_review(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
     created = step_workspace(repo, tmp_path / "rt")
-    plant(repo, tmp_path / "outside.txt")
+    plant(repo)
     with pytest.raises(ws.GitError) as raised:
         asyncio.run(ws.freeze_review(created, step_key="s1"))
     assert "git_failed:" in clean(raised.value)
@@ -152,7 +149,7 @@ def test_inspecting_and_snapshotting_the_task_directory(tmp_path: Path) -> None:
     inspected = asyncio.run(ws.inspect(str(repo)))
     assert isinstance(inspected, ws.Repo)
     (repo / "pending.txt").write_text("pending\n")
-    plant(repo, tmp_path / "outside.txt")
+    plant(repo)
     clean(asyncio.run(ws.inspect(str(repo))))
     for operation in (ws.checkpoint(inspected, task_id="task-1"),
                       ws.snapshot_review(inspected, task_id="task-1", step_key="s1")):
@@ -204,7 +201,7 @@ def test_committing_what_a_task_left(tmp_path: Path, store: Store) -> None:
     repo = init_repo(tmp_path / "repo")
     work_dir = Path(asyncio.run(tw.prepare(task(repo), runtime_root=tmp_path / "rt", links=(), note=store.note)))
     (work_dir / "left.txt").write_text("left\n")
-    plant(repo, tmp_path / "outside.txt")
+    plant(repo)
     with pytest.raises(tw.TaskWorkspaceError) as raised:
         asyncio.run(tw.finish("task-1", completed=True))
     assert "cannot commit what the task left in its worktree: git_failed:" in clean(raised.value, store.writes)
@@ -212,7 +209,7 @@ def test_committing_what_a_task_left(tmp_path: Path, store: Store) -> None:
 
 def test_checking_and_preparing_a_task_workspace(tmp_path: Path, store: Store) -> None:
     repo = init_repo(tmp_path / "repo")
-    plant(repo, tmp_path / "outside.txt")
+    plant(repo)
     for operation in (tw.check(str(repo), mode=TaskWorkspaces.WORKTREE),
                       tw.prepare(task(repo), runtime_root=tmp_path / "rt", links=(), note=store.note)):
         with pytest.raises(tw.TaskWorkspaceError) as raised:
@@ -229,7 +226,7 @@ def _judge(repo: Path) -> dict[str, Any]:
 
 def test_checking_the_reported_files(tmp_path: Path) -> None:
     repo = init_repo(tmp_path / "repo")
-    plant(repo, tmp_path / "outside.txt")
+    plant(repo)
     outcome = _judge(repo)
     assert outcome["status"] == "failed"
     assert "could not look in commits: git_failed:log (exit " in clean(outcome)
@@ -372,14 +369,14 @@ def parallel_project(agent_db: Any) -> None:
 
 
 def writing(h: Harness, *, planted: bool) -> Any:
-    """s1's Worker writes a file; s2's keeps running. With ``planted`` the link appears as s2 is dispatched, when
+    """s1's Worker writes a file; s2's keeps running. With ``planted`` the file appears as s2 is dispatched, when
     both steps have their worktrees and s1's result is not handled yet."""
     def outcome(envelope: Any) -> dict[str, Any] | None:
         if envelope.message_type == MessageType.VERIFY_REQUEST:
             return REVIEW_PASS
         if envelope.payload["step_key"] != "s1":
             if planted:
-                plant(h.work_dir, h.work_dir.parent / "outside.txt")
+                plant(h.work_dir)
             return None
         (Path(envelope.payload["context"]["work_dir"]) / "s1.txt").write_text("s1\n")
         return {**WORK_OK, "changed_files": {"s1.txt": "written"}}
@@ -422,7 +419,7 @@ def test_a_worktree_that_cannot_be_made_reaches_the_planner_as_a_reason(
         init_repo(h.work_dir)
 
         async def planted(workspace: ws.StepWorkspace) -> None:
-            plant(h.work_dir, h.work_dir.parent / "outside.txt")
+            plant(h.work_dir)
             await original(workspace)
 
         monkeypatch.setattr(ws, "ensure_worktree", planted)
@@ -467,7 +464,7 @@ def test_a_reported_files_failure_reaches_the_planner_as_a_reason(planner_claude
         init_repo(h.work_dir)
 
         def outcome(_: Any) -> dict[str, Any]:
-            plant(h.work_dir, h.work_dir.parent / "outside.txt")
+            plant(h.work_dir)
             return _judge(h.work_dir)
 
         h.outcome = outcome
