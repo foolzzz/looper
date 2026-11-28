@@ -10,6 +10,8 @@ executable unchanged (real mode) or a scripted stand-in (fake mode, free).
     python -m evals.prompt_regression.task_manager_eval --mode fake --pg-url URL --dump-inputs DIR
     python -m evals.prompt_regression.task_manager_eval --compare-inputs DIR_A DIR_B
     python -m evals.prompt_regression.task_manager_eval --mode real --credential oauth --claude-bin PATH ...
+    python -m evals.prompt_regression.task_manager_eval --compare-runs REPORT_A.json REPORT_B.json
+    python -m evals.prompt_regression.task_manager_eval --probe-deny-read --claude-bin PATH
 
 See evals/README.md ("Task Manager") for the real run's budget, credential and ledger rules.
 """
@@ -34,17 +36,56 @@ import urllib.request
 import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from looper.agents import task_manager_safety
+from looper.agents.llmrec import TRANSLATED_BACKEND_ENV
 from looper.agents.ops.task_manager import TOOLS
+from looper.agents.runtimes.claude_code import MANAGED_SETTINGS
 
 from . import task_manager_cases as cases
+from . import task_manager_cli, task_manager_deny_probe
 from .runner import (DEFAULT_OUT_DIR, REPO_ROOT, Api, EvalError, _confirmed, fresh_database, init_repository,
-                     install_claude, running_server)
+                     install_claude, running_server, write_result)
 from .task_manager_cases import Case, Outcome, Turn
 
 CREDENTIAL_ENV = {"oauth": "CLAUDE_CODE_OAUTH_TOKEN", "api-key": "ANTHROPIC_API_KEY"}
+# The third choice, with no token: the CLI uses the operator's own login, so HOME and the configuration directory
+# stay the operator's. Nothing here reads, copies or names a credential file or a keychain entry.
+OPERATOR_LOGIN = "operator-login"
+CREDENTIAL_CHOICES = (*sorted(CREDENTIAL_ENV), OPERATOR_LOGIN)
+OPERATOR_KEPT = frozenset({"HOME", "CLAUDE_CONFIG_DIR"})
+# Where other logins live when not in their default place. Kept with operator-login, so the service's read deny list
+# names them: the cases run on the operator's real HOME. A direct session's own environment drops all but the first.
+OPERATOR_LOGIN_HOMES = frozenset({"XDG_CONFIG_HOME", "CODEX_HOME", "GROK_HOME", "TRAE_HOME", "COPILOT_HOME"})
+OPERATOR_NOTE = "results depend on this machine's configuration"
+OPERATOR_TOTAL_CAP_USD = 23.5  # --total-cap-usd of a real operator-login run that names none
+TRANSCRIPT_NOTE = ("the CLI keeps its session transcripts in the operator's Claude configuration directory, where they "
+                   "stay after the run; they hold the eval's synthetic hostile content, not user data")
+# Settings that move billing off the CLI's own login: a key, a key helper, another endpoint or another provider.
+BILLING_KEYS = ("apiKey", "primaryApiKey", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport")
+BILLING_ENV = frozenset({
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+    "ANTHROPIC_UNIX_SOCKET", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL",
+    "ANTHROPIC_FOUNDRY_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+    *(name for name, _ in TRANSLATED_BACKEND_ENV)})
+HASHED = ("cli_version", "user_settings_sha256", "user_hooks_sha256", "user_claude_md_sha256",
+          "user_claude_md_imports_sha256", "user_settings_local_sha256", "managed_settings_sha256",
+          "plugin_list_sha256", "skill_list_sha256")
+# What the hashes (and the billing check) do not see; written into every operator-login report.
+NOT_COVERED = (
+    "the contents of installed plugins and skills (only the plugin names and versions and the skill names are hashed)",
+    "user memory other than CLAUDE.md and its imports: rules, auto memory, agents, commands and output styles",
+    "the managed CLAUDE.md, device-management policies and server-managed settings (neither hashed nor checked for "
+    "billing keys)",
+    "~/.claude.json: it holds the login and is not read, so a key stored there is neither hashed nor checked",
+    "the programs that hooks and the status line run",
+    "logins in a custom place that none of CLAUDE_CONFIG_DIR, XDG_CONFIG_HOME, CODEX_HOME, GROK_HOME, TRAE_HOME and "
+    "COPILOT_HOME names: they are not on the read deny list")
+# Files an import may name that are never opened: logins.
+UNOPENED_NAMES = frozenset({".credentials.json", ".claude.json", "auth.json", ".netrc", ".git-credentials"})
+UNOPENED_DIRS = (".ssh", ".aws", ".gnupg")
+IMPORT_DEPTH = 5  # Claude Code follows imports this deep
 # The only variables of the operator's environment the eval and its children keep: locale and terminal basics, and
 # the network settings a proxy needs. Everything else (ssh agent, git and cloud tokens, every credential) is dropped.
 KEPT_VARIABLES = frozenset({
@@ -62,15 +103,26 @@ class BudgetRefusal(EvalError):
     """A case was not started because it could exceed what the ledger allows."""
 
 
+class LaunchRefused(EvalError):
+    """operator-login: a launch did not read back as injected, so nothing else may run."""
+
+
+class BillingRefusal(LaunchRefused):
+    """operator-login: the settings would bill something other than the CLI's own login: the CLI is not started."""
+
+
 # --- Credential and environment ------------------------------------------------------------------------------
 
 
-def resolve_credential(choice: str | None, environ: dict[str, str] | None = None) -> tuple[str, str]:
-    """The (variable name, value) the operator chose. No choice, or a chosen variable that is unset, refuses; the
-    other variable is never read, so there is no fallback. The value is returned to the caller alone."""
+def resolve_credential(choice: str | None, environ: dict[str, str] | None = None) -> tuple[str, str] | None:
+    """The (variable name, value) the operator chose, or None for ``operator-login``, which reads no variable. No
+    choice, or a chosen variable that is unset, refuses; no other choice is tried, so there is no fallback. The value
+    is returned to the caller alone."""
+    if choice == OPERATOR_LOGIN:
+        return None
     if choice not in CREDENTIAL_ENV:
-        raise EvalError("real mode needs --credential oauth|api-key: the operator chooses; there is no default "
-                        "and no fallback from one to the other")
+        raise EvalError("real mode needs --credential oauth|api-key|operator-login: the operator chooses; there is "
+                        "no default and no fallback from one to another")
     name = CREDENTIAL_ENV[choice]
     value = (os.environ if environ is None else environ).get(name)
     if not value:
@@ -79,24 +131,47 @@ def resolve_credential(choice: str | None, environ: dict[str, str] | None = None
 
 
 @contextmanager
-def isolated_environment(root: Path, credential: tuple[str, str] | None) -> Iterator[Path]:
+def isolated_environment(root: Path, credential: tuple[str, str] | None, *,
+                         operator_login: bool = False) -> Iterator[Path]:
     """This process's environment, replaced for the run: a throwaway HOME and CLAUDE_CONFIG_DIR with fixed
     synthetic settings, a PATH without the operator's own tools (``loopercli`` among them), only the variables in
-    ``KEPT_VARIABLES`` (no ssh agent, no token of any kind) and the one chosen credential. Restored afterwards."""
+    ``KEPT_VARIABLES`` (no ssh agent, no token of any kind) and the one chosen credential. Restored afterwards.
+
+    ``operator_login``: HOME and CLAUDE_CONFIG_DIR (set or unset) stay the operator's, so the CLI finds its own
+    login; nothing is written to either by the eval, no synthetic settings apply and no credential is added. The
+    variables of ``OPERATOR_LOGIN_HOMES`` stay too (the read deny list follows them). TMPDIR and XDG_CACHE_HOME
+    point under ``root`` (the CLI, and programs that ignore these two, may still write under HOME); git gets a
+    configuration under ``root`` that turns off the user's ignore and attributes files, and no system
+    configuration."""
     saved = dict(os.environ)
-    home, config = root / "home", root / "claude-config"
-    home.mkdir(parents=True)
-    config.mkdir(parents=True)
-    (root / "tmp").mkdir(parents=True, exist_ok=True)
-    (config / "settings.json").write_text(json.dumps(SYNTHETIC_SETTINGS, indent=2) + "\n")
+    if operator_login:
+        if credential is not None:
+            raise EvalError("operator-login takes no credential: the CLI uses its own login")
+        if not saved.get("HOME"):
+            raise EvalError("operator-login needs the operator's HOME")
+        home, kept = Path(saved["HOME"]), KEPT_VARIABLES | OPERATOR_KEPT | OPERATOR_LOGIN_HOMES
+        for name in ("tmp", "cache"):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        # Without these two keys git still reads ~/.config/git/ignore and attributes whatever its global file is.
+        (root / "gitconfig").write_text(f"[core]\n\texcludesFile = {os.devnull}\n\tattributesFile = {os.devnull}\n")
+        replaced = {"GIT_CONFIG_GLOBAL": str(root / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1",
+                    "TMPDIR": str(root / "tmp"), "XDG_CACHE_HOME": str(root / "cache")}
+    else:
+        home, config, kept = root / "home", root / "claude-config", KEPT_VARIABLES
+        home.mkdir(parents=True)
+        config.mkdir(parents=True)
+        (root / "tmp").mkdir(parents=True, exist_ok=True)
+        (config / "settings.json").write_text(json.dumps(SYNTHETIC_SETTINGS, indent=2) + "\n")
+        # TMPDIR is a subdirectory of the run's root: a direct session keeps its private looper-edit directory
+        # (under HOME) out of the task directory and $TMPDIR, so the system temp directory cannot be the one it
+        # checks.
+        replaced = {"HOME": str(home), "CLAUDE_CONFIG_DIR": str(config), "TMPDIR": str(root / "tmp")}
     try:
         for name in list(os.environ):
-            if name not in KEPT_VARIABLES and not name.startswith(KEPT_PREFIXES):
+            if name not in kept and not name.startswith(KEPT_PREFIXES):
                 del os.environ[name]
-        # TMPDIR is a subdirectory of the run's root: a direct session keeps its private looper-edit directory (under
-        # HOME) out of the task directory and $TMPDIR, so the system temp directory cannot be the one it checks.
-        os.environ.update(HOME=str(home), CLAUDE_CONFIG_DIR=str(config), PATH=MINIMAL_PATH, TMPDIR=str(root / "tmp"),
-                          GIT_TERMINAL_PROMPT="0", DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1")
+        os.environ.update(replaced, PATH=MINIMAL_PATH, GIT_TERMINAL_PROMPT="0", DISABLE_AUTOUPDATER="1",
+                          DISABLE_TELEMETRY="1")
         if credential is not None:
             os.environ[credential[0]] = credential[1]
         if shutil.which("loopercli") or shutil.which("looper"):
@@ -105,6 +180,211 @@ def isolated_environment(root: Path, credential: tuple[str, str] | None) -> Iter
     finally:
         os.environ.clear()
         os.environ.update(saved)
+
+
+# --- operator-login: what the report records, and what every launch must carry ------------------------------------
+
+
+def _config_dir(environ: Mapping[str, str]) -> Path:
+    return Path(environ.get("CLAUDE_CONFIG_DIR") or Path(environ["HOME"]) / ".claude").expanduser()
+
+
+def _managed_files() -> list[Path]:
+    """The administrator's settings files, their drop-in directory included."""
+    return [found for path in MANAGED_SETTINGS
+            for found in (path, *sorted(path.parent.glob("managed-settings.d/*.json")))]
+
+
+def _read(path: Path) -> bytes | str:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return "absent"
+    except OSError:
+        return "unreadable"
+
+
+def _digest(data: bytes | str) -> str:
+    return hashlib.sha256(data).hexdigest() if isinstance(data, bytes) else data
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def billing_problems(environ: Mapping[str, str]) -> list[str]:
+    """Every ``file: key`` of the user and managed settings that configures a key, a key helper or another endpoint,
+    and every such file that cannot be checked. Names only, never a value."""
+    home = environ["HOME"]
+    found = []
+    for path in (_config_dir(environ) / "settings.json", _config_dir(environ) / "settings.local.json",
+                 *_managed_files()):
+        shown = "~" + str(path)[len(home):] if str(path).startswith(home + os.sep) else str(path)
+        data = _read(path)
+        if data == "absent":
+            continue
+        try:
+            values = json.loads(data) if isinstance(data, bytes) else None
+            env = values.get("env") or {}
+            keys = [key for key in BILLING_KEYS if key in values]
+            keys += [f"env.{name}" for name in sorted(env.keys() & BILLING_ENV)]
+        except (ValueError, TypeError, AttributeError):
+            found.append(f"{shown}: cannot be checked")
+            continue
+        found += [f"{shown}: {key}" for key in keys]
+    return found
+
+
+def check_billing(environ: Mapping[str, str]) -> None:
+    if problems := billing_problems(environ):
+        raise BillingRefusal("operator-login bills the CLI's own login only; remove these settings first (the eval "
+                             "does not start the CLI): " + "; ".join(problems))
+
+
+def memory_imports(memory: Path, home: Path) -> tuple[list[list[str]], int, int]:
+    """The files ``memory`` imports (``@path``, outside code), followed ``IMPORT_DEPTH`` deep: ``[as written,
+    digest]`` per import, how many did not resolve to a file and how many were not opened because they are logins."""
+    found: list[list[str]] = []
+    unresolved = unopened = 0
+    seen = {os.path.realpath(memory)}
+    queue = [(memory, 0)]
+    while queue:
+        source, depth = queue.pop(0)
+        data = _read(source)
+        if not isinstance(data, bytes) or depth >= IMPORT_DEPTH:
+            continue
+        prose = re.sub(r"(?ms)^[ \t]*(```|~~~).*?(^[ \t]*\1|\Z)|`[^`\n]*`", " ", data.decode("utf-8", "replace"))
+        for written in re.findall(r"(?<![\w@])@((?:\\ |[^\s`])+)", prose):
+            name = written.replace("\\ ", " ")
+            options = [name, name.rstrip(".,;:!?)]}'\"")]
+            paths = [home / option[2:] if option.startswith("~/") else source.parent / option
+                     for option in options if option]
+            target = next((path for path in paths if os.path.isfile(path)), None)
+            if target is None:
+                unresolved += 1
+                continue
+            real = os.path.realpath(target)
+            if real in seen:
+                continue
+            seen.add(real)
+            if (Path(real).name in UNOPENED_NAMES
+                    or any(real.startswith(os.path.realpath(home / d) + os.sep) for d in UNOPENED_DIRS)):
+                unopened += 1
+                continue
+            found.append([written, _digest(_read(Path(real)))])
+            queue.append((Path(real), depth + 1))
+    return found, unresolved, unopened
+
+
+def config_fingerprint(environ: Mapping[str, str], cli_version: str) -> dict[str, str]:
+    """The CLI version and a SHA-256 of each input from outside the eval that a session under the operator's login can
+    load: the user settings and local settings, the hook definitions in the former (canonical JSON), the user's
+    CLAUDE.md and what it imports, the managed settings, and the lists of installed plugins and skills. Only hashes
+    leave; ``absent`` and ``unreadable`` stand where there is none to take. ``NOT_COVERED`` names the rest."""
+    directory = _config_dir(environ)
+    settings = _read(directory / "settings.json")
+    hooks: bytes | str = settings
+    if isinstance(settings, bytes):
+        try:
+            found = json.loads(settings).get("hooks")
+            hooks = "absent" if found is None else _canonical(found)
+        except (ValueError, AttributeError):
+            hooks = "unreadable"
+    imports, unresolved, unopened = memory_imports(directory / "CLAUDE.md", Path(environ["HOME"]))
+    imported: bytes | str = _canonical([imports, unresolved, unopened]) if imports or unresolved or unopened else "absent"
+    if any(digest == "unreadable" for _, digest in imports):
+        imported = "unreadable"
+    managed = [[str(path), _digest(data)] for path in _managed_files() if (data := _read(path)) != "absent"]
+    managed_hash: bytes | str = ("unreadable" if any(d == "unreadable" for _, d in managed)
+                                 else _canonical(managed) if managed else "absent")
+    plugins: bytes | str = _read(directory / "plugins" / "installed_plugins.json")
+    if isinstance(plugins, bytes):
+        try:
+            plugins = _canonical({name: sorted([str(i.get("version")), str(i.get("gitCommitSha"))] for i in installs)
+                                  for name, installs in json.loads(plugins)["plugins"].items()})
+        except (ValueError, KeyError, TypeError, AttributeError):
+            plugins = "unreadable"
+    try:
+        skills: bytes | str = _canonical(sorted(os.listdir(directory / "skills")))
+    except FileNotFoundError:
+        skills = "absent"
+    except OSError:
+        skills = "unreadable"
+    return {"cli_version": cli_version, "user_settings_sha256": _digest(settings), "user_hooks_sha256": _digest(hooks),
+            "user_claude_md_sha256": _digest(_read(directory / "CLAUDE.md")),
+            "user_claude_md_imports_sha256": _digest(imported),
+            "user_settings_local_sha256": _digest(_read(directory / "settings.local.json")),
+            "managed_settings_sha256": _digest(managed_hash), "plugin_list_sha256": _digest(plugins),
+            "skill_list_sha256": _digest(skills)}
+
+
+def not_covered(environ: Mapping[str, str]) -> list[str]:
+    _, unresolved, unopened = memory_imports(_config_dir(environ) / "CLAUDE.md", Path(environ["HOME"]))
+    found = list(NOT_COVERED)
+    if unresolved:
+        found.append(f"{unresolved} CLAUDE.md import(s) that resolve to no file")
+    if unopened:
+        found.append(f"{unopened} CLAUDE.md import(s) naming a login file, not opened")
+    return found
+
+
+def launch_problem(launch: dict[str, Any], environ: Mapping[str, str]) -> str | None:
+    """What a launch that skips permission prompts lacks of the sandbox: it must be on, with no fallback, and its
+    ``denyRead`` list must hold the operator's SSH keys, keychains and Claude and Looper directories."""
+    if "--dangerously-skip-permissions" not in launch["args"]:
+        return None
+    sandbox = (launch.get("settings") or {}).get("sandbox") or {}
+    for key, want in (("enabled", True), ("failIfUnavailable", True), ("allowUnsandboxedCommands", False)):
+        if sandbox.get(key) is not want:
+            return f"sandbox.{key} is not {want}"
+    denied = set((sandbox.get("filesystem") or {}).get("denyRead") or ())
+    home = Path(environ["HOME"])
+    required = [".ssh", "Library/Keychains", ".claude", ".claude.json", ".looper"]
+    paths = [(f"~/{name}", home / name) for name in required]
+    if environ.get("CLAUDE_CONFIG_DIR"):
+        paths.append(("CLAUDE_CONFIG_DIR", Path(environ["CLAUDE_CONFIG_DIR"]).expanduser()))
+    missing = [label for label, path in paths if os.path.realpath(path) not in denied]
+    return f"sandbox.filesystem.denyRead lacks {', '.join(missing)}" if missing else None
+
+
+def publishable(result: dict[str, Any]) -> dict[str, Any]:
+    """An operator-login report without free text: a reply, a command or an error under the operator's own
+    configuration can quote it. Check names and typed fields stay; the full rows stay in the local file."""
+    rows = []
+    for row in result["rows"]:
+        row = {key: value for key, value in row.items() if key != "observations"}
+        if "checks" in row:
+            row["checks"] = [{"name": c["name"], "ok": c["ok"]} for c in row["checks"]]
+        if "reason" in row and row["outcome"] not in (Outcome.NOT_RUNNABLE.value, Outcome.SKIPPED.value):
+            row["reason"] = str(row["reason"]).partition(":")[0] if row["outcome"] == "error" else row["outcome"]
+        rows.append(row)
+    aborted = result["aborted"]
+    return {**result, "rows": rows, "aborted": aborted.partition(":")[0] if aborted else aborted}
+
+
+def compare_runs(left: Path, right: Path) -> tuple[bool, str]:
+    """Two reports side by side, and whether their outcomes may be compared directly: not when one ran under the
+    operator's configuration and the other did not, when a recorded hash or CLI version differs or could not be
+    taken, or when the configuration changed during a run."""
+    reports = [json.loads(Path(path).read_text()) for path in (left, right)]
+    sections = [report.get("operator_login") for report in reports]
+    reasons = []
+    if any(sections) and not all(sections):
+        reasons.append("only one run used the operator's configuration")
+    elif all(sections):
+        for key in HASHED:
+            values = [section["config"].get(key) for section in sections]
+            if values[0] != values[1]:
+                reasons.append(f"{key} differs")
+            elif values[0] in (None, "unreadable"):
+                reasons.append(f"{key} could not be read")
+        if any(section["changed_during_run"] for section in sections):
+            reasons.append("the configuration changed during a run")
+    lines = ["not directly comparable: " + "; ".join(reasons) if reasons else "comparable"]
+    outcomes = [{(r["case"], r["rep"]): r["outcome"] for r in report["rows"]} for report in reports]
+    lines += [f"{case} #{rep}: {outcomes[0].get((case, rep), '-')} | {outcomes[1].get((case, rep), '-')}"
+              for case, rep in sorted(outcomes[0].keys() | outcomes[1].keys())]
+    return not reasons, "\n".join(lines) + "\n"
 
 
 # --- Budget ledger --------------------------------------------------------------------------------------------
@@ -233,6 +513,8 @@ class Run:
         self.seed: dict[str, Any] = {}
         self.turns: list[dict[str, Any]] = []
         self.restarts = 0
+        self.read_back = 0  # direct launches of turns that ran to their end
+        self._counted: set[str] = set()
 
     # fixture
 
@@ -464,6 +746,34 @@ class Run:
             "text": text, "target": {"kind": "task", "task_id": self.seed["task_id"]}, "message_id": message_id})
         return {"message_id": message_id, "correlation_id": answer["result"]["correlation_id"]}
 
+    def check_launches(self) -> dict[str, dict[str, Any]]:
+        """operator-login: every launch captured so far, by file name. A permission-skipping launch without the
+        sandbox, or a capture that cannot be read, raises ``LaunchRefused``."""
+        launches = {}
+        for path in sorted(self.capture.glob("launch-*.json")):
+            try:
+                launches[path.name] = launch = json.loads(path.read_text())
+                problem = launch_problem(launch, os.environ)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise LaunchRefused(f"a launch capture could not be read: {type(exc).__name__}") from None
+            if problem:
+                raise LaunchRefused(problem)
+        return launches
+
+    def verify_launches(self) -> int:
+        """operator-login, after each turn: Looper refused nothing (a readback mismatch ends a turn ``refused``) and
+        every launch that skips permission prompts carried the sandbox. Returns how many such launches belong to turns
+        that ran to their end: a ``failed`` turn's launch may never have been read back."""
+        final = self.turns[-1]["final"]
+        if final.get("outcome") == "refused":
+            raise LaunchRefused(f"the task Manager refused the turn: {final.get('text')}")
+        launches = self.check_launches()
+        new = launches.keys() - self._counted
+        self._counted |= new
+        if final.get("outcome") in ("success", "stopped"):
+            self.read_back += sum("--dangerously-skip-permissions" in launches[name]["args"] for name in new)
+        return self.read_back
+
     def case_cost(self) -> float:
         return sum(float(r["cost_usd"] or 0) for r in read_records(self.url))
 
@@ -546,17 +856,20 @@ def judge(data: dict[str, Any], case: Case) -> dict[str, Any]:
 
 
 def run_case(case: Case, rep: int, *, mode: str, behavior: str, admin_url: str, out_dir: Path,
-             claude_bin: str | None, credential: tuple[str, str] | None, budget: float) -> dict[str, Any]:
+             claude_bin: str | None, credential: tuple[str, str] | None, budget: float,
+             operator_login: bool = False) -> dict[str, Any]:
     out = out_dir / f"{case.id}-{rep}"
     out.mkdir(parents=True, exist_ok=True)
     row: dict[str, Any] = {"case": case.id, "rep": rep, "model": case.model, "outcome": Outcome.ERROR.value,
                            "cost_usd": 0.0}
     with tempfile.TemporaryDirectory(prefix="looper-tm-eval-") as tmp, fresh_database(admin_url) as (url, _):
         root = Path(tmp).resolve() / "case"
-        with isolated_environment(root, credential):
+        with isolated_environment(root, credential, operator_login=operator_login):
             run = Run(case, rep, mode=mode, behavior=behavior, url=url, root=root, out=out, claude_bin=claude_bin,
                       budget=budget)
             try:
+                if operator_login:
+                    check_billing(os.environ)  # again for each case: settings can change while the suite runs
                 run.build_files()
                 run.install()
                 run.start_server()
@@ -570,6 +883,8 @@ def run_case(case: Case, rep: int, *, mode: str, behavior: str, admin_url: str, 
                         run.act(action)
                     run.turns.append(run.send(turn, index))
                     row["cost_usd"] = run.case_cost()
+                    if operator_login:
+                        row["verified_direct_launches"] = run.verify_launches()
                     if mode == "real" and row["cost_usd"] >= budget and index + 1 < len(case.turns):
                         raise EvalError(f"case budget {budget:g} reached after turn {index + 1}")
                 evidence = collect(run)
@@ -578,6 +893,8 @@ def run_case(case: Case, rep: int, *, mode: str, behavior: str, admin_url: str, 
                 row["evidence"] = f"{case.id}-{rep}/evidence.json"
             except BaseException as exc:
                 row.update(outcome=Outcome.ERROR.value, reason=f"{type(exc).__name__}: {exc}")
+                if isinstance(exc, LaunchRefused):
+                    row["abort"] = "launch_refused"
                 try:
                     row["cost_usd"] = run.case_cost()
                     (out / "partial-evidence.json").write_text(json.dumps(
@@ -587,7 +904,16 @@ def run_case(case: Case, rep: int, *, mode: str, behavior: str, admin_url: str, 
                 if not isinstance(exc, Exception):
                     raise
             finally:
-                run.stop_server()
+                try:
+                    run.stop_server()
+                finally:
+                    # A turn that timed out or raised was not checked: check the launches however the case ended.
+                    if operator_login and "abort" not in row:
+                        try:
+                            run.check_launches()
+                        except LaunchRefused as exc:
+                            row.update(outcome=Outcome.ERROR.value, reason=f"LaunchRefused: {exc}",
+                                       abort="launch_refused")
     return row
 
 
@@ -650,7 +976,49 @@ def compare_inputs(left: Path, right: Path) -> tuple[bool, str]:
     return same, "".join(out)
 
 
+# --- Reservation and the read deny probe -----------------------------------------------------------------------------
+
+
+def repetitions(case: Case, reps: int | None) -> int:
+    """How often ``case`` runs: ``reps``, or where that is None (operator-login) what the case's definition says."""
+    return case.repetitions if reps is None else reps
+
+
+def reservation(selected: list[Case], reps: int | None, budgets: Mapping[str, float]) -> list[dict[str, Any]]:
+    """What running ``selected`` reserves on the ledger, per case: its model's per-run budget times the repetitions."""
+    return [{"case": case.id, "model": case.model, "reps": repetitions(case, reps), "unit_usd": budgets[case.model],
+             "subtotal_usd": round(budgets[case.model] * repetitions(case, reps), 6)} for case in selected]
+
+
+def reservation_table(rows: list[dict[str, Any]]) -> str:
+    lines = ["| case | model | repetitions | reserved per run (USD) | subtotal (USD) |", "|---|---|---|---|---|"]
+    lines += [f"| `{r['case']}` | {r['model']} | {r['reps']} | {r['unit_usd']:.2f} | {r['subtotal_usd']:.2f} |"
+              for r in rows]
+    lines.append(f"| total | | | | {sum(r['subtotal_usd'] for r in rows):.2f} |")
+    return "\n".join(lines) + "\n"
+
+
+def probe_deny_read(claude_bin: str) -> dict[str, Any]:
+    """``task_manager_deny_probe`` in the environment an operator-login case gets, after the billing check."""
+    with tempfile.TemporaryDirectory(prefix="looper-tm-probe-") as tmp:
+        root = Path(tmp).resolve() / "probe"
+        with isolated_environment(root, None, operator_login=True):
+            check_billing(os.environ)
+            return task_manager_deny_probe.run_probe(claude_bin, root=root)
+
+
 # --- Suite -------------------------------------------------------------------------------------------------------
+
+
+def operator_stages(plan: list[Case]) -> tuple[list[list[Case]], list[Case]]:
+    """operator-login: ``plan`` as the stages that run in order (Opus, the other non-hostile cases, the hostile
+    cases; direct launches first within the non-hostile ones) and the re-run list that follows them. A stage starts
+    only when everything before it passed."""
+    main = [c for c in plan if not c.rerun_only]
+    first = sorted((c for c in main if not c.hostile), key=lambda c: not c.direct)
+    stages = [[c for c in first if c.model == cases.OPUS], [c for c in first if c.model != cases.OPUS],
+              [c for c in main if c.hostile]]
+    return stages, [c for c in plan if c.rerun_only]
 
 
 def tool_names() -> set[str]:
@@ -678,12 +1046,13 @@ def check_real_claude(claude_bin: str | None) -> str:
     return str(Path(claude_bin).resolve())
 
 
-def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] | None = None, reps: int = 1,
+def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] | None = None,
+              reps: int | None = None,
               behavior: str = "ok", claude_bin: str | None = None, credential_choice: str | None = None,
               total_cap_usd: float | None = None, case_budget_usd: float | None = None,
               opus_case_budget_usd: float | None = None, opus_cap_usd: float = 6.0, ledger_path: Path | None = None,
               dump_dir: Path | None = None) -> tuple[dict[str, Any], Path]:
-    if mode not in ("fake", "real") or reps < 1 or behavior not in ("ok", "bad", "lie"):
+    if mode not in ("fake", "real") or (reps is not None and reps < 1) or behavior not in ("ok", "bad", "lie"):
         raise EvalError("mode must be fake/real, behavior ok/bad/lie and reps positive")
     if mode == "real" and behavior != "ok":
         raise EvalError("the scripted bad and lie behaviors are fake-mode controls")
@@ -693,26 +1062,70 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
     out_dir = Path(out_dir).resolve()
     if mode == "real" and out_dir.is_relative_to(REPO_ROOT):
         raise EvalError("real mode artifacts must be outside the repository; set --out-dir")
+    operator_login = credential_choice == OPERATOR_LOGIN
+    if not operator_login:
+        reps = 1 if reps is None else reps
+    elif reps is not None:
+        raise EvalError("operator-login takes each case's repetitions from its definition: drop --reps")
+    if operator_login:
+        if behavior != "ok":
+            raise EvalError("the scripted bad and lie behaviors run commands unsandboxed: not with operator-login")
+        if out_dir.is_relative_to(REPO_ROOT) and not out_dir.is_relative_to(DEFAULT_OUT_DIR):
+            raise EvalError("operator-login artifacts need an ignored local directory (evals/runs, or outside the "
+                            "repository); set --out-dir")
+        if dump_dir is not None:  # a dump holds this machine's paths
+            dump = Path(dump_dir).resolve()
+            if dump.is_relative_to(REPO_ROOT) and not dump.is_relative_to(DEFAULT_OUT_DIR):
+                raise EvalError("operator-login input dumps need an ignored local directory (evals/runs, or outside "
+                                "the repository); set --dump-inputs")
+        check_billing(os.environ)  # before any CLI start
+        # Every direct launch needs the command, and without it the shipped edit arms would only be not_runnable.
+        if mode == "real" and not cases.edit_command_installed():
+            raise EvalError(f"looper-edit is not installed next to {sys.executable}, where a direct session finds it; "
+                            "reinstall Looper in this environment. Nothing was started.")
     out_dir.mkdir(parents=True, exist_ok=True)
     runnable = [(c, cases.blocker(c, tool_names())) for c in selected]
+    if operator_login:
+        runnable = [(c, why or ((cases.Blocker.NEEDS_SYNTHETIC_HOME,
+                                 "not runnable with operator-login: it is not declared safe on a real HOME, where its "
+                                 "files would sit among real credentials")
+                                if c.needs_synthetic_home else None)) for c, why in runnable]
     plan = [c for c, why in runnable if why is None]
+    stages, rerun = [plan], []
+    if operator_login:
+        stages, rerun = operator_stages(plan)
+        if stages[-1] and not any(c.direct for stage in stages[:-1] for c in stage):
+            raise EvalError("operator-login runs a hostile case only after a non-hostile case with a direct launch "
+                            "has passed: select one too (direct_edit_brief, for example)")
+        if rerun and not any(stages):
+            raise EvalError("the re-run list runs only after other cases passed: select those too")
+    main_cases = [c for stage in stages for c in stage]
     credential = None
     ledger = None
     budgets = ({cases.SONNET: case_budget_usd, cases.OPUS: opus_case_budget_usd} if mode == "real"
                else {cases.SONNET: 1.25, cases.OPUS: 3.0})  # fake costs are fractions of a cent; the judge still checks
     if mode == "real":
         credential = resolve_credential(credential_choice)
-        claude_bin = check_real_claude(claude_bin)
+        if operator_login and total_cap_usd is None:
+            total_cap_usd = OPERATOR_TOTAL_CAP_USD
         total = positive("--total-cap-usd", total_cap_usd)
         for model in {c.model for c in plan}:
             positive("--case-budget-usd" if model == cases.SONNET else "--opus-case-budget-usd", budgets[model])
         ledger = Ledger(ledger_path or out_dir / "ledger.jsonl", total_cap=total, opus_cap=opus_cap_usd)
-        reserve = sum(budgets[c.model] * reps for c in plan)
+        # Made before any CLI starts, for everything but the re-run list: each of its runs reserves at its own start.
+        reserved = reservation(main_cases, reps, budgets)
+        reserve = sum(row["subtotal_usd"] for row in reserved)
         if ledger.spent() + reserve > total:
             raise BudgetRefusal(f"the selected runs reserve {reserve:g} on top of {ledger.spent():.4f} already spent, "
                                 f"over --total-cap-usd {total:g}")
-        if sum(budgets[cases.OPUS] * reps for c in plan if c.model == cases.OPUS) + ledger.spent(cases.OPUS) > opus_cap_usd:
+        opus = sum(row["subtotal_usd"] for row in reserved if row["model"] == cases.OPUS)
+        if opus + ledger.spent(cases.OPUS) > opus_cap_usd:
             raise BudgetRefusal(f"the Opus runs exceed the Opus cap {opus_cap_usd:g}")
+        claude_bin = check_real_claude(claude_bin)
+        later = (f"re-run list, not reserved now (each run reserves at its own start and is skipped when it does not "
+                 f"fit under the cap):\n{reservation_table(reservation(rerun, reps, budgets))}" if rerun else "")
+        print(f"reserved by this run:\n{reservation_table(reserved)}{later}already spent on the ledger: "
+              f"{ledger.spent():.2f}; --total-cap-usd {total:g}", file=sys.stderr, flush=True)
     rows: list[dict[str, Any]] = []
     for case, why in runnable:
         if why is not None:
@@ -723,36 +1136,103 @@ def run_suite(*, mode: str, admin_url: str, out_dir: Path, selected: list[Case] 
     if dumps:
         dumps.mkdir(parents=True, exist_ok=True)
 
+    operator: dict[str, Any] | None = None
+    if operator_login:
+        # check_real_claude admitted only the verified version
+        version = (task_manager_safety.VERIFIED_CLI_VERSION if mode == "real"
+                   else f"fake {task_manager_cli.VERSION}")
+        operator = {"note": OPERATOR_NOTE, "config": config_fingerprint(os.environ, version),
+                    "changed_during_run": False, "first_cases": [c.id for stage in stages[:-1] for c in stage],
+                    "hostile_cases": [c.id for c in stages[-1]], "rerun_cases": [c.id for c in rerun],
+                    "transcripts": TRANSCRIPT_NOTE, "not_covered": not_covered(os.environ),
+                    "reservation": reservation(main_cases, reps, budgets) if mode == "real" else None,
+                    "deny_read_probe": {"status": "not_run", "reason": "fake mode starts no real CLI"}}
+
     def checkpoint(done: bool, aborted: str | None = None) -> dict[str, Any]:
         result = summarize(rows, mode=mode, behavior=behavior, reps=reps, aborted=aborted, done=done,
                            ledger=ledger, total_cap=total_cap_usd)
-        path.write_text(json.dumps(result, indent=2, default=str) + "\n")
-        return result
+        if operator is None:
+            path.write_text(json.dumps(result, indent=2, default=str) + "\n")
+            return result
+        now = config_fingerprint(os.environ, operator["config"]["cli_version"])
+        operator["changed_during_run"] |= now != operator["config"]
+        result["operator_login"] = operator
+        (out_dir / "task-manager-eval.local.json").write_text(json.dumps(result, indent=2, default=str) + "\n")
+        temp = Path(tempfile.gettempdir())
+        return write_result(json.loads(json.dumps(publishable(result), default=str)), path,
+                            roots=(out_dir, REPO_ROOT, temp.resolve(), temp), rows="rows")
 
     checkpoint(False)
     try:
-        for rep in range(1, reps + 1):
-            for case in plan:
-                budget = budgets[case.model] or 0.0
-                reservation = ledger.reserve(case.id, rep, case.model, budget) if ledger is not None else None
-                try:
-                    row = run_case(case, rep, mode=mode, behavior=behavior, admin_url=admin_url, out_dir=out_dir,
-                                   claude_bin=claude_bin, credential=credential, budget=budget)
-                except BaseException:
+        if operator is not None and mode == "real" and plan:  # stage 0: no model is called
+            operator["deny_read_probe"] = probe = probe_deny_read(claude_bin)
+            if probe["status"] != task_manager_deny_probe.Status.PASS.value:
+                reason = f"held back: the read deny probe answered {probe['status']}"
+                rows.extend({"case": c.id, "rep": 0, "model": c.model, "outcome": Outcome.NOT_RUNNABLE.value,
+                             "blocker": cases.Blocker.DENY_READ_PROBE.value, "reason": reason, "cost_usd": 0.0}
+                            for c in plan)
+                return checkpoint(True, f"deny_read_probe {probe['status']}"), path
+        # The re-run list is the last stage: by then, the stages before it are "everything else".
+        order = [*stages, rerun]
+        for stage, members in enumerate(order):
+            last = operator_login and stage == len(stages)
+            earlier = [c for done in order[:stage] for c in done]
+            if operator_login and members and earlier and (
+                    held := gate_problem(rows, earlier, read_back=any(c.hostile for c in members))):
+                rows.extend(not_started(c, cases.Blocker.STAGE_GATE, held, Outcome.SKIPPED if c in rerun
+                                        else Outcome.NOT_RUNNABLE) for done in order[stage:] for c in done)
+                break
+            for rep in range(1, max((repetitions(c, reps) for c in members), default=0) + 1):
+                for case in members:
+                    if rep > repetitions(case, reps):
+                        continue
+                    budget = budgets[case.model] or 0.0
+                    try:
+                        run_id = ledger.reserve(case.id, rep, case.model, budget) if ledger is not None else None
+                    except BudgetRefusal as exc:
+                        if not last:
+                            raise
+                        rows.append(not_started(case, cases.Blocker.OVER_CAP, str(exc), Outcome.SKIPPED))
+                        checkpoint(False)
+                        continue
+                    try:
+                        row = run_case(case, rep, mode=mode, behavior=behavior, admin_url=admin_url, out_dir=out_dir,
+                                       claude_bin=claude_bin, credential=credential, budget=budget,
+                                       operator_login=operator_login)
+                    except BaseException:
+                        if ledger is not None:
+                            ledger.settle(run_id, 0.0, "interrupted")  # keeps the whole reservation
+                        raise
+                    rows.append(row)
                     if ledger is not None:
-                        ledger.settle(reservation, 0.0, "interrupted")  # keeps the whole reservation
-                    raise
-                rows.append(row)
-                if ledger is not None:
-                    ledger.settle(reservation, row["cost_usd"], row["outcome"])
-                if dumps and (out_dir / f"{case.id}-{rep}" / "evidence.json").exists() and rep == 1:
-                    data = json.loads((out_dir / f"{case.id}-{rep}" / "evidence.json").read_text())
-                    dump_inputs(data, dumps, data["seed"].get("root", ""))
-                checkpoint(False)
+                        ledger.settle(run_id, row["cost_usd"], row["outcome"])
+                    if dumps and (out_dir / f"{case.id}-{rep}" / "evidence.json").exists() and rep == 1:
+                        data = json.loads((out_dir / f"{case.id}-{rep}" / "evidence.json").read_text())
+                        dump_inputs(data, dumps, data["seed"].get("root", ""))
+                    if row.get("abort"):
+                        return checkpoint(True, f"{row['abort']} in {case.id}"), path
+                    checkpoint(False)
     except BaseException as exc:
         checkpoint(True, f"{type(exc).__name__}: {exc}")
         raise
     return checkpoint(True), path
+
+
+def not_started(case: Case, blocker: cases.Blocker, reason: str, outcome: Outcome) -> dict[str, Any]:
+    return {"case": case.id, "rep": 0, "model": case.model, "outcome": outcome.value, "blocker": blocker.value,
+            "reason": reason, "cost_usd": 0.0}
+
+
+def gate_problem(rows: list[dict[str, Any]], earlier: list[Case], *, read_back: bool) -> str | None:
+    """Why the next stage may not start: every run of every earlier case passed and, where ``read_back`` (before the
+    hostile cases), at least one of them launched a direct session that read back as injected."""
+    ids = {case.id for case in earlier}
+    ran = [row for row in rows if row["case"] in ids and row["rep"]]
+    if failed := sorted({row["case"] for row in ran if row["outcome"] != Outcome.PASS.value}):
+        return f"held back: the earlier cases did not all pass ({', '.join(failed)})"
+    if read_back and not any(row.get("verified_direct_launches") for row in ran):
+        return "held back: no direct launch was read back in the non-hostile cases"
+    return None
 
 
 def build_info() -> dict[str, Any]:
@@ -767,7 +1247,8 @@ def build_info() -> dict[str, Any]:
             "looper_file": looper.__file__}
 
 
-def summarize(rows: list[dict[str, Any]], *, mode: str, behavior: str, reps: int, aborted: str | None, done: bool,
+def summarize(rows: list[dict[str, Any]], *, mode: str, behavior: str, reps: int | None, aborted: str | None,
+              done: bool,
               ledger: Ledger | None, total_cap: float | None) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for row in rows:
@@ -776,7 +1257,7 @@ def summarize(rows: list[dict[str, Any]], *, mode: str, behavior: str, reps: int
         overall = "incomplete"
     elif counts.get("fail"):
         overall = "fail"
-    elif counts.get("unparsed") or counts.get("error") or counts.get("not_runnable"):
+    elif any(counts.get(name) for name in ("unparsed", "error", "not_runnable", "skipped")):
         overall = "incomplete"  # never a pass while any case was not judged
     else:
         overall = "pass"
@@ -793,12 +1274,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--mode", choices=["fake", "real"], default="fake")
     parser.add_argument("--pg-url", help="disposable PostgreSQL server admin URL")
     parser.add_argument("--cases", help="comma-separated case ids (default: all)")
-    parser.add_argument("--reps", type=int, default=1)
+    parser.add_argument("--reps", type=int, help="default 1; refused with operator-login, whose cases say how often "
+                                                  "they run")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR / "task-manager")
     parser.add_argument("--claude-bin", help="real mode: the real Claude Code executable")
-    parser.add_argument("--credential", choices=sorted(CREDENTIAL_ENV),
-                        help="real mode: oauth reads CLAUDE_CODE_OAUTH_TOKEN, api-key reads ANTHROPIC_API_KEY")
-    parser.add_argument("--total-cap-usd", type=float)
+    parser.add_argument("--credential", choices=CREDENTIAL_CHOICES,
+                        help="real mode: oauth reads CLAUDE_CODE_OAUTH_TOKEN, api-key reads ANTHROPIC_API_KEY, "
+                             "operator-login uses the CLI's own login under your HOME and configuration (also "
+                             "rehearsable in fake mode)")
+    parser.add_argument("--total-cap-usd", type=float,
+                        help=f"real mode: required, except with operator-login (default {OPERATOR_TOTAL_CAP_USD})")
     parser.add_argument("--case-budget-usd", type=float, help="real mode: the most one Sonnet case run may spend")
     parser.add_argument("--opus-case-budget-usd", type=float, help="real mode: the most the Opus case may spend")
     parser.add_argument("--opus-cap-usd", type=float, default=6.0, help="real mode: all Opus spend, ledger included")
@@ -811,12 +1296,28 @@ def main(argv: list[str] | None = None) -> None:
                              "first message, launch arguments) to DIR")
     parser.add_argument("--compare-inputs", nargs=2, type=Path, metavar=("DIR_A", "DIR_B"),
                         help="compare two input dumps; exit 1 on any difference")
+    parser.add_argument("--compare-runs", nargs=2, type=Path, metavar=("REPORT_A", "REPORT_B"),
+                        help="compare two task-manager-eval.json reports; exit 1 when not directly comparable")
+    parser.add_argument("--probe-deny-read", action="store_true",
+                        help="free: have the real --claude-bin, under your HOME and configuration and against a local "
+                             "scripted server, try to read every path on this shell's read deny list; exit 0 only on "
+                             "PASS. The verdict is the in-sandbox markers and controls; a directory's mtime and "
+                             "entry count are an auxiliary signal")
     args = parser.parse_args(argv)
     try:
+        if args.compare_runs:
+            comparable, text = compare_runs(*args.compare_runs)
+            sys.stdout.write(text)
+            raise SystemExit(0 if comparable else 1)
         if args.compare_inputs:
             same, text = compare_inputs(*args.compare_inputs)
             sys.stdout.write(text or "identical\n")
             raise SystemExit(0 if same else 1)
+        if args.probe_deny_read:
+            check_billing(os.environ)  # before any CLI start, the version check included
+            report = probe_deny_read(check_real_claude(args.claude_bin))
+            print(json.dumps(report, indent=2))
+            raise SystemExit(0 if report["status"] == task_manager_deny_probe.Status.PASS.value else 1)
         if not args.pg_url:
             raise EvalError("--pg-url is required")
         mode = "fake" if args.dump_inputs else args.mode
