@@ -1,7 +1,6 @@
 """``git_safe`` refuses a repository whose ref storage holds a symbolic link.
 
-git follows such a link, so a command Looper runs outside any sandbox could read from, or write to, a place outside the
-repository. Every row of the table puts one link into an otherwise ordinary repository.
+Every row of the table puts one link into an otherwise ordinary repository.
 """
 
 from __future__ import annotations
@@ -283,7 +282,7 @@ def _tree(root: Path) -> dict[str, bytes | None]:
             for path in sorted(root.rglob("*"))}
 
 
-# The linked directory, and the writing command that would reach through it.
+# The linked directory, and a writing command.
 WRITES = [
     ("refs/heads/sub", ("update-ref", "refs/heads/sub/new", "HEAD")),
     ("refs/heads/sub", ("branch", "-D", "sub/old")),
@@ -297,7 +296,7 @@ WRITES = [
 
 
 @pytest.mark.parametrize("place, command", WRITES)
-def test_a_write_through_a_linked_directory_is_refused_and_outside_is_unchanged(repo, tmp_path, place, command):
+def test_a_writing_command_is_refused_and_leaves_the_linked_place_unchanged(repo, tmp_path, place, command):
     head = plain(repo, "rev-parse", "HEAD")
     outside = tmp_path / "outside"
     linked = repo / ".git" / place
@@ -315,5 +314,5 @@ def test_a_write_through_a_linked_directory_is_refused_and_outside_is_unchanged(
         safe(repo, *args)
     assert refused.value.reason == "ref_symlink"
     assert _tree(outside) == before and not (tmp_path / "added").exists()
-    plain(repo, *args)  # positive control: plain git writes or deletes outside the repository
+    plain(repo, *args)  # positive control: the command does write there
     assert _tree(outside) != before
